@@ -8,7 +8,8 @@ import { AppShell, Page, Topbar, VaultHeader, closeSidebarOnMobile } from "../co
 import { OrgAdmin } from "../components/OrgAdmin";
 import { HubSettings } from "../components/HubSettings";
 import { ProjectNav } from "../components/ProjectNav";
-import { AccountBar } from "../components/AccountBar";
+import { useQueryClient } from "@tanstack/react-query";
+import { AccountBar, SignedOutBar } from "../components/AccountBar";
 import { BillingView } from "../components/BillingView";
 import { ProjectSettings } from "../components/ProjectSettings";
 import { ConnectGuide } from "../components/ConnectGuide";
@@ -139,12 +140,25 @@ export default function HubApp({ config }: { config: ServerConfig }) {
     />
   );
 
+  // Desktop app: session changes go through the sidecar (which runs the same
+  // flows as `bdrive login`/`logout`), then the config query is refetched so
+  // this bar tracks the new state without a reload. Sign-in resolves only
+  // when the user finishes in the system browser, hence the toast first.
+  const qc = useQueryClient();
+  const desktopAuth = (path: string, waitMsg?: string) => {
+    if (waitMsg) toast(waitMsg);
+    void fetch(path, { method: "POST", headers: { "X-Bdrive-Desktop": "1" } })
+      .catch(() => {})
+      .finally(() => qc.invalidateQueries({ queryKey: ["config"] }));
+  };
+
   const accountBar = config.me ? (
     <AccountBar
       me={config.me}
       org={org}
       orgActive={!!route.org}
       billing={config.billing}
+      signOut={config.desktop ? () => desktopAuth("/api/desktop/logout") : undefined}
       admin={
         isAdmin
           ? {
@@ -157,6 +171,8 @@ export default function HubApp({ config }: { config: ServerConfig }) {
           : undefined
       }
     />
+  ) : config.desktop ? (
+    <SignedOutBar onSignIn={() => desktopAuth("/api/desktop/login", "Finish signing in in your browser…")} />
   ) : undefined;
 
   if (!projects || !orgs) {

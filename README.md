@@ -264,6 +264,7 @@ hub's own storage, never something a syncing client points at directly:
 | `bdrive export [folder]` | Export the whole project — every device's journal, all blobs, full history — from its hub to a portable `.tar.gz` (`-o` names the file) |
 | `bdrive import <archive>` | Import an export archive as a new project on the hub you're logged into (always a NEW project; `--name` overrides the archive's); history and authorship carry over. Refuses an archive whose journals reference content it doesn't hold (`--allow-incomplete` overrides). Move projects between hubs — cloud → self-hosted or back — with `export` + `login` + `import` |
 | `bdrive serve [folder \| storage-root-url]` | Web server: viewer (rendered markdown, downloads, history), uploads, multi-project sync hub (`bdrive web` is a deprecated alias) |
+| `bdrive desktop` | (hidden; spawned by the BearDrive Desktop app) Loopback-only, read-only web viewer over this machine's own mounts: browsing and history come from the local volume stores, read heat is proxied to each project's hub |
 | `bdrive whoami` | Signed-in account and device identity used in change tracking |
 | `bdrive version` | Print the version (also `bdrive --version`) |
 

@@ -39,12 +39,15 @@ export function AccountBar({
   admin,
   orgActive,
   billing,
+  signOut,
 }: {
   me: { email: string; name: string };
   org: Org | null;
   admin?: { pending: number; onClick: () => void }; // hub admins only
   orgActive?: boolean; // the org page is the open surface
   billing?: { plan: string; url: string }; // managed deployments only
+  // Desktop app: sign-out is a sidecar call, not the hub's /auth/logout page.
+  signOut?: () => void;
 }) {
   const display = me.name || me.email;
   // The menu's open state is ours because the org entry is a link: linkProps
@@ -138,14 +141,44 @@ export function AccountBar({
             </>
           )}
           <DropdownMenuLabel className="menu-sec">Account</DropdownMenuLabel>
-          <DropdownMenuItem asChild>
-            <a id="signout" href="/auth/logout">
+          {signOut ? (
+            <DropdownMenuItem id="signout" onSelect={signOut}>
               <Icon name="power" />
-              <span>Log out</span>
-            </a>
-          </DropdownMenuItem>
+              <span>Sign out</span>
+            </DropdownMenuItem>
+          ) : (
+            <DropdownMenuItem asChild>
+              <a id="signout" href="/auth/logout">
+                <Icon name="power" />
+                <span>Log out</span>
+              </a>
+            </DropdownMenuItem>
+          )}
         </DropdownMenuContent>
       </DropdownMenu>
+    </footer>
+  );
+}
+
+// SignedOutBar is the desktop app's sidebar footer while no device sign-in
+// exists: same GitHub row, and the account slot becomes the sign-in action
+// (which opens the hub's login page in the system browser via the sidecar).
+export function SignedOutBar({ onSignIn }: { onSignIn: () => void }) {
+  return (
+    <footer id="accountbar">
+      <a className="gh-star" href={REPO_URL} target="_blank" rel="noreferrer">
+        <GithubMark />
+        <span>Star on GitHub</span>
+        <span className="ext" aria-hidden="true">↗</span>
+        <span className="sr-only"> (opens in a new tab)</span>
+      </a>
+      <button id="account-btn" onClick={onSignIn} aria-label="Sign in">
+        <span className="avatar" style={{ background: "var(--hover)" }} aria-hidden="true">?</span>
+        <span className="acct">
+          <b>Sign in…</b>
+          <small>connect to your hub</small>
+        </span>
+      </button>
     </footer>
   );
 }

@@ -210,8 +210,11 @@ export default function Browser(props: {
 
   const panel = props.panel ?? null;
   // Minting a public link is a write. A read-only member sees no Share
-  // button rather than a button that 403s.
-  const canShare = !panel && hub && !!project && isFile && atLeast(project.perm, "write");
+  // button rather than a button that 403s. On desktop every project reads
+  // as perm "read" (the local sidecar never writes), but shares are proxied
+  // to the hub, which enforces the caller's real permission — so the button
+  // shows and a genuinely read-only member gets the hub's 403 as a toast.
+  const canShare = !panel && hub && !!project && isFile && (config.desktop || atLeast(project.perm, "write"));
   // The project's live public links, filtered to the open file. One query
   // for the whole project (Settings reads the same cache entry), so opening
   // a file costs no extra request.
@@ -221,6 +224,22 @@ export default function Browser(props: {
     [qc, project?.id],
   );
   const fileShares = isFile ? (shares || []).filter((s) => s.path === path) : [];
+  // Desktop only: each mount's hub base URL, for "Copy web link". Hub and
+  // desktop use identical route paths (projects are keyed by hub id), so the
+  // teammate-shareable URL is just the hub origin + the current pathname.
+  const { data: desktopStatus } = useQuery({
+    queryKey: ["desktop-status"],
+    queryFn: () => getJSON<{ mounts: { project: string; server: string }[] }>("/api/desktop/status"),
+    enabled: !!config.desktop,
+    staleTime: 60_000,
+  });
+  const webBase = config.desktop && project ? desktopStatus?.mounts.find((m) => m.project === project.id)?.server : undefined;
+  const copyWebLink = useCallback(async () => {
+    if (!webBase) return;
+    const url = webBase + window.location.pathname;
+    const copied = await copyText(url);
+    toast(copied ? "Web link copied" : url, !copied);
+  }, [webBase]);
   const canHistory = !panel && hub && !!project;
   // Browser upload is deliberately absent (for now): content enters through
   // local sync only; the web app is a read/share/history surface.
@@ -576,6 +595,20 @@ export default function Browser(props: {
 
   const topbar = (
     <Topbar
+      // The desktop window has no browser chrome, so back/forward live here
+      // (the app menu's ⌘[ / ⌘] drive the same history).
+      nav={
+        config.desktop ? (
+          <span id="nav-btns">
+            <button className="nav-btn" title="Back (⌘[)" aria-label="Back" onClick={() => history.back()}>
+              <Icon name="chevl" />
+            </button>
+            <button className="nav-btn" title="Forward (⌘])" aria-label="Forward" onClick={() => history.forward()}>
+              <Icon name="chev" />
+            </button>
+          </span>
+        ) : undefined
+      }
       crumb={crumb}
       meta={meta}
       actions={
@@ -620,6 +653,11 @@ export default function Browser(props: {
               {canDownload && (
                 <button className="more-item" onClick={() => downloadRef.current?.click()}>
                   Download
+                </button>
+              )}
+              {webBase && (
+                <button className="more-item" onClick={copyWebLink}>
+                  Copy web link
                 </button>
               )}
               {hub && !!project && (

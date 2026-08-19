@@ -16,6 +16,12 @@ export interface ServerConfig {
     admin?: boolean;
   };
   reads: { enabled: boolean };
+  // The BearDrive Desktop sidecar (`bdrive desktop`): a loopback server over
+  // this machine's own mounts. Projects report perm "read" (local state is
+  // never written through the viewer), but hub-backed surfaces — heat,
+  // share links — are proxied to the hub, which enforces the real
+  // permission, so desktop-aware gates key off this instead of perm.
+  desktop?: boolean;
   // Starting structures a new project can be created from (internal/templates,
   // go:embed'ed into the server). Served rather than hardcoded here so a hub
   // shipping another one needs no frontend change.
