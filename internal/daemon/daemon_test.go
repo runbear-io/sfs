@@ -2,9 +2,13 @@ package daemon
 
 import (
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // A pidfile outlives the process that wrote it — it sits in ~/.bdrive, which
@@ -111,5 +115,74 @@ func writePid(t *testing.T, vdir string, pid int) {
 	if err := os.WriteFile(filepath.Join(vdir, "daemon.pid"),
 		[]byte(strconv.Itoa(pid)+"\n"), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestHelperLegacyDaemon is not a test: re-invoked by
+// TestStopRecoversLegacyDaemon it plays a daemon from before the pid moved
+// into the lock — holds the flock with nothing written inside it, announces
+// itself only via daemon.pid, and exits (releasing the flock) on SIGTERM. Its
+// argv carries "daemon run" so Stop's command-line check recognizes it.
+func TestHelperLegacyDaemon(t *testing.T) {
+	vdir := os.Getenv("BDRIVE_TEST_LEGACY_VDIR")
+	if vdir == "" {
+		return
+	}
+	f, err := os.OpenFile(LockPath(vdir), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		os.Exit(1)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		os.Exit(1)
+	}
+	if err := os.WriteFile(PidPath(vdir), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+		os.Exit(1)
+	}
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGTERM)
+	select {
+	case <-ch:
+		os.Exit(0) // the kernel releases the flock with us
+	case <-time.After(30 * time.Second):
+		os.Exit(1)
+	}
+}
+
+// A pre-upgrade daemon — flock held, lock file empty, pid only in daemon.pid —
+// must still be stoppable: refusing made every pre-upgrade mount unstoppable
+// short of kill-by-hand. The fallback is gated on the pidfile's process
+// verifiably looking like a bdrive daemon (see the sec test for the negative:
+// an arbitrary process named by daemon.pid is never signalled).
+func TestStopRecoversLegacyDaemon(t *testing.T) {
+	vdir := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=TestHelperLegacyDaemon", "daemon", "run")
+	cmd.Env = append(os.Environ(), "BDRIVE_TEST_LEGACY_VDIR="+vdir)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan struct{})
+	go func() { cmd.Wait(); close(exited) }()
+	defer func() {
+		cmd.Process.Kill()
+		<-exited
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, ok := Running(vdir); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("helper daemon never took the lock")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	stopped, err := Stop(vdir)
+	if err != nil || !stopped {
+		t.Fatalf("Stop = (%v, %v), want (true, nil) for a legacy daemon", stopped, err)
+	}
+	if _, ok := Running(vdir); ok {
+		t.Fatal("legacy daemon still holds the lock after Stop")
 	}
 }

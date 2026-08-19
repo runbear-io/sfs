@@ -281,9 +281,24 @@ func Stop(volDir string) (bool, error) {
 		os.Remove(PidPath(volDir))
 		return false, nil
 	}
+	legacy := false
 	if pid <= 0 {
-		return false, fmt.Errorf("a daemon holds %s but it announced no pid; kill it by hand",
-			LockPath(volDir))
+		// A held lock whose file names no pid is a daemon from before the pid
+		// moved into the lock — it wrote daemon.pid instead, and telling its
+		// user "kill it by hand" made every pre-upgrade mount unstoppable.
+		// daemon.pid alone is never a license to signal (recycled pids, and a
+		// number in a file the holder never wrote — see the sec test), so the
+		// fallback signals only a process that VERIFIABLY looks like a bdrive
+		// daemon: the pidfile's process must be alive and its command line
+		// must say `daemon run`. SIGTERM only, below — no SIGKILL escalation
+		// on a pre-invariant number.
+		data, rerr := os.ReadFile(PidPath(volDir))
+		p, perr := strconv.Atoi(strings.TrimSpace(string(data)))
+		if rerr != nil || perr != nil || p <= 0 || !strings.Contains(cmdline(p), "daemon run") {
+			return false, fmt.Errorf("a daemon holds %s but it announced no pid; kill it by hand",
+				LockPath(volDir))
+		}
+		pid, legacy = p, true
 	}
 	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
 		return false, err
@@ -296,9 +311,26 @@ func Stop(volDir string) (bool, error) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	if legacy {
+		return false, fmt.Errorf("daemon (pid %d) did not exit after SIGTERM; kill it by hand", pid)
+	}
 	syscall.Kill(pid, syscall.SIGKILL)
 	os.Remove(PidPath(volDir))
 	return true, nil
+}
+
+// cmdline reports a process's command line, or "" when it cannot be known —
+// /proc on Linux, ps everywhere else. Used only to recognize a legacy daemon
+// before signalling it; "" fails closed.
+func cmdline(pid int) string {
+	if data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); err == nil {
+		return strings.ReplaceAll(string(data), "\x00", " ")
+	}
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+	if err != nil {
+		return ""
+	}
+	return string(out)
 }
 
 // Run is the daemon main loop, executed in the foreground of the (usually
