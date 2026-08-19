@@ -43,6 +43,7 @@ import (
 
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/remote"
+	"github.com/runbear-io/beardrive/internal/secrets"
 	"github.com/runbear-io/beardrive/internal/templates"
 )
 
@@ -884,6 +885,9 @@ func (s *Server) Handler() http.Handler {
 	// writes to that same journal, so it lives here too.
 	mux.HandleFunc("POST /api/p/{project}/restore", proj(PermWrite, s.handleRestore))
 	mux.HandleFunc("POST /api/p/{project}/remove", proj(PermWrite, s.handleRemove))
+	// The run-wide form of the two above: one journal write that puts every
+	// path an agent run touched back where it was.
+	mux.HandleFunc("POST /api/p/{project}/undo-run", proj(PermWrite, s.handleUndoRun))
 	mux.HandleFunc("GET /api/p/{project}/heat", proj(PermRead, s.handleHeat))
 	mux.HandleFunc("POST /api/p/{project}/reads", proj(PermRead, s.handleReadReport))
 	mux.HandleFunc("POST /api/p/{project}/shares", proj(PermWrite, s.handleShareCreate))
@@ -915,8 +919,9 @@ func (s *Server) Handler() http.Handler {
 
 // frontend serves the embedded single-page app. Real asset files (app.js,
 // style.css) are served directly; every other GET that isn't an API, auth,
-// or share route returns index.html, so client-side routes like
-// /<project-id>/<path> and /join/<token> survive a deep link or refresh.
+// or share route — or, on a hub, a root-level path shaped like a file —
+// returns index.html, so client-side routes like /<project-id>/<path> and
+// /join/<token> survive a deep link or refresh.
 func (s *Server) frontend(static fs.FS) http.HandlerFunc {
 	files := http.FileServerFS(static)
 	index, _ := fs.ReadFile(static, "index.html")
@@ -978,6 +983,21 @@ func (s *Server) frontend(static fs.FS) http.HandlerFunc {
 					return
 				}
 			}
+		}
+		// No embedded asset matched, so a root-level dotted path is a request
+		// for a file that does not exist, not a client route: in hub mode the
+		// first segment is a project id (projectIDRe: UUID or p-xxxxxxxx) or a
+		// reserved word (orgs/, billing/, join/), none of which contain a dot.
+		// Answering the shell made /llms.txt, /robots.txt and every mistyped
+		// root file look like they exist — a soft 200 of login HTML to any
+		// crawler probing a conventional path. Deeper dots (/<id>/notes/a.md)
+		// are real client routes and untouched. index.html is excluded because
+		// the asset block above skips it deliberately and it must keep
+		// answering the shell.
+		if s.Root != nil && upath != "index.html" &&
+			!strings.Contains(upath, "/") && strings.Contains(upath, ".") {
+			http.NotFound(w, r)
+			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write(index)
@@ -1414,7 +1434,7 @@ func (s *Server) handleRender(v *volume, w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	html, err := RenderMarkdown(src)
+	pairs, html, err := RenderMarkdownPairs(src)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("render: %v", err), http.StatusInternalServerError)
 		return
@@ -1422,6 +1442,12 @@ func (s *Server) handleRender(v *volume, w http.ResponseWriter, r *http.Request)
 	doc := map[string]any{
 		"path": p, "html": html,
 		"size": fi.Size, "time": fi.Time, "author": fi.Author, "device": fi.Device,
+	}
+	// Frontmatter travels as data, not as a table baked into html — the
+	// viewer lays it out in a side panel. Omitted when the document has
+	// none, so the client shows no panel rather than an empty one.
+	if len(pairs) > 0 {
+		doc["frontmatter"] = pairs
 	}
 	// Omitted rather than sent empty, so a journal from before accounts
 	// existed still renders its Author instead of a blank attribution.
@@ -1431,7 +1457,31 @@ func (s *Server) handleRender(v *volume, w http.ResponseWriter, r *http.Request)
 	if fi.UserName != "" {
 		doc["user_name"] = fi.UserName
 	}
+	if f := renderFindings(src); len(f) > 0 {
+		doc["findings"] = f
+	}
 	writeJSON(w, doc)
+}
+
+// renderFindings is the share gate's credential scan on the path every file
+// takes. The gate could name the rule and the line well enough to refuse to
+// publish a file while the viewer rendered the same key as ordinary prose
+// (BEA-147), so the render response carries the finding too — advisory only,
+// nothing is blocked and nothing is redacted, since a member who can open the
+// file could already read the key.
+//
+// Rule ids and line numbers only. The matched text must never reach a
+// response body; see the doc comment on secrets.Scan.
+//
+// The cap is a slice rather than the LimitReader the two streaming callers
+// use: the render path already holds the whole file, because that is what
+// RenderMarkdown needs. Same ScanLimit either way, so the badge and the share
+// dialog can never disagree about the same file.
+func renderFindings(src []byte) []secrets.Finding {
+	if len(src) > secrets.ScanLimit {
+		src = src[:secrets.ScanLimit]
+	}
+	return secrets.Scan(src)
 }
 
 // renderVersion renders one exact past version by content hash — the
@@ -1459,14 +1509,24 @@ func (s *Server) renderVersion(v *volume, w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	html, err := RenderMarkdown(src)
+	pairs, html, err := RenderMarkdownPairs(src)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("render: %v", err), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]any{
+	doc := map[string]any{
 		"path": r.URL.Query().Get("path"), "html": html, "size": len(src),
-	})
+	}
+	if len(pairs) > 0 {
+		doc["frontmatter"] = pairs
+	}
+	// The history view goes through this same endpoint, so scanning here too
+	// is what stops the badge vanishing the moment you click into history on
+	// the very file it was warning about.
+	if f := renderFindings(src); len(f) > 0 {
+		doc["findings"] = f
+	}
+	writeJSON(w, doc)
 }
 
 // inlineMarkup reports whether a Content-Type names something the browser

@@ -179,16 +179,21 @@ type CachedFile struct {
 	MTimeNS int64  `json:"mtime_ns"`
 }
 
-// cachePath names the per-mount state file. The mount id comes from a folder's
-// .bdrive/config.json — a file that travels with the folder — so it is checked
-// here as well as where it is read: "state-"+mountID+".json" is joined onto the
-// volume dir, and a separator in it puts the cache (and everything keyed the
-// same way) wherever its author chose.
-func (s *Store) cachePath(mountID string) (string, error) {
+// mountStatePath names a per-mount state file. The mount id comes from a
+// folder's .bdrive/config.json — a file that travels with the folder — so it is
+// checked here as well as where it is read: prefix+mountID+".json" is joined
+// onto the volume dir, and a separator in it puts the cache (and everything
+// keyed the same way) wherever its author chose.
+func (s *Store) mountStatePath(prefix, mountID string) (string, error) {
 	if mountID == "" || mountID == "." || mountID == ".." || strings.ContainsAny(mountID, `/\`) {
 		return "", fmt.Errorf("invalid mount id %q", mountID)
 	}
-	return filepath.Join(s.dir, "state-"+mountID+".json"), nil
+	return filepath.Join(s.dir, prefix+mountID+".json"), nil
+}
+
+// cachePath names the per-mount materialization cache (state-<mount>.json).
+func (s *Store) cachePath(mountID string) (string, error) {
+	return s.mountStatePath("state-", mountID)
 }
 
 func (s *Store) LoadCache(mountID string) (map[string]CachedFile, error) {

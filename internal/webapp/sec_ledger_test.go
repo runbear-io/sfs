@@ -357,8 +357,12 @@ func TestSec_Share_PublicHitRecordsShareKindEndToEnd(t *testing.T) {
 	if b.Project != p.ID || b.Path != "hr/eng/payroll.md" {
 		t.Errorf("share visit recorded (%s, %s), want (%s, hr/eng/payroll.md)", b.Project, b.Path, p.ID)
 	}
-	if want := token + "/203.0.113.7"; b.Actor != want {
-		t.Errorf("share actor = %q, want %q", b.Actor, want)
+	// token/ip/uahash (BEA-151): the browser component is what stops a whole
+	// office behind one NAT from reading as one person. Asserted as a PREFIX
+	// so the identity half — link plus network, never a name — stays pinned
+	// without pinning the hash of an empty User-Agent.
+	if want := token + "/203.0.113.7/"; !strings.HasPrefix(b.Actor, want) {
+		t.Errorf("share actor = %q, want prefix %q", b.Actor, want)
 	}
 
 	// The member view: a share hit is share traffic, never a human reader.
@@ -450,6 +454,14 @@ func TestSec_Ledger_ReplicationAndHistoryViewsAreNeverReads(t *testing.T) {
 //     visitor controls — the query string, the method, the headers, the
 //     casing of the token, X-Forwarded-For?
 //   - can a visitor get an identity of its choosing recorded as an actor?
+//
+// User-Agent is the ONE exception, and it is deliberate (BEA-151): the actor
+// key includes a hash of it, because without it three people in one office
+// were one reader and the share panel reported "1 open" for all of them. So a
+// visitor CAN split its own visits by rotating UAs — bounded by the per-IP
+// limiter above the handler (ratelimit.go) and by retention folding, and it
+// inflates only the count on a link the visitor already holds. Asserted below
+// as intended behavior rather than left to look like a hole.
 func TestSec_Share_VisitorCannotInflateOrRedirectTheLedger(t *testing.T) {
 	h, srv, c, p := permHub(t)
 	secledReads(t, srv)
@@ -472,8 +484,6 @@ func TestSec_Share_VisitorCannotInflateOrRedirectTheLedger(t *testing.T) {
 		{"/s/" + token + "?cachebust=2", nil},
 		{"/s/" + token + "?", nil},
 		{"/s/" + token + "?download=1&x=" + strings.Repeat("y", 200), nil},
-		{"/s/" + token, map[string]string{"User-Agent": "one"}},
-		{"/s/" + token, map[string]string{"User-Agent": "two"}},
 		{"/s/" + token, map[string]string{"X-Forwarded-For": "10.1.1.1"}},
 		{"/s/" + token, map[string]string{"X-Forwarded-For": "10.1.1.2, 10.1.1.3"}},
 		{"/s/" + token, map[string]string{"X-Real-IP": "10.2.2.2"}},
@@ -504,6 +514,18 @@ func TestSec_Share_VisitorCannotInflateOrRedirectTheLedger(t *testing.T) {
 		t.Errorf("one visitor at one address produced %d ledger buckets — the 10-minute "+
 			"visit debounce is defeated by something the visitor chooses: %+v", len(got), got)
 	}
+
+	// The documented exception: distinct browsers are distinct readers, so two
+	// UAs are two buckets. That is the fix, not a defeat of the debounce — and
+	// the actor still says only "this link, this network, some browser".
+	for _, ua := range []string{"one", "two"} {
+		secledGet(h, "/s/"+token, addr, map[string]string{"User-Agent": ua})
+	}
+	got = secledBuckets(srv.Reads)
+	if len(got) != 3 {
+		t.Errorf("two more browsers on one network produced %d buckets in total, want 3 — "+
+			"distinct browsers must count separately (BEA-151): %+v", len(got), got)
+	}
 	for _, b := range got {
 		if b.Project != p.ID {
 			t.Errorf("a share visitor wrote a bucket for project %s, but the share is on %s: %+v",
@@ -512,8 +534,8 @@ func TestSec_Share_VisitorCannotInflateOrRedirectTheLedger(t *testing.T) {
 		if b.Kind != ReadKindShare {
 			t.Errorf("an anonymous share visitor recorded a %s-kind bucket: %+v", b.Kind, b)
 		}
-		if !strings.HasPrefix(b.Actor, token+"/") {
-			t.Errorf("share actor %q is not token/ip — the visitor chose part of it: %+v", b.Actor, b)
+		if !strings.HasPrefix(b.Actor, token+"/203.0.113.7/") {
+			t.Errorf("share actor %q is not token/ip/browser — the visitor chose the identifying part of it: %+v", b.Actor, b)
 		}
 		for _, planted := range []string{"alice@x.io", "dev-alice", "pwned", "10.1.1.1", "10.1.1.2", "10.2.2.2"} {
 			if strings.Contains(b.Actor, planted) {

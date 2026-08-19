@@ -31,6 +31,33 @@ test("unknown project id says so instead of swapping projects", async ({ page })
   await expect(page.locator("#content .empty")).toContainText("Project not found");
   await expect(page).toHaveURL("/p-00000000");
   await expect(page.locator("#project-select")).toContainText(/.+/);
+  // BEA-140. The page may not argue with itself: no other project's file tree
+  // beside a body denying the requested one, and no claim of lost membership
+  // to a reader who may never have been a member.
+  await expect(page.locator("#tree .row")).toHaveCount(0);
+  await expect(page.locator("#content .empty")).toContainText("p-00000000");
+  await expect(page.locator("#content .empty")).not.toContainText("no longer a member");
+});
+
+// BEA-140. Two personas guessed /wiki independently — the name is what the
+// sidebar shows them, and the id never appears as something to copy.
+test("a project name in the URL resolves to its id", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+
+  await page.goto("/wiki");
+  await page.waitForURL("/" + pid);
+  await expect(page.locator("#project-select")).toContainText("wiki");
+
+  // The rest of the URL rides along rather than being thrown away.
+  await page.goto("/wiki/index.md");
+  await page.waitForURL("/" + pid + "/index.md");
+  await expect(page.locator("#content")).toContainText(/.+/);
+
+  // A view segment survives the hop too, and matching ignores case.
+  await page.goto("/WIKI/dashboard");
+  await page.waitForURL("/" + pid + "/dashboard");
+  await expect(page.locator("#content")).toContainText(/.+/);
 });
 
 test("account menu: admin gets hub admin entry; member does not", async ({ page, browser }) => {

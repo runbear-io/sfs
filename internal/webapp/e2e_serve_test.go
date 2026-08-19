@@ -112,6 +112,11 @@ func TestE2EServe(t *testing.T) {
 		"notes/readme.md",         // read AND rewritten by the run
 		"index.md",                // read, never changed
 		"archive/retired-spec.md", // read, never changed — the hot+stale one
+		// Read by the run, then deleted by the seed: the run card has to keep
+		// it and label it "no longer in the project", the way the Dashboard
+		// already does with its heat row (BEA-152). Drop this and the label
+		// has nothing to render against.
+		"scratch.md",
 	} {
 		srv.Reads.RecordSession(p.ID, e2eSession, "seed", path)
 	}
@@ -234,7 +239,10 @@ func seedE2E(t *testing.T, state, prefix, projectID string) {
 			Size: int64(len(content)), Mode: 0o644,
 		})
 	}
-	put("index.md", "# Wiki\n\nStart at the [[guide]] or browse [notes](notes/readme.md).\n", 72*time.Hour)
+	// The dangling [[nowhere]] is deliberate: the frontend has to render a
+	// wikilink with no matching file as an unresolved anchor, not as a dead
+	// "wiki:" href (BEA-136).
+	put("index.md", "# Wiki\n\nStart at the [[guide]] or browse [notes](notes/readme.md). Nothing at [[nowhere]].\n", 72*time.Hour)
 	put("guide.md", "# Guide\n\nFirst version of the guide.\n", 48*time.Hour)
 	put("guide.md", "# Guide\n\nSecond version of the guide, with more detail.\n", 2*time.Hour)
 	put("notes/readme.md", "# Notes\n\nNested folder content.\n", 24*time.Hour)
@@ -290,11 +298,16 @@ func seedE2E(t *testing.T, state, prefix, projectID string) {
 	put("scratch.md", "# Scratch\n\nTemporary.\n", 12*time.Hour)
 	// One good fence and one deliberately broken one on the same page: the
 	// point of the fallback is that a diagram nobody can parse doesn't take
-	// the diagrams around it down with it. Appended LAST on purpose — the
+	// the diagrams around it down with it. The markup inside the broken fence
+	// is there so the parser quotes it into its own message — the diagnostic
+	// is inserted as text, and this is what proves it. The tag is short on
+	// purpose: the parser's window is 20 characters of preceding source, and a
+	// tag truncated by it would leave no start tag for an innerHTML bug to
+	// mount, so the test would pass either way. Appended LAST on purpose — the
 	// mutations above address ops by index, so an insert anywhere earlier
 	// hands one file's author or note to another file.
 	put("diagram.md", "# Diagram\n\n```mermaid\ngraph TD\n  A[Agent] --> B[Hub]\n  B --> C[Teammate]\n```\n\n"+
-		"Broken one below.\n\n```mermaid\ngraph TD\n  A[[[[ --> ???\n```\n", 24*time.Hour)
+		"Broken one below.\n\n```mermaid\ngraph TD\n  A[<img onerror=x>[[[[ --> ???\n```\n", 24*time.Hour)
 	lam++
 	seq++
 	ops = append(ops, journal.Op{
@@ -303,6 +316,16 @@ func seedE2E(t *testing.T, state, prefix, projectID string) {
 		User: "alice@x.io", UserName: "Alice",
 		Kind: journal.KindDelete, Path: "scratch.md",
 	})
+	// A conflict copy of guide.md, named exactly the way syncer.conflictName
+	// writes one. The suffix is the whole contract the hub reads a conflict
+	// out of (BEA-128), so the timestamp is a fixed literal: a relative one
+	// would make the banner's text move under the assertion.
+	// Under archive/ on purpose: notes/ is where two other specs pin an exact
+	// file count and measure every row's width on a 360px phone, and a 53-
+	// character filename is not what those are about.
+	put("archive/old-runbook.md.bdrive-conflict-mira-laptop-20260814T060945Z",
+		"# Old runbook\n\nMira's version, written at the same time as the other one.\n", 2*time.Hour)
+	ops[len(ops)-1].Note = "conflict copy of archive/old-runbook.md"
 	if err := journal.Append(filepath.Join(prefix, "journal", "seed.jsonl"), ops); err != nil {
 		t.Fatal(err)
 	}

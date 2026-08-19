@@ -11,6 +11,11 @@ export default defineConfig({
   workers: 1, // specs share one hub with mutable state (uploads, shares)
   use: {
     baseURL: "http://localhost:8993",
+    // Headless Chromium withholds the clipboard permission a real browser
+    // grants the focused tab. Without it every copy control in the app
+    // reports failure, so a spec that clicks one measures the "select and
+    // copy it yourself" fallback and never the path a user is on.
+    permissions: ["clipboard-write"],
   },
   webServer: {
     command:

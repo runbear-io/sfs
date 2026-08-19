@@ -32,6 +32,21 @@ export function joinPath(dir: string, rel: string): string {
   return out.join("/");
 }
 
+/* Obsidian-style wikilink target -> file. Exact path first, then basename;
+   ".md" is optional on both; everything case-insensitive. The rules are the
+   product decision, so they live in one place and get tested without a
+   browser (node --test has no DOM, so this cannot live in FileView). */
+export function resolveWiki(target: string, files: { path: string; name: string }[]) {
+  const want = target.toLowerCase();
+  return (
+    files.find((f) => f.path.toLowerCase() === want || f.path.toLowerCase() === want + ".md") ||
+    files.find((f) => {
+      const n = f.name.toLowerCase();
+      return n === want || n === want + ".md";
+    })
+  );
+}
+
 /* clipboard copy that never throws on a non-HTTPS origin (where
    navigator.clipboard is undefined). Returns true on success. */
 export async function copyText(text: string): Promise<boolean> {
@@ -63,6 +78,32 @@ export function lastProject(): string {
 export function rememberProject(id: string) {
   try {
     localStorage.setItem(LAST_PROJECT, id);
+  } catch {
+    /* preference only */
+  }
+}
+
+/* Whether the frontmatter panel is expanded, remembered for this browser
+   the same way and with the same caveats as lastProject above. Unset (the
+   first visit) is not "closed": the rail only exists on a wide window, so
+   the default follows the width — expanded on desktop, a closed disclosure
+   on a phone. */
+const FM_PANEL = "bdrive.fmPanel";
+export const FM_RAIL = "(min-width: 1400px)"; // must match style.css
+
+export function fmPanelOpen(): boolean {
+  try {
+    const v = localStorage.getItem(FM_PANEL);
+    if (v !== null) return v === "1";
+  } catch {
+    /* fall through to the width default */
+  }
+  return window.matchMedia(FM_RAIL).matches;
+}
+
+export function rememberFmPanel(open: boolean) {
+  try {
+    localStorage.setItem(FM_PANEL, open ? "1" : "0");
   } catch {
     /* preference only */
   }

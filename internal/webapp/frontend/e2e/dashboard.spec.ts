@@ -260,3 +260,16 @@ test("files with no reads still chart", async ({ page }) => {
   await expect(page.locator(".in-treemap")).toBeVisible();
   await expect(page.locator(".in-blank")).toHaveCount(0);
 });
+
+// BEA-61: the Dashboard's advice is built on these counts, so its caption is
+// the one place the disclosure has to survive a scope change too.
+test("the reads × freshness caption says own views count, scoped or not", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  for (const route of [`/${pid}/dashboard`, `/${pid}/dashboard/notes`]) {
+    await page.goto(route);
+    await expect(page.locator(".insights > .dl-sub")).toContainText(
+      "Includes your own views. Repeat opens by the same reader inside 10 minutes count once.",
+    );
+  }
+});

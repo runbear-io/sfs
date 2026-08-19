@@ -12,7 +12,9 @@ import { modalConfirm } from "../modal";
 import { toast } from "../toast";
 import { linkProps } from "../nav";
 import { urlForPath } from "../router";
+import { copyText } from "../util";
 import { AdminTable } from "./AdminTable";
+import { Icon } from "./shell";
 
 /* The one live-public-links table in the product. The org panel passes
    org-wide rows (showProject) as the cross-project audit; a project's own
@@ -49,13 +51,16 @@ export function shareDetail(s: ShareInfo, showProject: boolean): string {
   return bits.join(" · ");
 }
 
-// The two honesties about the number, worded once per section rather than
-// once per row: opens are debounced VISITS (readDebounce, reads.go), and the
-// count is per FILE not per link (heat is keyed by path), so two tokens on
-// one file report the same number.
+// The honesties about the number, worded once per section rather than once
+// per row: opens are debounced VISITS (readDebounce, reads.go) keyed by
+// browser+network rather than by person (shareActor, shares.go) — so the note
+// states the residual instead of promising precision the signal lacks — and
+// the count is per FILE not per link (heat is keyed by path), so two tokens
+// on one file report the same number.
 export const OPENS_NOTE =
   "Opens count how many times a file has been read through a public link. " +
-  "Repeat opens by the same reader within 10 minutes count once.";
+  "Repeat opens from the same browser and network within 10 minutes count once — " +
+  "two people on one network using the same browser still count as one.";
 
 export function SharesTable({
   shares,
@@ -101,16 +106,38 @@ export function SharesTable({
       col.display({
         id: "actions",
         header: "",
-        cell: (c) =>
-          canRevoke ? (
+        // Copy is offered to readers too, not just to whoever may revoke:
+        // ShareBanner already prints the whole /s/<token> URL as text to
+        // anyone with read (BEA-69), so gating the clipboard shortcut here
+        // would only make Settings stricter than the file page.
+        cell: (c) => (
+          <span className="share-acts">
             <button
-              className="ai-del"
-              aria-label={`Revoke the share of ${c.row.original.path}`}
-              onClick={() => revokeShare(c.row.original, onChanged)}
+              className="ai-btn"
+              aria-label={`Copy the public link to ${c.row.original.path}`}
+              title="Copy link"
+              onClick={() =>
+                // The server composed this URL through requestBaseURL, which is
+                // what makes it right behind a proxy — never rebuild it here
+                // out of origin + token.
+                copyText(c.row.original.url).then((ok) =>
+                  toast(ok ? "Copied." : "Select and copy the link."),
+                )
+              }
             >
-              Revoke
+              <Icon name="copy" />
             </button>
-          ) : null,
+            {canRevoke && (
+              <button
+                className="ai-del"
+                aria-label={`Revoke the share of ${c.row.original.path}`}
+                onClick={() => revokeShare(c.row.original, onChanged)}
+              >
+                Revoke
+              </button>
+            )}
+          </span>
+        ),
       }),
     ],
     [col, onChanged, showProject, canRevoke],

@@ -240,7 +240,17 @@ button, input, a.btn { font-family: inherit; }
 /* The shares table's actions column holds one button, not a select plus one
    like the members table. At 186px it stole the room the row's own facts
    (who, when, whether it expires) needed, and they truncated to "no exp…". */
-.shares-table .admin-table th:last-child, .shares-table .admin-table td:last-child { width: 110px; }
+/* …and once it also carried a copy control beside Revoke (BEA-130) the
+   track had to grow again — by one icon button, not back to the 186px that
+   caused the starvation above. The detail cell survives it because it wraps
+   now (next rule) instead of ellipsizing, so the cost of the extra 40px is a
+   word folding onto a second line rather than a fact disappearing. */
+.shares-table .admin-table th:last-child, .shares-table .admin-table td:last-child { width: 150px; }
+/* Right-aligned by the td; this only puts a gap between the two controls and
+   centres the icon in its button. */
+.share-acts { display: inline-flex; align-items: center; gap: 6px; }
+.share-acts .ai-btn { display: inline-flex; align-items: center; justify-content: center; padding: 0 8px; }
+.share-acts .ai-btn .ico { width: 15px; height: 15px; }
 /* …and once the row also carries the link's open count (BEA-76), narrowing
    the button column stopped being enough: the detail ran to "3 op…" and the
    receipt — the whole point of showing it — was the part that fell off. So
@@ -385,6 +395,10 @@ button, input, a.btn { font-family: inherit; }
 #crumb .crumb-seg:hover { color: var(--accent-bright); }
 #crumb .crumb-sep { color: var(--text-ghost); margin: 0 5px; }
 #meta { flex: 1; min-width: 0; font-size: 12px; color: var(--text-faint); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The Dashboard's hot+stale verdict, carried onto the file's own page. Same
+   red as the danger quadrant (.in-pt.danger) on purpose — one verdict, one
+   colour, whichever screen you meet it on. */
+.meta-stale { color: #e07070; }
 
 .btn {
   display: inline-flex; align-items: center; gap: 6px; flex: none;
@@ -522,6 +536,9 @@ button, input, a.btn { font-family: inherit; }
 .ps-facts { display: grid; grid-template-columns: auto 1fr; gap: 8px 20px; margin: 0; font-size: 13px; }
 .ps-facts dt { color: var(--text-faint); }
 .ps-facts dd { margin: 0; color: var(--text-dim); }
+.ps-export { margin: 16px 0 0; max-width: 62ch; }
+.ps-export code { font-size: 12px; padding: 1px 5px; border-radius: 4px; background: var(--surface); border: 1px solid var(--border); color: var(--text); }
+.ps-export a { color: var(--accent-bright); text-decoration: none; }
 
 /* ---- admin panels ---- */
 /* width comes from .page (app) — see #content */
@@ -599,6 +616,11 @@ a.ai-main:hover { color: var(--accent); }
 .dl-title-icon { display: flex; color: var(--accent); }
 .dl-title-icon .ico { width: 20px; height: 20px; }
 .dl-sub { color: var(--text-faint); font-size: 12.5px; margin: 0 0 18px; }
+/* The read-count disclosure, printed under the folder's summary line: the
+   summary's voice one notch quieter, sitting close enough that the two read as
+   one block. Deliberately NOT .dl-sub — that class means "the summary line" to
+   every other reader of this page, tests included. */
+.dl-heatnote { color: var(--text-faint); font-size: 12px; opacity: .8; margin: -14px 0 18px; }
 .dl-items { border: 1px solid var(--border); border-radius: var(--r-card); overflow: hidden; background: var(--bg-side); }
 .dl-row { display: flex; align-items: center; gap: 11px; padding: 10px 14px; border-bottom: 1px solid var(--border); cursor: pointer; }
 .dl-row:last-child { border-bottom: none; }
@@ -630,11 +652,17 @@ a.ai-main:hover { color: var(--accent); }
 }
 .dl-meta { flex: none; font-size: 12px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
 /* read-heat dot: intensity grows with 30-day reads (heatLevel in app.js) */
+/* Conflict copy marker in the file listing: a preserved concurrent edit is
+   an ordinary file with an alarming name, so the row says so before the
+   reader has to guess from the suffix. */
+.dl-conflict { flex: none; font-size: 10.5px; line-height: 1; letter-spacing: .02em; text-transform: uppercase; padding: 3px 6px; border-radius: 999px; border: 1px solid var(--accent-dim); background: var(--glow); color: var(--accent-bright); white-space: nowrap; }
 .heatdot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
 .heatdot.lvl1 { opacity: .3; }
 .heatdot.lvl2 { opacity: .55; }
 .heatdot.lvl3 { opacity: .8; }
 .heatdot.lvl4 { opacity: 1; box-shadow: 0 0 6px rgba(245, 166, 35, .55); }
+/* Hot + stale, beside the heat dot that shows the "hot" half. */
+.stalemark { flex: none; font-size: 11px; line-height: 1; color: #e07070; }
 .dl-empty { padding: 24px 14px; color: var(--text-faint); font-size: 13px; border: 1px dashed var(--border); border-radius: var(--r-card); text-align: center; }
 .dl-h3 { margin: 28px 0 8px; font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--text-faint); font-weight: 600; }
 .dl-hlist { border: 1px solid var(--border); border-radius: var(--r-card); background: var(--bg-side); overflow: hidden; max-width: none; }
@@ -791,11 +819,32 @@ a.ai-main:hover { color: var(--accent); }
 .hrun-toggle { display: flex; flex: none; padding: 2px; border: none; border-radius: 4px; background: none; color: var(--text-faint); cursor: pointer; }
 .hrun-toggle:hover { color: var(--text); background: var(--hover); }
 .hrun-toggle .ico { width: 13px; height: 13px; }
-.hrun-note { font-weight: 560; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46%; }
+/* The run's identity is the one thing in this header that must stay
+   readable: with the undo button added, a header that shrinks everything
+   proportionally truncated "claude-code session 8f21e4" down to
+   "claude-code session …" — the note and the meta are not equally
+   disposable. The note holds its size (still capped at 46%) and the meta,
+   which every row inside the card repeats anyway, absorbs the shrink. */
+.hrun-note { flex-shrink: 0; font-weight: 560; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46%; }
 .hrun-note a { color: var(--accent-bright); text-decoration: none; }
 .hrun-note a:hover { text-decoration: underline; }
-.hrun-meta { color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hrun-meta { min-width: 0; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hrun-time { margin-left: auto; flex: none; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+/* The card's one action. Styled like the per-row verbs it generalizes, and
+   destructive on hover like remove: an undo takes content away. */
+.hrun-undo { display: inline-flex; align-items: center; gap: 4px; flex: none; padding: 2px 8px 2px 5px; border: 1px solid var(--border); border-radius: 5px; background: none; color: var(--text-faint); font: inherit; font-size: 12px; cursor: pointer; }
+.hrun-undo:hover { color: var(--del); border-color: rgba(242, 109, 109, .38); background: var(--hover); }
+.hrun-undo:disabled { opacity: .5; cursor: default; }
+.hrun-undo .ico { width: 12px; height: 12px; }
+/* The confirm's file list: one row per path, action right-aligned, and the
+   paths scroll rather than growing the dialog past the viewport. */
+.undo-list { margin: 10px 0; max-height: 40vh; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; }
+.undo-row { display: flex; align-items: baseline; gap: 10px; padding: 5px 9px; font-size: 12.5px; }
+.undo-row + .undo-row { border-top: 1px solid var(--border); }
+.undo-row .undo-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.undo-row .undo-what { margin-left: auto; flex: none; color: var(--text-faint); font-size: 11.5px; }
+.undo-row .undo-after { flex: none; color: var(--del); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; }
+.undo-warn { color: var(--del); }
 /* Rows inside a card don't repeat the card's own border or note. */
 .hrun-body { border-top: 1px solid var(--border); }
 .hrun-body .hentry:last-child { border-bottom: none; }
@@ -976,8 +1025,14 @@ a.ai-main:hover { color: var(--accent); }
      the two fields the row exists to carry. Let it wrap instead; `order: 1`
      drops the meta below the note while the time stays on the first row. */
   .hrun-head { flex-wrap: wrap; row-gap: 4px; }
-  .hrun-note { max-width: none; white-space: normal; overflow: visible; }
+  /* flex-shrink comes back here: the desktop rule pins the note's size so
+     the undo button can't truncate the run's identity, but a wrapping header
+     that also refuses to shrink pushes a long note past the card edge. */
+  .hrun-note { flex-shrink: 1; max-width: none; white-space: normal; overflow: visible; }
   .hrun-meta { order: 1; flex: 1 1 100%; white-space: normal; overflow: visible; }
+  /* The header's own action wraps onto the meta line rather than squeezing
+     the time out of the row. */
+  .hrun-undo { order: 2; margin-left: auto; min-height: 32px; }
   .ai-btn, .ai-del { height: auto; min-height: 44px; padding: 0 12px; }
   /* react-table renders rows as `display: table-row`, which makes every
      flex rule above inert and lets the last column (Remove) fall outside
@@ -1068,6 +1123,10 @@ a.ai-main:hover { color: var(--accent); }
 .markdown strong { color: var(--text); font-weight: 620; }
 .markdown a { color: var(--accent-bright); text-decoration: none; border-bottom: 1px solid rgba(245,166,35,.28); }
 .markdown a:hover { border-bottom-color: var(--accent); }
+/* A wikilink pointing at nothing. Without an href it loses link styling
+   entirely, and a broken cross-reference silently reading as prose is worse
+   than the dead URL this replaced. */
+.markdown a.wiki-missing { color: var(--text-faint); border-bottom: none; text-decoration: underline dotted; cursor: help; }
 .markdown ul, .markdown ol { margin: 0 0 1em; padding-left: 1.4em; }
 .markdown li { margin-bottom: .4em; }
 .markdown li::marker { color: var(--text-ghost); }
@@ -1087,13 +1146,42 @@ a.ai-main:hover { color: var(--accent); }
    diagrams would otherwise be a wall of red. */
 .markdown .mermaid-diagram { margin: 1.3em 0; overflow-x: auto; }
 .markdown .mermaid-diagram svg { max-width: 100%; height: auto; }
-.markdown .mermaid-err { margin: -.9em 0 1.3em; font-size: 12px; color: var(--text-faint); }
-/* Frontmatter key/value table (server-rendered from a doc's YAML header). */
-.markdown table.frontmatter { margin: 0 0 1.8em; font-size: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; border-collapse: separate; border-spacing: 0; }
-.markdown table.frontmatter th { text-transform: none; letter-spacing: 0; font-size: 11.5px; color: var(--text-faint); font-weight: 600; text-align: left; white-space: nowrap; vertical-align: top; padding: 6px 14px 6px 12px; border-bottom: 1px solid var(--border); }
-.markdown table.frontmatter td { color: var(--text-dim); padding: 6px 12px 6px 0; border-bottom: 1px solid var(--border); }
-.markdown table.frontmatter tr:last-child th, .markdown table.frontmatter tr:last-child td { border-bottom: none; }
-.markdown table.frontmatter code { white-space: pre-wrap; font-size: 11px; }
+.markdown .mermaid-err { margin: -.9em 0 .4em; font-size: 12px; color: var(--text-faint); }
+/* The parser's own message under the note. `white-space: pre` is load-bearing:
+   the caret marker only lines up in a monospace, non-wrapping box. The height
+   cap keeps a pathological message from pushing the document off the page. */
+.markdown .mermaid-err-detail { margin: 0 0 1.3em; font: 11.5px/1.5 var(--mono); color: var(--text-faint); white-space: pre; overflow: auto; max-height: 12em; }
+/* Frontmatter panel — the doc's YAML header beside the prose instead of on
+   top of it. The viewer's /api/render hands the pairs over as data; the
+   share page keeps the old table and inlines its own CSS (shares.go), which
+   is why no `table.frontmatter` rule lives here any more. */
+.fmpanel { margin: 0 0 1.8em; font-size: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+.fmpanel > summary { list-style: none; cursor: pointer; padding: 7px 12px; color: var(--text-faint); font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; user-select: none; display: flex; align-items: center; gap: 6px; }
+.fmpanel > summary::-webkit-details-marker { display: none; }
+/* The caret is the only open/closed signal, so it is drawn rather than
+   inherited: the default marker is hidden above to keep the row on one line. */
+.fmpanel > summary::before { content: ""; width: 0; height: 0; border: 4px solid transparent; border-left-color: currentColor; transition: transform .12s ease; }
+.fmpanel[open] > summary::before { transform: rotate(90deg) translateX(-1px); }
+.fmpanel > summary:hover { color: var(--text-dim); }
+.fmpanel > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 8px; }
+.fmpanel dl { margin: 0; padding: 0 12px 4px; border-top: 1px solid var(--border); }
+.fmpanel dl > div { display: flex; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+.fmpanel dl > div:last-child { border-bottom: none; }
+.fmpanel dt { flex: 0 0 auto; max-width: 40%; color: var(--text-faint); font-size: 11.5px; font-weight: 600; overflow-wrap: anywhere; }
+.fmpanel dd { margin: 0; min-width: 0; color: var(--text-dim); overflow-wrap: anywhere; }
+.fmpanel code { white-space: pre-wrap; font: 11px/1.5 var(--mono); color: #e4d9c4; }
+/* Wide enough for a rail, and the number is arithmetic rather than taste:
+   768 (prose) + 28 (gap) + 240 (rail) = 1036 of column, plus 265 of sidebar,
+   80 of #content padding and ~10 of scrollbar gutter = 1391. A 1280 laptop
+   is NOT wide enough — asking for the rail there costs the prose 110px of
+   measure, which is the squeeze this panel exists to avoid. Below the
+   breakpoint none of this applies and the <details> renders where it sits in
+   the DOM: above the body, closed. Keep FM_RAIL in util.ts in step. */
+@media (min-width: 1400px) {
+  .page.read:has(.fmpanel) { max-width: calc(var(--page-read) + 268px); display: grid; grid-template-columns: minmax(0, var(--page-read)) 240px; column-gap: 28px; align-items: start; }
+  .page.read:has(.fmpanel) > * { grid-column: 1; min-width: 0; }
+  .page.read:has(.fmpanel) > .fmpanel { grid-column: 2; grid-row: 1; position: sticky; top: 0; margin: 0; }
+}
 .markdown .admin input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .admin input[aria-invalid="true"]:focus-visible { outline-color: var(--del); }
 [role="dialog"] input[aria-invalid="true"] { border-color: var(--del); }
@@ -1119,6 +1207,18 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .vbanner .vb-text span { color: var(--text-dim); }
 .vbanner .vb-actions { flex: none; display: flex; gap: 8px; }
 .vbanner .vb-actions .ai-btn { display: inline-flex; align-items: center; text-decoration: none; }
+
+/* Credential badge on the file view (BEA-147) — the share gate's finding on
+   the path every file takes. Same strip geometry as .vbanner above; the red
+   family rather than the accent, because accent+glow already means "you are
+   looking at an old version" and the two strips can appear together. The hue
+   is .meta-stale's (#e07070, style.css:385), which is the warning colour this
+   same view already speaks. */
+.sbadge { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 0 22px; padding: 11px 14px; border: 1px solid rgba(242,109,109,.32); border-radius: var(--r-card); background: rgba(242,109,109,.08); }
+.sbadge .sb-icon { flex: none; display: flex; color: #e07070; }
+.sbadge .sb-text { flex: 1 1 220px; min-width: 0; display: flex; flex-direction: column; gap: 1px; font-size: 12.5px; line-height: 1.45; }
+.sbadge .sb-text b { color: #e07070; font-weight: 600; }
+.sbadge .sb-text span { color: var(--text-dim); }
 
 /* plain file / binary views */
 pre.plain { background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--r-card); padding: 14px 16px; overflow-x: auto; font: 12.5px/1.6 var(--mono); color: #c6cbd3; white-space: pre-wrap; overflow-wrap: anywhere; }

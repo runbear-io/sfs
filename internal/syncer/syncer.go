@@ -40,6 +40,7 @@ import (
 	"github.com/runbear-io/beardrive/internal/config"
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/remote"
+	"github.com/runbear-io/beardrive/internal/secrets"
 	"github.com/runbear-io/beardrive/internal/store"
 )
 
@@ -267,6 +268,12 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load sync state: %w", err)
 	}
+	// Advisory telemetry about files this cycle will journal and push anyway,
+	// so an unreadable record starts the cycle empty rather than failing it.
+	sec := &secretLog{found: map[string][]secrets.Finding{}}
+	if found, err := s.Store.LoadSecrets(s.mountID()); err == nil {
+		sec.found = found
+	}
 	myOps, err := s.Store.DeviceOps(s.Device.ID)
 	if err != nil {
 		return nil, fmt.Errorf("read own journal: %w", err)
@@ -309,7 +316,7 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	filter.AcceptRules(st.IgnoreAccepted)
 
 	// 1. Scan the working folder and journal any local changes.
-	localOps, err := s.scan(cache, &st, int64(len(myOps)), filter)
+	localOps, err := s.scan(cache, &st, int64(len(myOps)), filter, sec)
 	if err != nil {
 		return nil, fmt.Errorf("scan: %w", err)
 	}
@@ -366,7 +373,7 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 			if cerr := commitLocal(); cerr != nil {
 				return nil, cerr
 			}
-			return res, s.finish(cache, st)
+			return res, s.finish(cache, st, sec)
 		case errors.Is(err, errBlobContent):
 			// Reported — it is the only signal a device ever gets that its hub
 			// is serving bytes that are not what they are addressed as — but
@@ -604,7 +611,7 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	// so a device the hub was refusing alternated between the two log lines
 	// forever and `bdrive status` reported healthy sync moments after the push
 	// it had just refused.
-	if err := s.finish(cache, st); err != nil {
+	if err := s.finish(cache, st, sec); err != nil {
 		return nil, err
 	}
 	return res, nil
@@ -613,9 +620,19 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 // finish persists the two pieces of state a cycle mutates. Saving the cache
 // matters even on a cut-short cycle: the scan already journaled local edits,
 // and dropping the cache would make the next scan journal them all again.
-func (s *Session) finish(cache map[string]store.CachedFile, st store.SyncState) error {
+func (s *Session) finish(cache map[string]store.CachedFile, st store.SyncState, sec *secretLog) error {
 	if err := s.Store.SaveCache(s.mountID(), cache); err != nil {
 		return err
+	}
+	// Written only when the cycle changed it, so a quiet daemon tick every 3s
+	// still writes nothing — and an error is logged, never returned: this is
+	// advisory telemetry about ops that are already journaled and pushed, and
+	// giving it a veto over convergence is the one invariant this feature is
+	// close enough to break.
+	if sec != nil && sec.dirty {
+		if err := s.Store.SaveSecrets(s.mountID(), sec.found); err != nil {
+			log.Printf("beardrive: could not record credential findings: %v", err)
+		}
 	}
 	return s.Store.SaveSync(st)
 }
@@ -625,18 +642,25 @@ func (s *Session) finish(cache map[string]store.CachedFile, st store.SyncState) 
 // are neither journaled nor deleted: a path that becomes ignored is dropped
 // from the cache without a delete op, so opting out locally never removes
 // the file from other devices.
-func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, seqBase int64, filter *Filter) ([]journal.Op, error) {
+func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, seqBase int64, filter *Filter, sec *secretLog) ([]journal.Op, error) {
 	seen := make(map[string]bool, len(cache))
 	var ops []journal.Op
 	note := s.Note
 	if note == "" {
 		note = s.Store.LoadNote()
 	}
+	// One scan is one commit: every op it produces carries the same Time. Op
+	// order inside the batch is already carried by Lamport and Seq, which
+	// journal.Less consults first and second — so replay is unaffected — while
+	// a shared Time is what lets `bdrive log` recognise a batch and order it by
+	// the files' own write times (SortForDisplay). Stamping each op separately
+	// made a rename's two halves two different instants, which is the bug.
+	committed := time.Now().UTC()
 	nextOp := func(kind, rel string) journal.Op {
 		st.Lamport = tickLamport(st.Lamport)
 		seqBase++
 		return journal.Op{
-			Seq: seqBase, Lamport: st.Lamport, Time: time.Now().UTC(),
+			Seq: seqBase, Lamport: st.Lamport, Time: committed,
 			Device: s.Device.ID, DeviceName: s.Device.Name, Author: s.Device.Author,
 			User: s.Account.Email, UserName: s.Account.Name,
 			Kind: kind, Path: rel, Note: note, Session: s.SessionID,
@@ -662,6 +686,11 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 		if err != nil {
 			return nil // file vanished or unreadable; next cycle
 		}
+		// Below the cheap size+mtime return above, so only a file that actually
+		// changed is ever read for credentials — and covering both branches
+		// below means a file touched back to previously-flagged content still
+		// reports. Warn only: nothing here stops the op.
+		sec.scanBlob(s.Store, rel, sum)
 		if ok && c.Blob == sum {
 			// content unchanged, just touched
 			c.Size, c.MTimeNS, c.Mode = n, mt, mode
@@ -688,6 +717,10 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 		// cache is a JSON file in $BDRIVE_HOME, not something the walk wrote.
 		// Same rule the peer-op side applies, so this device never signs and
 		// pushes a path it would refuse from anyone else.
+		// Every arm below stops tracking the path, so every arm forgets its
+		// findings too: a warning about a file this mount no longer syncs is
+		// one nothing can clear.
+		sec.drop(rel)
 		if unsafeRel(rel) || neverSync(rel) {
 			delete(cache, rel)
 			continue
@@ -1674,16 +1707,39 @@ func DisplayTime(op journal.Op) time.Time {
 	return op.Time
 }
 
-// SortForDisplay orders ops newest-first by DisplayTime — the timestamp the
-// user actually sees, so the list reads as a timeline. Ties fall back to
-// reversed journal.Less to stay deterministic. This is deliberately NOT the
-// replay order: LogEntries keeps returning causal order because
-// bdrive restore walks it to find a file's previous version.
+// CommitTime is when a change entered the project, which is the question
+// `bdrive log` answers. It is not DisplayTime: `mv` preserves mtime, so the put
+// half of a rename carries the original file's write time and sorts away from
+// the delete half of the same rename — a file that appeared seconds ago lands
+// below the fold.
+//
+// Same clamp as DisplayTime, for the same reason: Op.Time is a peer's JSON, and
+// the one clock a peer does not own is this machine's. An op we cannot date
+// sorts last rather than first, which is the direction that cannot be aimed.
+func CommitTime(op journal.Op) time.Time {
+	if op.Time.After(time.Now()) {
+		return time.Time{}
+	}
+	return op.Time
+}
+
+// SortForDisplay orders ops newest-first by CommitTime — when the change
+// entered the project — so the two halves of a rename sit together and an old
+// file added today sorts by when it arrived. DisplayTime breaks ties and is
+// load-bearing: everything from one scan shares a commit second, and the files'
+// own write times are the only thing that orders it inside that second. Ties
+// beyond that fall back to reversed journal.Less to stay deterministic. This is
+// deliberately NOT the replay order: LogEntries keeps returning causal order
+// because bdrive restore walks it to find a file's previous version.
 func SortForDisplay(ops []journal.Op) {
 	sort.SliceStable(ops, func(i, j int) bool {
-		ti, tj := DisplayTime(ops[i]), DisplayTime(ops[j])
+		ti, tj := CommitTime(ops[i]), CommitTime(ops[j])
 		if !ti.Equal(tj) {
 			return ti.After(tj)
+		}
+		di, dj := DisplayTime(ops[i]), DisplayTime(ops[j])
+		if !di.Equal(dj) {
+			return di.After(dj)
 		}
 		return journal.Less(ops[j], ops[i])
 	})

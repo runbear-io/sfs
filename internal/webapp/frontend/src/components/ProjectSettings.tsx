@@ -248,6 +248,23 @@ export function ProjectSettings({
               </>
             )}
           </dl>
+          {/* The anti-lock-in answer, at the moment someone asks it. Copy only:
+              exporting is a CLI job (`bdrive export [folder]` — run in the synced
+              folder, no project id), so there is no route and no button here. */}
+          <p className="ps-note ps-export">
+            <strong>Take your files elsewhere.</strong> Run <code>bdrive export</code> in the synced
+            folder to write the whole project — every device's journal and every content blob, so
+            full history and authorship — into a single archive. <code>bdrive import</code> restores
+            it into any other BearDrive hub, self-hosted or cloud. Export warns first if this device
+            still has changes it hasn't pushed.{" "}
+            <a
+              href="https://docs.beardrive.ai/reference/migration/"
+              target="_blank"
+              rel="noreferrer"
+            >
+              How migration works →
+            </a>
+          </p>
         </CardContent>
       </Card>
 

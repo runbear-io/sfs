@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/secrets"
 )
 
 // shareCmd mints public URLs for synced files: `bdrive share report.html`
@@ -92,6 +93,11 @@ Use --force to share anyway.`,
 			if resp.StatusCode == http.StatusNotFound {
 				return fmt.Errorf("%s (if you just saved it, wait a few seconds for the daemon or run `bdrive sync`)", strings.TrimSpace(readBody(resp)))
 			}
+			// The server writes this one as a sentence to be read (e.g. "share
+			// links are per-file"); httpBodyError would prefix "400 Bad Request: ".
+			if resp.StatusCode == http.StatusBadRequest {
+				return fmt.Errorf("%s", strings.TrimSpace(readBody(resp)))
+			}
 			// Before the generic fallthrough: httpBodyError would print the raw
 			// JSON, and this is the one status the user can act on.
 			if resp.StatusCode == http.StatusConflict {
@@ -143,7 +149,10 @@ func secretsFound(rel string, resp *http.Response) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s looks like it contains credentials (checked at the moment you shared it):\n", rel)
 	for _, f := range out.Findings {
-		fmt.Fprintf(&b, "  line %-4d %s\n", f.Line, f.Rule)
+		// Both: the web dialog has always said "an AWS access key" while the
+		// terminal said "aws_access_key_id", and the id is what someone greps
+		// for or quotes in a report.
+		fmt.Fprintf(&b, "  line %-4d %s (%s)\n", f.Line, secrets.Label(f.Rule), f.Rule)
 	}
 	b.WriteString("Nothing was shared. Re-run with --force if that is intentional.")
 	return fmt.Errorf("%s", b.String())

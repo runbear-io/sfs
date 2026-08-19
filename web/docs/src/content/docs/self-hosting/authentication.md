@@ -9,8 +9,10 @@ whole API (web UI, uploads, project creation, device sync) needs a session; only
 `bdrive serve ./folder`, remains auth-free.
 
 Accounts are email, password, and name, kept in a file-backed registry
-(`auth.json`): bcrypt password hashes and SHA-256 token digests, atomically
-rewritten. No plaintext credentials ever touch disk.
+(`auth.json`), atomically rewritten. No plaintext credentials are stored on the
+server — passwords are bcrypt-hashed and tokens are kept as SHA-256 digests. On
+a client device, the sync token is stored at `~/.bdrive/settings.json` with
+`0600` permissions and can be revoked from that device with `bdrive logout`.
 
 ## Signup is invite-only by default
 

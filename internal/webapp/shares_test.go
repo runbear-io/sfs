@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/runbear-io/beardrive/internal/secrets"
 )
 
 func httptestNewRequestBody(method, url string, data []byte) *http.Request {
@@ -437,6 +439,31 @@ func TestShareLastUpdatedStamp(t *testing.T) {
 	}
 }
 
+// The share page keeps the frontmatter TABLE at the top of the document.
+// The viewer moved its frontmatter into a side panel (BEA-154) by calling
+// RenderMarkdownPairs; shares.go stayed on RenderMarkdown deliberately, and
+// nothing else would fail if someone later "tidied" it onto the pairs path —
+// which would silently change every public link ever minted.
+func TestShareKeepsFrontmatterTable(t *testing.T) {
+	srv, p, _, f, h := shareHub(t)
+	f.put("dev1", "wiki/props.md", "---\ntitle: Q3\nowner: snow\n---\n\n# Q3\n")
+	token, _ := authedShare(t, srv, h, p.ID, "wiki/props.md")
+	body := do(t, h, "GET", "/s/"+token, nil).Body.String()
+	for _, want := range []string{
+		`<table class="frontmatter"><tbody>`,
+		`<th scope="row">title</th><td>Q3</td>`,
+		`<th scope="row">owner</th><td>snow</td>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("share page lost %q:\n%s", want, body)
+		}
+	}
+	// ...and above the document, where it has always been.
+	if strings.Index(body, `class="frontmatter"`) > strings.Index(body, "<h1") {
+		t.Error("frontmatter table no longer precedes the body")
+	}
+}
+
 // TestShareDarkThemeIsLast: the share page is the surface strangers see first,
 // so in dark mode it must not show white slabs. Every dark rule sits at the
 // same specificity as the light one it overrides, which makes SOURCE ORDER the
@@ -581,12 +608,85 @@ func TestShareOpensOnTheWire(t *testing.T) {
 		t.Fatal("an opened link must carry last_opened")
 	}
 
-	// The actor is token+"/"+IP — a public credential joined to an IP. It
-	// must not appear anywhere in the response, in any shape.
+	// opens reads one link's count and last_opened back off the WIRE rather
+	// than out of the ledger, because the wire is what the panel shows.
+	opens := func(tok string) (float64, time.Time) {
+		t.Helper()
+		for _, sh := range listShares(t, srv, h, p.ID) {
+			if sh["token"] != tok {
+				continue
+			}
+			last, _ := sh["last_opened"].(string)
+			if last == "" {
+				return sh["opens"].(float64), time.Time{}
+			}
+			ts, err := time.Parse(time.RFC3339, last)
+			if err != nil {
+				t.Fatalf("last_opened %q: %v", last, err)
+			}
+			return sh["opens"].(float64), ts
+		}
+		t.Fatalf("link %s missing from the list", tok)
+		return 0, time.Time{}
+	}
+	// The debounce collapses reloads; it does not cap a link. Only the clock
+	// is under test, so it is moved rather than waited on.
+	ageDebounce := func() {
+		srv.Reads.mu.Lock()
+		defer srv.Reads.mu.Unlock()
+		for k, v := range srv.Reads.seen {
+			srv.Reads.seen[k] = v.Add(-readDebounce - time.Minute)
+		}
+	}
+	ageDebounce()
+	if rec := do(t, h, "GET", "/s/"+token, nil); rec.Code != 200 {
+		t.Fatalf("public fetch past the window: %d %s", rec.Code, rec.Body)
+	}
+	if got, _ := opens(token); got != 2 {
+		t.Fatalf("opens = %v after a reload past the debounce window, want 2", got)
+	}
+
+	// Three readers, ONE network, seconds apart: distinct browsers are
+	// distinct actors, so the count moves and last_opened follows the newest
+	// hit. token+"/"+IP alone made a whole office one reader (BEA-151) —
+	// httptest hands every request the same 192.0.2.1, which is exactly the
+	// NAT the personas were sitting behind.
+	uas := []string{
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) Safari/605.1",
+		"Mozilla/5.0 (X11; Linux x86_64) Firefox/128.0",
+		"Mozilla/5.0 (Windows NT 10.0; Win64) Chrome/126.0.0.0",
+	}
+	var afterFirst time.Time
+	for i, ua := range uas {
+		req := jsonReq(t, "GET", "/s/"+unopened, nil)
+		req.Header.Set("User-Agent", ua)
+		if rec := doHTTP(h, req); rec.Code != 200 {
+			t.Fatalf("reader %d: %d %s", i, rec.Code, rec.Body)
+		}
+		if i == 0 {
+			_, afterFirst = opens(unopened)
+		}
+	}
+	got, afterThird := opens(unopened)
+	if got != 3 {
+		t.Fatalf("three readers on one network reported %v opens, want 3 — distinct browsers are distinct readers", got)
+	}
+	if !afterThird.After(afterFirst) {
+		t.Fatalf("last_opened stuck at %s after two later readers; it must follow the newest open", afterFirst)
+	}
+
+	// The actor is token+"/"+IP+"/"+UA hash — a public credential joined to a
+	// network and a browser. No part of it may appear anywhere in the
+	// response, in any shape; a hash is not an exemption.
 	req := jsonReq(t, "GET", "/api/p/"+p.ID+"/shares", nil)
 	authAs(t, srv, req)
 	body := doHTTP(h, req).Body.String()
-	for _, leak := range []string{token + "/", "192.0.2.1", "actor", "openers"} {
+	leaks := []string{token + "/", unopened + "/", "192.0.2.1", "actor", "openers"}
+	for _, ua := range append(uas, "") {
+		sum := sha256.Sum256([]byte(ua))
+		leaks = append(leaks, hex.EncodeToString(sum[:8]))
+	}
+	for _, leak := range leaks {
 		if strings.Contains(body, leak) {
 			t.Fatalf("shares response leaks %q: %s", leak, body)
 		}
@@ -729,11 +829,11 @@ func postShare(t *testing.T, srv *Server, h http.Handler, project string, body a
 	return doHTTP(h, req)
 }
 
-func decodeFindings(t *testing.T, rec *httptest.ResponseRecorder) []secretFinding {
+func decodeFindings(t *testing.T, rec *httptest.ResponseRecorder) []secrets.Finding {
 	t.Helper()
 	var out struct {
-		Error    string          `json:"error"`
-		Findings []secretFinding `json:"findings"`
+		Error    string            `json:"error"`
+		Findings []secrets.Finding `json:"findings"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode 409 body %q: %v", rec.Body, err)
@@ -755,7 +855,7 @@ func TestShareSecretScan(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("share of a file holding a key: %d %s, want 409", rec.Code, rec.Body)
 	}
-	if got := decodeFindings(t, rec); !reflect.DeepEqual(got, []secretFinding{{"aws_access_key_id", 5}}) {
+	if got := decodeFindings(t, rec); !reflect.DeepEqual(got, []secrets.Finding{{Rule: "aws_access_key_id", Line: 5}}) {
 		t.Fatalf("findings = %v, want aws_access_key_id on line 5", got)
 	}
 	if n := len(srv.Shares.List(p.ID)); n != 0 {
@@ -795,7 +895,7 @@ func TestShareSecretScan(t *testing.T) {
 }
 
 // TestShareSecretNeverEchoed is the one rule that cannot bend: the matched
-// bytes never leave scanSecrets — not in the body, not in the log.
+// bytes never leave secrets.Scan — not in the body, not in the log.
 func TestShareSecretNeverEchoed(t *testing.T) {
 	srv, p, _, f, h := shareHub(t)
 	f.put("dev1", "creds.md", "key = "+planted+"\n")
@@ -898,5 +998,50 @@ func TestShareUnaffectedByAnUnmovedFile(t *testing.T) {
 	token, _ := authedShare(t, srv, h, p.ID, "wiki/notes.md")
 	if rec := do(t, h, "GET", "/s/"+token, nil); rec.Code != 200 {
 		t.Fatalf("unmoved share: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// A folder is never a key in the files map, so a fully synced folder used to
+// 404 as "not synced yet" and send the user off to fix a sync fault that
+// wasn't there.
+func TestShareFolderIsNotASyncProblem(t *testing.T) {
+	srv, p, _, _, h := shareHub(t)
+
+	// wiki/ is fully synced; sharing it is a per-file problem, not a timing one
+	req := jsonReq(t, "POST", "/api/p/"+p.ID+"/shares", map[string]string{"path": "wiki"})
+	authAs(t, srv, req)
+	rec := doHTTP(h, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("share of a folder: %d, want 400", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "per-file") {
+		t.Fatalf("folder error must say share links are per-file, got %q", body)
+	}
+	// names a file inside, and the SMALLEST one so repeat calls agree
+	if !strings.Contains(body, "wiki/notes.md") {
+		t.Fatalf("folder error must name a file inside it, got %q", body)
+	}
+	if strings.Contains(body, "not synced") {
+		t.Fatalf("folder error must not blame sync, got %q", body)
+	}
+	if n := len(srv.Shares.List(p.ID)); n != 0 {
+		t.Fatalf("folder share minted %d links, want 0", n)
+	}
+
+	// a path that really is unknown keeps today's answer
+	req = jsonReq(t, "POST", "/api/p/"+p.ID+"/shares", map[string]string{"path": "never-synced.md"})
+	authAs(t, srv, req)
+	if rec := doHTTP(h, req); rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "not synced to this project yet") {
+		t.Fatalf("unknown path: %d %s, want 404 not-synced", rec.Code, rec.Body)
+	}
+
+	// "wik" is a PREFIX of wiki/report.html but is not a folder: still unknown.
+	// A bare HasPrefix(k, p) would call it a folder — the same wrong-diagnosis
+	// class of bug this fix is about.
+	req = jsonReq(t, "POST", "/api/p/"+p.ID+"/shares", map[string]string{"path": "wik"})
+	authAs(t, srv, req)
+	if rec := doHTTP(h, req); rec.Code != http.StatusNotFound {
+		t.Fatalf("prefix-of-a-file path: %d, want 404", rec.Code)
 	}
 }

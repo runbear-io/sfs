@@ -222,3 +222,41 @@ func TestSessionReadsOffByDefault(t *testing.T) {
 		t.Fatalf("nil ledger = %v", got)
 	}
 }
+
+// BEA-152: a read outlives the file it read. The History run card used to
+// carry a footnote claiming reads are kept only for paths the project still
+// has — nothing implemented that, and the Dashboard had been showing those
+// reads (labelled) all along. This is the regression pin for the policy the
+// card now states out loud: the ledger records what the agent did, so the
+// audit surface reports it. It passes today; that is the point.
+func TestSessionPathsSurviveDeletion(t *testing.T) {
+	h, _, c, p, root := sessionHub(t)
+	f := newFakeRemoteAt(t, filepath.Join(root, p.ID))
+	f.putAs("dev1", "alice@x.io", "Alice", "scratch.md", "# scratch")
+
+	if rec := secfixSync(t, h, p.ID, c["alice"], "dev1", "laptop", "mac"); rec.Code != 200 {
+		t.Fatalf("alice sync: %d %s", rec.Code, rec.Body)
+	}
+	if rec := reportRead(t, h, p, c["alice"], "dev1", []map[string]string{
+		{"path": "scratch.md", "session": "8f21e4"},
+	}); rec.Code != 200 {
+		t.Fatalf("report: %d %s", rec.Code, rec.Body)
+	}
+	if got := sessionPaths(t, h, p, c["alice"], "8f21e4", "dev1"); len(got) != 1 {
+		t.Fatalf("before the delete = %v, want scratch.md", got)
+	}
+
+	// The agent (or anyone) deletes the file it read. A fresh report of the
+	// same path is now refused (ingest only records paths the project has),
+	// which is what proves the delete actually landed in the replayed state.
+	f.delAt("dev1", "scratch.md", time.Now())
+	rec := reportRead(t, h, p, c["alice"], "dev1", []map[string]string{
+		{"path": "scratch.md", "session": "later"},
+	})
+	if !strings.Contains(rec.Body.String(), `"accepted":0`) {
+		t.Fatalf("the file is still in the project, so this test proves nothing: %s", rec.Body)
+	}
+	if got := sessionPaths(t, h, p, c["alice"], "8f21e4", "dev1"); len(got) != 1 || got[0] != "scratch.md" {
+		t.Fatalf("after the delete = %v, want scratch.md — a read is not undone by deleting the file", got)
+	}
+}

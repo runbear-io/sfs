@@ -272,6 +272,12 @@ test("folder rows keep their metadata, and the heat dot a name, on a phone", asy
     // number — what matters is that no dot is nameless.)
     const dots = await page.locator(".heatdot").count();
     await expect(page.getByRole("img", { name: /read/ }), `${width}px: named dots`).toHaveCount(dots);
-    await expect(file.locator(".heatdot")).toHaveAttribute("aria-label", /\d+ reads? .*in 30 days/);
+    // BEA-61: the dot's name also has to say what the count includes. Anchored
+    // on the disclosure, not just the shape — the old unanchored regex would
+    // have passed just as happily with the sentence dropped again.
+    await expect(file.locator(".heatdot")).toHaveAttribute(
+      "aria-label",
+      /\d+ reads? .*in 30 days\. Includes your own views\..*10 minutes count once\./,
+    );
   }
 });

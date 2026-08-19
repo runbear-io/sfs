@@ -86,6 +86,12 @@ test("org admin: public share audit lists and revokes", async ({ page }) => {
   const row = page.locator(".admin-item", { hasText: "index.md" });
   await expect(row).toBeVisible();
   await expect(row.locator(".ai-tag")).toContainText("wiki");
+  // BEA-130: the row hands the link back. Assert the toast, not the
+  // clipboard — the suite grants no clipboard-read permission, and the
+  // confirmation is what the user actually sees.
+  await row.locator("button[aria-label='Copy the public link to index.md']").click();
+  await expectToast(page, "Copied.");
+  // …and Revoke is not displaced by it.
   await row.locator(".ai-del").click();
   await page.click(".modal .danger-btn");
   await expectToast(page, "Share revoked");

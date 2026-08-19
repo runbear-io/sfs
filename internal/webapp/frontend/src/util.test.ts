@@ -3,7 +3,7 @@
 // cheap to pin: the bare run IS the "storage missing" case.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { lastProject, rememberProject } from "./util.ts";
+import { lastProject, rememberProject, resolveWiki } from "./util.ts";
 
 // Swap globalThis.localStorage for the length of one call, always putting the
 // original back — later tests in the same process must not inherit a stub.
@@ -40,6 +40,42 @@ test("round-trips the last project through storage", () => {
       assert.equal(lastProject(), "p2");
     },
   );
+});
+
+/* The wikilink match matrix. It used to run at click time inside the file
+   view, where a browser was the only way to reach it; the rules did not
+   change when they moved (BEA-136), so this is the whole contract. */
+const FILES = [
+  { path: "guide.md", name: "guide.md" },
+  { path: "notes/readme.md", name: "readme.md" },
+  { path: "notes/deep/Topic.md", name: "Topic.md" },
+  { path: "LICENSE", name: "LICENSE" },
+  // Same basename as a file higher up, to pin the path-before-basename rule.
+  { path: "archive/guide.md", name: "guide.md" },
+];
+
+test("wikilink target resolves by path, then basename", () => {
+  const hit = (t: string) => resolveWiki(t, FILES)?.path;
+  assert.equal(hit("notes/readme.md"), "notes/readme.md"); // exact path
+  assert.equal(hit("notes/readme"), "notes/readme.md"); // path, .md implied
+  assert.equal(hit("readme"), "notes/readme.md"); // basename, .md implied
+  assert.equal(hit("readme.md"), "notes/readme.md"); // basename
+  assert.equal(hit("LICENSE"), "LICENSE"); // no extension at all
+  assert.equal(hit("x y"), undefined); // spaces are just characters
+  assert.equal(hit("nowhere"), undefined); // a miss is undefined, not a throw
+});
+
+test("wikilink matching is case-insensitive on both sides", () => {
+  const hit = (t: string) => resolveWiki(t, FILES)?.path;
+  assert.equal(hit("GUIDE"), "guide.md");
+  assert.equal(hit("NOTES/DEEP/topic"), "notes/deep/Topic.md");
+  assert.equal(hit("topic.MD"), "notes/deep/Topic.md");
+});
+
+test("an exact path beats a basename anywhere else in the tree", () => {
+  assert.equal(resolveWiki("archive/guide", FILES)?.path, "archive/guide.md");
+  // Bare "guide" is ambiguous by basename; the top-level path wins.
+  assert.equal(resolveWiki("guide", FILES)?.path, "guide.md");
 });
 
 test("storage that throws is swallowed on both sides", () => {

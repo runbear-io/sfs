@@ -1,6 +1,8 @@
 import { useEffect } from "react";
 import type { HeatMap, Node } from "../api/types";
 import { heatFor, heatLevel, heatText, useFolderHistory } from "../hooks/useBrowse";
+import { parseConflict } from "../lib/conflict";
+import { HEAT_DISCLOSURE, staleNote } from "../lib/heat";
 import { humanSize } from "../util";
 import { Icon } from "./shell";
 import { HistoryRow } from "./HistoryRow";
@@ -25,6 +27,11 @@ export function FolderListing(props: {
   if (files) counts.push(files + (files === 1 ? " file" : " files"));
   const folderHeat = heatFor(heatMap, node.path, true);
   if (folderHeat) counts.push(heatText(folderHeat) + " in 30 days");
+  // One sentence per page covers the summary count and every row count at
+  // once; a full disclosure repeated down fifty dense rows would not fit and
+  // would not be read. The rows keep it on the dot for anyone who meets a row
+  // on its own (hover, screen reader).
+  const anyHeat = !!folderHeat || kids.some((c) => heatFor(heatMap, c.path, !!c.dir));
 
   return (
     <div className="dirlist">
@@ -35,6 +42,7 @@ export function FolderListing(props: {
         <span>{node.name}</span>
       </h1>
       <p className="dl-sub">{counts.join(" · ") || "Empty folder"}</p>
+      {anyHeat && <p className="dl-heatnote">{HEAT_DISCLOSURE}</p>}
       {kids.length === 0 ? (
         <div className="dl-empty">Nothing in this folder yet.</div>
       ) : (
@@ -51,6 +59,11 @@ export function FolderListing(props: {
             }
             const he = heatFor(heatMap, c.path, !!c.dir);
             if (he) meta = heatText(he) + (meta ? " · " + meta : "");
+            const conflict = c.dir ? null : parseConflict(c.path);
+            // Files only: a folder's heat is a subtree sum and it has no one
+            // mtime to be stale against, which is also why the Dashboard
+            // plots files only (BEA-119).
+            const stale = c.dir ? "" : staleNote(he, c.time);
             return (
               <div
                 key={c.path}
@@ -70,14 +83,40 @@ export function FolderListing(props: {
                   <Icon name={c.dir ? "folder" : "doc"} />
                 </span>
                 <span className="dl-name">{c.name}</span>
+                {conflict && (
+                  /* The one thing a strangely-named file needs at a glance:
+                     that beardrive put it there on purpose. The page itself
+                     explains what it is — same reasoning as the heat dot
+                     below, the label has to travel without hover. */
+                  <span
+                    className="dl-conflict"
+                    aria-label={"Conflict copy: a concurrent edit from " + (conflict.device || "another device") + " that beardrive preserved instead of dropping."}
+                    title={"A concurrent edit from " + (conflict.device || "another device") + " that beardrive preserved instead of dropping."}
+                  >
+                    conflict copy
+                  </span>
+                )}
+                {stale && (
+                  /* Same reasoning as the dot below: the glyph carries a real
+                     aria-label, because title= needs a hover that touch and
+                     screen readers never give. */
+                  <span
+                    className="stalemark"
+                    role="img"
+                    aria-label={"Warning: " + stale}
+                    title={"Read often, but " + stale}
+                  >
+                    ⚠
+                  </span>
+                )}
                 {he && (
                   /* title= needs hover, which touch never gives and screen
                      readers never see — the dot carries its own name. */
                   <span
                     className={"heatdot lvl" + heatLevel(he)}
                     role="img"
-                    aria-label={heatText(he) + " in 30 days"}
-                    title={heatText(he) + " in 30 days"}
+                    aria-label={heatText(he) + " in 30 days. " + HEAT_DISCLOSURE}
+                    title={heatText(he) + " in 30 days. " + HEAT_DISCLOSURE}
                   />
                 )}
                 <span className="dl-meta">{meta}</span>

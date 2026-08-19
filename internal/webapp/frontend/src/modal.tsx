@@ -1,4 +1,4 @@
-import { useRef, useState, useSyncExternalStore } from "react";
+import { type ReactNode, useRef, useState, useSyncExternalStore } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -26,7 +26,11 @@ type Prompt = {
 type Confirm = {
   kind: "confirm";
   title: string;
-  message: string;
+  // A node, not a string: the run-wide undo has to SHOW the file list and the
+  // "changed after this run" warning it is asking about, and a confirm whose
+  // text can't hold them would push that list somewhere the user has to go
+  // find. Every existing caller passes a string, which is a ReactNode.
+  message: ReactNode;
   confirmLabel: string;
   danger: boolean;
   resolve: (v: boolean) => void;
@@ -54,7 +58,7 @@ export function modalPrompt(
 
 export function modalConfirm(
   title: string,
-  message: string,
+  message: ReactNode,
   confirmLabel = "Confirm",
   danger = false,
 ): Promise<boolean> {
@@ -170,7 +174,8 @@ function ConfirmBody({ m }: { m: Confirm }) {
       <DialogTitle asChild>
         <h3>{m.title}</h3>
       </DialogTitle>
-      <p className="modal-msg">{m.message}</p>
+      {/* a div, not a p: a p may not legally contain the path list */}
+      <div className="modal-msg">{m.message}</div>
       <div className="modal-actions">
         <Button variant="subtle" onClick={() => done(false)} autoFocus={m.danger}>
           Cancel

@@ -6,6 +6,10 @@ import assert from "node:assert/strict";
 import { heatFor, heatLevel, heatText, heatTotal, hotPathSplit } from "./heat.ts";
 import { ageRange, ageSpanLabel, isFlatRange, FLAT_AGE_SPREAD, orphanPaths } from "./heat.ts";
 import { placeLabels, LABEL_MAX } from "./heat.ts";
+import { HEAT_DISCLOSURE } from "./heat.ts";
+import { HOT_READS, STALE_DAYS, isDanger, daysSince, agoLabel, staleNote } from "./heat.ts";
+import { readdirSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { HeatMap } from "../api/types.ts";
 
 // One fixture, read by both surfaces: the file header (heatText/heatTotal) and
@@ -182,4 +186,80 @@ test("placeLabels: stacks upward when downward would leave the frame", () => {
   const ys = out.map((l) => l.y).sort((a, b) => a - b);
   assert.ok(ys.every((y) => y >= BOUNDS.top && y <= BOUNDS.bottom), `out of frame: ${ys}`);
   for (let i = 1; i < ys.length; i++) assert.ok(ys[i] - ys[i - 1] >= 11, `overlap: ${ys}`);
+});
+
+test("HEAT_DISCLOSURE says both facts", () => {
+  assert.match(HEAT_DISCLOSURE, /own views/i);
+  assert.match(HEAT_DISCLOSURE, /10 minutes/);
+});
+
+// "Defined once" is the acceptance criterion, and it is the one thing no
+// browser test can see: four surfaces each rendering their own copy would
+// pass every e2e assertion right up until they drifted apart.
+test("HEAT_DISCLOSURE is the only copy of the sentence", () => {
+  const dir = new URL("..", import.meta.url); // src/
+  const files: string[] = [];
+  const walk = (d: URL) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      if (e.name === "node_modules") continue;
+      const u = new URL(e.name + (e.isDirectory() ? "/" : ""), d);
+      e.isDirectory() ? walk(u) : /\.(ts|tsx|css)$/.test(e.name) && files.push(fileURLToPath(u));
+    }
+  };
+  walk(dir);
+  const needle = HEAT_DISCLOSURE.slice(0, 30);
+  const hits = files.filter((f) => readFileSync(f, "utf8").includes(needle));
+  assert.deepEqual(
+    hits.map((f) => f.replace(/.*\/src\//, "src/")),
+    ["src/lib/heat.ts"],
+    "the disclosure must live only in lib/heat.ts",
+  );
+});
+
+/* ---- hot and stale (BEA-119) ----
+   These thresholds decide what the Dashboard flags AND what the file page
+   and folder listing now warn about. Pinning both boundaries here is what
+   stops a future edit from quietly changing the flagged set on three
+   surfaces at once. */
+
+test("isDanger needs both halves, at the exact thresholds", () => {
+  assert.equal(HOT_READS, 3);
+  assert.equal(STALE_DAYS, 30);
+  assert.equal(isDanger(3, 30), true); // both, exactly on the line
+  assert.equal(isDanger(3, 29), false); // hot but fresh
+  assert.equal(isDanger(2, 60), false); // stale but cold
+  assert.equal(isDanger(2, 29), false); // neither
+  assert.equal(isDanger(0, 0), false);
+});
+
+test("daysSince is null for a missing or unparseable time, never 0", () => {
+  const now = Date.parse("2026-08-18T00:00:00Z");
+  assert.equal(daysSince(undefined, now), null);
+  assert.equal(daysSince("not a date", now), null);
+  assert.equal(daysSince("2026-08-08T00:00:00Z", now), 10);
+  // A clock skewed into the future clamps to 0 rather than going negative.
+  assert.equal(daysSince("2026-09-01T00:00:00Z", now), 0);
+});
+
+test("agoLabel steps days → months → years", () => {
+  assert.equal(agoLabel(5), "5 days ago");
+  assert.equal(agoLabel(45), "2 months ago");
+  assert.equal(agoLabel(400), "1 year ago");
+});
+
+test("staleNote flags only hot-and-stale files, and says how long", () => {
+  const now = Date.parse("2026-08-18T00:00:00Z");
+  const jan = new Date(now - 210 * 86400000).toISOString();
+  const yesterday = new Date(now - 86400000).toISOString();
+  const hot = { agent: 14 };
+  const cold = { agent: 2 };
+
+  assert.match(staleNote(hot, jan), /^stale · last changed \d+ months ago$/);
+  assert.equal(staleNote(hot, yesterday), ""); // hot but fresh
+  assert.equal(staleNote(cold, jan), ""); // stale but cold
+  // Telemetry off (heatFor returns null) and a file with no mtime: no mark,
+  // no throw — the surfaces call this unconditionally.
+  assert.equal(staleNote(null, jan), "");
+  assert.equal(staleNote(hot, undefined), "");
+  assert.equal(staleNote(FIXTURE["notes/untouched.md"], jan), "");
 });

@@ -23,16 +23,32 @@ import (
 // exists but that a warm request touches no journal bytes, and that the feed it
 // produces is the one the uncached code produced.
 
-// countBackend counts the reads and lists the hub makes through it, per key.
+// countBackend counts the reads, writes and lists the hub makes through it,
+// per key.
 type countBackend struct {
 	remote.Backend
 	mu    sync.Mutex
 	gets  map[string]int
+	puts  map[string]int
 	lists int
 }
 
 func newCountBackend(be remote.Backend) *countBackend {
-	return &countBackend{Backend: be, gets: map[string]int{}}
+	return &countBackend{Backend: be, gets: map[string]int{}, puts: map[string]int{}}
+}
+
+func (b *countBackend) Put(ctx context.Context, key string, r io.Reader, size int64) error {
+	b.mu.Lock()
+	b.puts[key]++
+	b.mu.Unlock()
+	return b.Backend.Put(ctx, key, r, size)
+}
+
+// putsTo is how many times one key has been written.
+func (b *countBackend) putsTo(key string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.puts[key]
 }
 
 func (b *countBackend) Get(ctx context.Context, key string) (io.ReadCloser, error) {

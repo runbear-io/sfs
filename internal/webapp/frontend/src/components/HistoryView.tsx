@@ -1,13 +1,24 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
-import type { HistoryEntry } from "../api/types";
+import type { HistoryEntry, Node } from "../api/types";
 import { HistoryRow, NoteText, type RemoveAction, type RestoreAction } from "./HistoryRow";
 import { Icon } from "./shell";
 import { whoChanged } from "../util";
 import { groupRuns, runFileCount, type Run } from "../lib/runs";
 import { HistoryFilters, authorsOf } from "./HistoryFilters";
 import { historyFilterQuery, hasHistoryFilters, type HistoryFilters as Filters } from "../router";
+
+// Undoing a WHOLE run — the run-wide form of restore/remove, and the only
+// action the card header carries. Absent when the viewer can't write, like
+// its two per-row siblings, so a read-only member never sees a button that
+// 403s. The card hands over the run itself, not a file list: which paths are
+// reverted is worked out server-side, because this window is paged and
+// filtered and a client-computed list is wrong exactly when the run is old.
+export type UndoRunAction = {
+  onUndoRun: (run: Run) => void;
+  busy?: string; // the session (or note) currently in flight
+};
 
 /* ---- history ----
    Every change ever made, straight from the journals: who (account), when,
@@ -25,17 +36,24 @@ export function HistoryView(props: {
   apiBase: string;
   target: string; // "" = whole project
   isFolder: (p: string) => boolean;
+  // Every file the project still has, so a run card can mark a path it read
+  // that has since been deleted — the same label the Dashboard uses.
+  flatFiles: Node[];
   onOpen: (path: string, version?: string) => void;
   onMeta: (meta: string) => void;
   onRendered?: () => void;
   restore?: RestoreAction;
   remove?: RemoveAction;
+  undoRun?: UndoRunAction;
   // Reader filters, straight from the URL. Applied server-side, so they
   // narrow the whole feed and not just the loaded page.
   filters?: Filters;
   onFilters?: (f: Filters) => void;
 }) {
-  const { apiBase, target, isFolder, onMeta, onRendered, restore, remove, filters } = props;
+  const { apiBase, target, isFolder, onMeta, onRendered, restore, remove, undoRun, filters } = props;
+  // One set for the whole feed, not one per card: every run card asks the
+  // same question of the same tree.
+  const known = useMemo(() => new Set(props.flatFiles.map((f) => f.path)), [props.flatFiles]);
   const q = !target
     ? { prefix: "" }
     : isFolder(target)
@@ -51,7 +69,7 @@ export function HistoryView(props: {
   // into one array — groupRuns and prevBlob both work over the whole window,
   // so a run straddling a page boundary becomes one card when its second page
   // lands, and the oldest loaded row shows no diff base rather than a wrong one.
-  const { data, error, fetchNextPage, hasNextPage, isFetchingNextPage } = useInfiniteQuery({
+  const { data, error, isPending, fetchNextPage, hasNextPage, isFetchingNextPage } = useInfiniteQuery({
     queryKey: ["history", apiBase, qs],
     queryFn: ({ pageParam }) =>
       getJSON<{ entries: HistoryEntry[]; next_cursor?: string }>(
@@ -88,7 +106,22 @@ export function HistoryView(props: {
       onChange={props.onFilters}
     />
   );
-  if (!data) return bar ? <div className="history">{bar}</div> : null;
+  // Nothing loaded yet. The filters are in the query key, so every keystroke
+  // in the path box drops `data` back to undefined — returning a bare filter
+  // bar here made a pending request pixel-identical to "nothing matched", and
+  // a reader twice concluded a file had no history when it had three entries
+  // (BEA-131). The shell always renders so the bar stays interactive, and the
+  // loading row is the same `.empty` one-liner the empty state uses, so the
+  // section doesn't jump when the response lands. Not while `error`: failures
+  // already report through onMeta above, and a permanent spinner would hide
+  // them.
+  if (!data)
+    return (
+      <div className="history">
+        {bar}
+        {isPending && !error && <div className="empty">Loading…</div>}
+      </div>
+    );
   // Entries arrive newest-first, so a row's predecessor is the next entry
   // below it on the same path that still has content. This keeps scanning the
   // flat list, never a group: it is a per-path lookup, and grouping must not
@@ -143,6 +176,7 @@ export function HistoryView(props: {
           <RunGroup
             key={"g" + n}
             run={item.run}
+            known={known}
             onOpen={props.onOpen}
             apiBase={apiBase}
             prevBlob={prevBlob}
@@ -150,6 +184,7 @@ export function HistoryView(props: {
             recreates={recreates}
             restore={restore}
             remove={remove}
+            undoRun={undoRun}
           />
         ) : (
           <HistoryRow
@@ -190,6 +225,7 @@ export function HistoryView(props: {
 
 function RunGroup({
   run,
+  known,
   onOpen,
   apiBase,
   prevBlob,
@@ -197,8 +233,10 @@ function RunGroup({
   recreates,
   restore,
   remove,
+  undoRun,
 }: {
   run: Run;
+  known: Set<string>;
   onOpen: (path: string, version?: string) => void;
   apiBase: string;
   prevBlob: (i: number) => string | undefined;
@@ -206,6 +244,7 @@ function RunGroup({
   recreates: (i: number) => boolean;
   restore?: RestoreAction;
   remove?: RemoveAction;
+  undoRun?: UndoRunAction;
 }) {
   const [open, setOpen] = useState(true);
   const first = run.entries[0];
@@ -236,6 +275,7 @@ function RunGroup({
   // Distinct paths, not ops: repeat edits to one file must not inflate the
   // one number that sizes a run (BEA-39). Every op is still a row below.
   const n = runFileCount(run);
+  const undoing = !!undoRun?.busy && undoRun.busy === (run.session || run.note);
   return (
     <div className={"hrun" + (open ? " open" : "")}>
       <div className="hrun-head">
@@ -259,6 +299,22 @@ function RunGroup({
           {dev ? " · " + dev : ""}
         </span>
         <span className="hrun-time">{span}</span>
+        {/* The one action the header carries. Every row inside the card
+            already has its own; this is the verb the card was grouped for —
+            reverting a run file by file and hoping you got them all is what
+            it replaces. onUndoRun confirms before anything is written. */}
+        {undoRun && (
+          <button
+            type="button"
+            className="hrun-undo"
+            disabled={undoing}
+            title="Put every file this run touched back the way it was"
+            onClick={() => undoRun.onUndoRun(run)}
+          >
+            <Icon name="hist" />
+            {undoing ? "undoing…" : "undo this run"}
+          </button>
+        )}
       </div>
       {open && (
         <div className="hrun-body">
@@ -287,15 +343,24 @@ function RunGroup({
                 <button key={p} type="button" className="hrun-read" onClick={() => onOpen(p)}>
                   <span className="hkind">read</span>
                   <span className="hpath">{p}</span>
+                  {/* Word for word what the Dashboard says about the same
+                      file (Insights.tsx) — two surfaces reading one ledger
+                      must not each invent their own vocabulary for it. */}
+                  {!known.has(p) && <span className="in-hp-gone">· no longer in the project</span>}
                 </button>
               ))}
             </div>
           )}
-          {/* Not decoration: reads are recorded only for paths the project
-              still has, so a file this run read and then deleted shows its
-              write with no read. Saying so beats reading as a bug. */}
+          {/* Not decoration: this card is one session on one device, so its
+              read count is smaller than the project's totals for the same
+              files — and that gap read as a bug. Reads of a deleted file are
+              kept and labelled, never dropped: the ledger records what the
+              agent did, and an audit surface reports it. */}
           {sid && (
-            <div className="hrun-foot">Reads shown only for files the project still has.</div>
+            <div className="hrun-foot">
+              Reads shown are what this device reported for this session — a narrower set than the
+              project's read totals.
+            </div>
           )}
         </div>
       )}

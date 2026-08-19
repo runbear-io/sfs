@@ -123,7 +123,9 @@ Nothing is keyed by folder path, which is why moves and renames are free.
 ├─ blobs/      content-addressed file content (sha256)
 ├─ journal/    one append-only op log per device
 ├─ state.json  what's materialized
-└─ sync.json   lamport clock + push cursor
+├─ sync.json   lamport clock + push cursor
+└─ secrets-<mount-id>.json  files that looked like they held credentials when
+                            they last changed (what `bdrive status` reports)
 ```
 
 Also here for a running project: `daemon.pid` and `daemon.log`.

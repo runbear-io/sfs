@@ -212,3 +212,29 @@ export function urlForView(
   if (target) s += "/" + encodePath(target.replace(/\/+$/, ""));
   return s + (view === "history" ? historyFilterQuery(filters) : "");
 }
+
+// A first segment that names no project id is, nine times out of ten, the
+// project NAME: that is what the sidebar shows, and the id never appears in
+// the UI as something to copy. Resolve it only when it is unambiguous —
+// ProjectDB's names are scoped per organization (create-or-join-by-name), so
+// a viewer who belongs to two orgs can hold two projects called "wiki", and
+// guessing between them is worse than the not-found page.
+//
+// The segment arrives still-encoded (parsePath slices `raw` before decodePath
+// runs), so it is decoded here — without that, any name with a space or a
+// non-ASCII character silently fails to match, which is exactly the set of
+// names most likely to be typed by hand in the first place.
+//
+// No id-shape check is needed: this only ever runs on a segment that already
+// failed to match every id, and it compares against real names, so an
+// id-shaped segment can only resolve if some project is literally called
+// that. A UUID regex here would be a second rule to keep in sync with
+// parsePath for zero change in behaviour.
+export function projectByName(
+  projects: { id: string; name: string }[],
+  seg: string,
+): string | undefined {
+  const want = decodePath(seg).toLowerCase();
+  const hit = projects.filter((p) => p.name.toLowerCase() === want);
+  return hit.length === 1 ? hit[0].id : undefined;
+}

@@ -274,9 +274,9 @@ func importStore(ctx context.Context, be remote.Backend, tr *tar.Reader, first *
 	// complete; importing it succeeded and the files were just gone on the
 	// destination. Import is the anti-lock-in door — it refuses loudly
 	// instead.
-	content := map[string]bool{}      // sha → present as blobs/ or manifests/
-	referenced := map[string]string{} // sha → a path that references it
-	chunks := map[string]bool{}       // chunk sha → present in the archive
+	content := map[string]bool{}       // sha → present as blobs/ or manifests/
+	referenced := map[string]string{}  // sha → a path that references it
+	chunks := map[string]bool{}        // chunk sha → present in the archive
 	manChunks := map[string][]string{} // manifest sha → chunk shas it names
 	hdr := first
 	for {

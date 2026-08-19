@@ -1,7 +1,7 @@
 // Run with `npm test` (node's built-in runner; node ≥ 23 strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseRoute, urlForView, historyFilterQuery } from "./router.ts";
+import { parseRoute, projectByName, urlForView, historyFilterQuery } from "./router.ts";
 
 // A trailing slash is what a browser hands you when you copy a folder URL,
 // so /notes/ has to be the same page as /notes.
@@ -161,4 +161,54 @@ test("an encoded separator in ?path= round-trips", () => {
   assert.equal(r.viewTarget, "a/b.md");
   assert.equal(r.queryTarget, true);
   assert.equal(urlForView("history", "p-1", r.viewTarget), "/p-1/history/a/b.md");
+});
+
+// BEA-140. The id never appears in the UI as something to copy, so readers
+// type the name the sidebar shows them. Resolving it is the whole redirect.
+const PROJECTS = [
+  { id: "4c400e3f", name: "wiki" },
+  { id: "aa11", name: "Design Docs" },
+];
+
+test("a project name resolves to its id", () => {
+  assert.equal(projectByName(PROJECTS, "wiki"), "4c400e3f");
+});
+
+// The sidebar shows "Design Docs"; nobody types the capitals back exactly.
+test("name matching is case-insensitive", () => {
+  assert.equal(projectByName(PROJECTS, "WIKI"), "4c400e3f");
+  assert.equal(projectByName(PROJECTS, "design docs"), "aa11");
+});
+
+// route.project is the still-encoded segment (parsePath slices `raw` before
+// decodePath runs), so a name with a space matches only if it is decoded
+// here — and a space is exactly what a hand-typed name is likely to carry.
+test("an encoded segment is decoded before matching", () => {
+  assert.equal(projectByName(PROJECTS, "Design%20Docs"), "aa11");
+  assert.equal(parseRoute("/Design%20Docs/index.md", "hub").project, "Design%20Docs");
+});
+
+test("a name nobody has resolves to nothing", () => {
+  assert.equal(projectByName(PROJECTS, "nope"), undefined);
+  assert.equal(projectByName([], "wiki"), undefined);
+});
+
+// Names are scoped per organization (ProjectDB create-or-join-by-name), so a
+// viewer in two orgs can hold two projects called "wiki". Guessing between
+// them would open the wrong one silently; the not-found page is the honest
+// answer, so a collision must never relax to "first match".
+test("two projects with one name resolve to neither", () => {
+  const dupes = [
+    { id: "org-a-wiki", name: "wiki" },
+    { id: "org-b-wiki", name: "wiki" },
+  ];
+  assert.equal(projectByName(dupes, "wiki"), undefined);
+  assert.equal(projectByName(dupes, "WiKi"), undefined);
+});
+
+// No id-shape check guards the matcher, on purpose: it only ever runs on a
+// segment that already failed to match every id, so an id-shaped segment can
+// resolve only if some project is literally named that string.
+test("an id-shaped segment matches nothing unless a project is named it", () => {
+  assert.equal(projectByName(PROJECTS, "4c400e3f"), undefined);
 });

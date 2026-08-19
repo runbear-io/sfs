@@ -28,10 +28,11 @@ func dirServer(t *testing.T, files map[string]string) http.Handler {
 
 func TestDirSourceServesFolder(t *testing.T) {
 	h := dirServer(t, map[string]string{
-		"README.md":     "# Local",
-		"notes/plan.md": "content",
-		".bdrive":       `{"volume":"x"}`, // settings file must be hidden
-		".git/config":   "noise",          // .git must be skipped
+		"README.md":      "# Local",
+		"notes/plan.md":  "content",
+		"notes/props.md": "---\ntitle: Plan\ntags: [a, b]\n---\n\n# Heading\n",
+		".bdrive":        `{"volume":"x"}`, // settings file must be hidden
+		".git/config":    "noise",          // .git must be skipped
 	})
 
 	var root Node
@@ -63,6 +64,28 @@ func TestDirSourceServesFolder(t *testing.T) {
 	// where this mode has always printed nothing.
 	if strings.Contains(rec.Body.String(), `"user"`) || strings.Contains(rec.Body.String(), `"user_name"`) {
 		t.Errorf("plain-folder render carries identity: %s", rec.Body)
+	}
+
+	// Frontmatter travels as ordered data, not as a table inside html —
+	// the viewer puts it in a side panel, so the body starts with the body.
+	rec = get(t, h, "/api/render?path=notes/props.md")
+	var doc struct {
+		HTML        string            `json:"html"`
+		Frontmatter []FrontmatterPair `json:"frontmatter"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Frontmatter) != 2 || doc.Frontmatter[0].Key != "title" ||
+		doc.Frontmatter[1].Value != "a, b" {
+		t.Errorf("frontmatter = %+v", doc.Frontmatter)
+	}
+	if strings.Contains(doc.HTML, `class="frontmatter"`) {
+		t.Errorf("render still bakes the table into html: %s", doc.HTML)
+	}
+	// A doc without any: the field is absent, so the viewer shows no panel.
+	if rec := get(t, h, "/api/render?path=README.md"); strings.Contains(rec.Body.String(), `"frontmatter"`) {
+		t.Errorf("render carries an empty frontmatter field: %s", rec.Body)
 	}
 
 	if rec := get(t, h, "/api/file?path=.git/config"); rec.Code != 404 {

@@ -689,3 +689,55 @@ func seccfgMedian(d []time.Duration) time.Duration {
 	sort.Slice(c, func(i, j int) bool { return c[i] < c[j] })
 	return c[len(c)/2]
 }
+
+// TestFrontendRootDottedPathsAre404: a root-level path shaped like a file
+// (/llms.txt, /robots.txt) that matches no embedded asset must 404 rather than
+// answer the app shell — a soft 200 of login HTML told every crawler probing a
+// conventional path that the file exists. Deeper dots are real client routes.
+func TestFrontendRootDottedPathsAre404(t *testing.T) {
+	h, _, _, p := permHub(t)
+
+	for _, target := range []string{"/llms.txt", "/robots.txt", "/sitemap.xml", "/nope.json"} {
+		rec := seccfgRaw(t, h, target)
+		if rec.Code != 404 {
+			t.Errorf("GET %s: %d, want 404 (got %s) — the SPA fallback still masks a missing root file",
+				target, rec.Code, rec.Header().Get("Content-Type"))
+		}
+	}
+
+	// A root-level dotted path that IS an embedded asset keeps being served:
+	// the rule is "no embedded asset", not "has a dot", because the check runs
+	// after the asset lookup. share-mermaid.js is the live case (the /s/ share
+	// pages import it); a favicon.ico would be the next one, with no allowlist
+	// to remember to update.
+	rec := seccfgRaw(t, h, "/share-mermaid.js")
+	if rec.Code != 200 {
+		t.Errorf("GET /share-mermaid.js: %d, want 200 — the dotted-path 404 is deciding on the URL "+
+			"instead of on whether the asset exists, and share pages just lost their mermaid renderer", rec.Code)
+	}
+
+	// Everything that is a genuine client route still resolves to the shell.
+	// /index.html is here because the asset block skips it deliberately and
+	// falls through: without the explicit exclusion the rule above would 404 it.
+	for _, target := range []string{"/", "/index.html", "/" + p.ID, "/" + p.ID + "/dashboard", "/" + p.ID + "/notes/index.md"} {
+		rec := seccfgRaw(t, h, target)
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), "<div id=\"root\">") {
+			t.Errorf("GET %s: %d — a client route stopped resolving to the app shell", target, rec.Code)
+		}
+	}
+}
+
+// TestFrontendVolumeModeServesRootFiles: the dotted-root-path 404 above is
+// hub-only reasoning. The plain-folder viewer shares this handler, and there
+// /README.md IS the route for a file (router.ts parsePath, non-hub branch), so
+// the rule is gated on hub mode. THIS TEST FAILS IF THAT GATE IS REMOVED —
+// ungated, the fix 404s every top-level file in every `bdrive serve <dir>`.
+func TestFrontendVolumeModeServesRootFiles(t *testing.T) {
+	h := dirServer(t, map[string]string{"README.md": "# Local"})
+
+	rec := seccfgRaw(t, h, "/README.md")
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "<div id=\"root\">") {
+		t.Errorf("GET /README.md in volume mode: %d — the hub-mode gate on the dotted-path 404 is gone; "+
+			"every root-level file in a plain-folder viewer is now unreachable", rec.Code)
+	}
+}

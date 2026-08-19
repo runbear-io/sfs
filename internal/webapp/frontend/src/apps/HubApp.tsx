@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { postJSON } from "../api/http";
 import type { InviteAccepted, Project, ProjectCreated, ServerConfig } from "../api/types";
 import { useOrgs, usePending, useProjects, useHubRefresh } from "../hooks/useHub";
-import { parseRoute, urlForPath, urlForView } from "../router";
+import { decodePath, parseRoute, projectByName, urlForPath, urlForView } from "../router";
 import { linkProps, navigate, Redirect, useLocationPath } from "../nav";
 import { AppShell, Page, Topbar, VaultHeader, closeSidebarOnMobile } from "../components/shell";
 import { OrgAdmin } from "../components/OrgAdmin";
@@ -235,22 +235,59 @@ export default function HubApp({ config }: { config: ServerConfig }) {
 
   // Same rule as orgMissing, for the project id: a deep link to an id that is
   // not yours is not a landing. `current` still resolves (the fallback chain
-  // above is untouched) — it is what the sidebar shows and where "back" points.
+  // above is untouched) — it is where "back" points.
   const projectMissing = !!route.project && !projects.some((p) => p.id === route.project);
-  const projectPage = projectMissing
-    ? {
-        crumb: "Project",
-        body: (
+  if (projectMissing) {
+    // The id never appears in the UI as something to copy, so a hand-typed
+    // first segment is almost always the project NAME the sidebar shows. One
+    // unambiguous match resolves to its id, carrying the rest of the URL —
+    // path, view, target, filters, version — along with it.
+    const named = projectByName(projects, route.project!);
+    if (named) {
+      return (
+        <Redirect
+          to={
+            route.view
+              ? urlForView(route.view, named, route.viewTarget, route.filters)
+              : urlForPath(route.path, named, route.version)
+          }
+        />
+      );
+    }
+    // Nothing resolved, so this returns early rather than falling through:
+    // every redirect below rewrites the address bar off `current.id`, and all
+    // of them are wrong for a segment that named nothing — /bad-id,
+    // /bad-id/insights and /bad-id/notes/ would each swap in another project
+    // and drop the path. The URL stays as typed.
+    //
+    // And it renders with NO tree. `current` still resolves, but painting its
+    // sidebar beside a "not found" body is the page arguing with itself: two
+    // personas read the full file tree of a project they were looking at,
+    // one of them its owner, next to a line telling them they were no longer
+    // a member of it.
+    return (
+      <AppShell
+        vault={vault}
+        projectsNav={<ProjectNav projects={projects} onNew={() => setCreating(true)} />}
+        orgBar={accountBar}
+        topbar={<Topbar />}
+      >
+        <Page>
           <div className="empty">
             <h3>Project not found</h3>
-            <p>This project doesn't exist, or you're no longer a member.</p>
+            <p>
+              There's no project called “{decodePath(route.project!)}” in your account. It may
+              have been renamed or deleted, or the link may be wrong.
+            </p>
             <p>
               <a {...linkProps("/" + current.id)}>Back to {current.name}</a>
             </p>
           </div>
-        ),
-      }
-    : null;
+        </Page>
+        {newProjectDialog}
+      </AppShell>
+    );
+  }
 
   // Billing is hub-level (the managed deployment's surface), not
   // project-scoped — like the org route it borrows whichever project the
@@ -299,38 +336,36 @@ export default function HubApp({ config }: { config: ServerConfig }) {
           }
         : null;
 
-  // Every redirect below rewrites the address bar off `current.id`, so all of
-  // them are wrong for a bogus deep link: /bad-id, /bad-id/insights and
-  // /bad-id/notes/ would each swap in another project and drop the path.
-  // projectMissing renders instead (projectPage above) at the URL as typed.
-  if (!projectMissing) {
-    // Landing ("/") resolves to a real project URL; replace so back/forward
-    // never bounces through the redirect. The org route is not project-scoped,
-    // so it is exempt — it borrows whichever project the sidebar is showing.
-    if (!route.org && !route.billing && route.project !== current.id) {
-      return <Redirect to={"/" + current.id} />;
-    }
+  // Everything below rewrites the address bar off `current.id`. A missing
+  // project can no longer reach here — it returned above — so these need no
+  // guard of their own.
 
-    // A renamed view URL (/insights) still resolves; swap it for the current
-    // one so there is one live URL per page. Filters ride along: the hop is a
-    // rename, not a reset, and dropping them would silently widen the feed.
-    if (route.legacyView && route.view) {
-      return <Redirect to={urlForView(route.view, current.id, route.viewTarget, route.filters)} />;
-    }
+  // Landing ("/") resolves to a real project URL; replace so back/forward
+  // never bounces through the redirect. The org route is not project-scoped,
+  // so it is exempt — it borrows whichever project the sidebar is showing.
+  if (!route.org && !route.billing && route.project !== current.id) {
+    return <Redirect to={"/" + current.id} />;
+  }
 
-    // /history?path=guide.md resolved to guide.md's feed (the query form is
-    // what the History API teaches); put the canonical path URL in the address
-    // bar.
-    if (route.queryTarget && route.view) {
-      return <Redirect to={urlForView(route.view, current.id, route.viewTarget, route.filters)} />;
-    }
+  // A renamed view URL (/insights) still resolves; swap it for the current
+  // one so there is one live URL per page. Filters ride along: the hop is a
+  // rename, not a reset, and dropping them would silently widen the feed.
+  if (route.legacyView && route.view) {
+    return <Redirect to={urlForView(route.view, current.id, route.viewTarget, route.filters)} />;
+  }
 
-    // /notes/ is the same page as /notes — resolve it, then take the slash off
-    // the address bar. After the rewrite the flag is false, so there is no
-    // second hop.
-    if (route.trailingSlash && route.path) {
-      return <Redirect to={urlForPath(route.path, current.id, route.version)} />;
-    }
+  // /history?path=guide.md resolved to guide.md's feed (the query form is
+  // what the History API teaches); put the canonical path URL in the address
+  // bar.
+  if (route.queryTarget && route.view) {
+    return <Redirect to={urlForView(route.view, current.id, route.viewTarget, route.filters)} />;
+  }
+
+  // /notes/ is the same page as /notes — resolve it, then take the slash off
+  // the address bar. After the rewrite the flag is false, so there is no
+  // second hop.
+  if (route.trailingSlash && route.path) {
+    return <Redirect to={urlForPath(route.path, current.id, route.version)} />;
   }
 
   return (
@@ -392,7 +427,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
         ),
         orgBar: accountBar,
       }}
-      panel={activePanel || orgPage || projectPage || billingPage || routePage}
+      panel={activePanel || orgPage || billingPage || routePage}
       onClosePanel={() => setPanel(null)}
       />
       {newProjectDialog}

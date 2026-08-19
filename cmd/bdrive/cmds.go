@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -11,6 +13,7 @@ import (
 	"github.com/runbear-io/beardrive/internal/config"
 	"github.com/runbear-io/beardrive/internal/daemon"
 	"github.com/runbear-io/beardrive/internal/journal"
+	"github.com/runbear-io/beardrive/internal/secrets"
 	"github.com/runbear-io/beardrive/internal/store"
 	"github.com/runbear-io/beardrive/internal/syncer"
 )
@@ -71,16 +74,22 @@ list in .bdrive/config.json is never pruned against either.`,
 					return err
 				}
 				defer closeSession(sess)
-				if cmd.Flags().Changed("note") {
-					// Persist the note so the daemon's own scans stamp it too —
-					// history then links every change from this working session
-					// to its context, not just the ones this invocation catches.
-					// An explicit empty --note clears it. Expires after --note-ttl.
-					if err := sess.Store.SaveNote(note, noteTTL); err != nil {
-						return err
-					}
-					sess.Note = note
+				// Persist the note so the daemon's own scans stamp it too —
+				// history then links every change from this working session
+				// to its context, not just the ones this invocation catches.
+				// Expires after --note-ttl. Unconditional because an explicit
+				// `bdrive sync` is a human act: whatever note the last agent
+				// session left stops applying here, and empty text clears
+				// (SaveNote -> ClearNote), so one call both sets and clears.
+				// Clearing the *store* is what leaves this cycle unstamped —
+				// scan falls back to LoadNote whenever Session.Note is empty.
+				// The --hook branch below has its own SaveNote and keeps the
+				// TTL, which is what the TTL is for: the daemon's own scans
+				// inside an agent session.
+				if err := sess.Store.SaveNote(note, noteTTL); err != nil {
+					return err
 				}
+				sess.Note = note
 				sess.Prune = prune
 				sess.OnProgress = progressReporter()
 				res, err := sess.Cycle(cmd.Context())
@@ -108,6 +117,7 @@ list in .bdrive/config.json is never pruned against either.`,
 					if h, ok := runHookSync(cmd, target, sessionID, hookLabel); ok {
 						link := hookLinkFor(folder, target, h.base)
 						link.paths = h.paths
+						link.secrets = h.secrets
 						links = append(links, link)
 					}
 				}
@@ -203,8 +213,10 @@ func statusCmd() *cobra.Command {
 				}
 				first = false
 				folder := mi.Path
+				var include []string
 				if proj, ok, err := config.LoadProject(folder); err == nil && ok {
 					mi.Volume, mi.Remote = proj.Volume, proj.Remote // folder config wins
+					include = proj.Include
 				} else {
 					fmt.Printf("%s\n  (folder missing — moved or deleted; run `bdrive init` at its new location)\n", folder)
 					continue
@@ -233,13 +245,18 @@ func statusCmd() *cobra.Command {
 				if err != nil {
 					continue
 				}
-				cache, err := sess.Store.LoadCache(id)
-				if err == nil {
+				cache, cacheErr := sess.Store.LoadCache(id)
+				if cacheErr == nil {
 					var total int64
 					for _, c := range cache {
 						total += c.Size
 					}
 					fmt.Printf("  files:    %d (%s)\n", len(cache), humanBytes(total))
+				}
+				// Read, never scanned: `status` runs no cycle, so what it
+				// reports is what the last cycle that read those bytes found.
+				if found, err := sess.Store.LoadSecrets(id); err == nil {
+					printSecrets(found)
 				}
 				st, err := sess.Store.LoadSync()
 				myOps, err2 := sess.Store.DeviceOps(dev.ID)
@@ -249,6 +266,18 @@ func statusCmd() *cobra.Command {
 						pending = 0
 					}
 					fmt.Printf("  pending:  %d local change(s) not yet pushed\n", pending)
+					// `pending` counts what the journal holds; it says nothing
+					// about the folder, so with the daemon stopped an edit
+					// nobody has scanned yet is in neither. Drift is that
+					// second, separate state — a read-only walk, no ops, no
+					// journal, no hub. It degrades to no line rather than
+					// failing the command.
+					if cacheErr == nil {
+						if added, modified, gone, dErr := syncer.Drift(folder, include, st.IgnoreAccepted, cache); dErr == nil {
+							fmt.Printf("  local:    %d change(s) not yet scanned (%d new, %d edited, %d removed)\n",
+								added+modified+gone, added, modified, gone)
+						}
+					}
 					switch st.Access {
 					case store.AccessReadOnly:
 						fmt.Printf("  access:   read-only (pull only) — %d local change(s) stay on this device\n", pending)
@@ -267,6 +296,10 @@ func statusCmd() *cobra.Command {
 		},
 	}
 }
+
+// writeGap is how far a file's write time must lag the moment it was journaled
+// before `bdrive log` prints both.
+const writeGap = time.Minute
 
 func logCmd() *cobra.Command {
 	var limit int
@@ -300,7 +333,8 @@ func logCmd() *cobra.Command {
 				return nil
 			}
 			for _, op := range entries {
-				when := syncer.DisplayTime(op).Local().Format("2006-01-02 15:04:05")
+				commit := syncer.CommitTime(op)
+				when := commit.Local().Format("2006-01-02 15:04:05")
 				kind := op.Kind
 				if kind == journal.KindPut {
 					kind = "put   "
@@ -320,6 +354,17 @@ func logCmd() *cobra.Command {
 					safeField(op.Path, 160), safeField(who, 64), safeField(op.DeviceName, 64))
 				if op.Kind == journal.KindPut {
 					line += fmt.Sprintf("  (%s)", humanBytes(op.Size))
+				}
+				// The first column is when the change was journaled, so the
+				// rows read monotonically. The file's own write time still
+				// matters — but the daemon scans every 3s and a hook sync is
+				// prompt, so a sub-minute gap is just scan latency and would be
+				// noise on every row. A larger gap means the file genuinely
+				// predates its arrival here — a rename, or an old document
+				// added today — and that is the case the reader has to see.
+				// Deletes have no file left to stat, so they never carry it.
+				if written := syncer.DisplayTime(op); commit.Sub(written) >= writeGap {
+					line += fmt.Sprintf("  (written %s)", written.Local().Format("2006-01-02 15:04:05"))
 				}
 				if note := safeField(op.Note, 200); note != "" {
 					line += "  [" + note + "]"
@@ -346,6 +391,33 @@ func logCmd() *cobra.Command {
 //
 // So: no C0 or DEL, one entry is one line, and each part is bounded — 50 rows
 // of log is also owned by one 40 KB entry that scrolls the rest away.
+// statusSecretsMax caps the block: a folder that trips the rules everywhere
+// would otherwise bury the rest of `status` under its own output.
+const statusSecretsMax = 20
+
+// printSecrets renders what the last cycle that read these files found. The
+// wording is the same contract the share gate has: each file was checked WHEN
+// IT CHANGED, which says nothing about a file that has not. Rule id and line
+// only — the matched bytes never leave internal/secrets.
+func printSecrets(found map[string][]secrets.Finding) {
+	if len(found) == 0 {
+		return
+	}
+	paths := slices.Sorted(maps.Keys(found))
+	fmt.Printf("  secrets: %d file(s) looked like they contain credentials when they last changed\n", len(paths))
+	for i, rel := range paths {
+		if i == statusSecretsMax {
+			fmt.Printf("             +%d more\n", len(paths)-i)
+			break
+		}
+		for _, f := range found[rel] {
+			// The path is a project member's string reaching a terminal,
+			// exactly like the rows above.
+			fmt.Printf("             %s:%d  %s\n", safeField(rel, 160), f.Line, secrets.Label(f.Rule))
+		}
+	}
+}
+
 func safeField(s string, max int) string {
 	s = strings.Map(func(r rune) rune {
 		switch {

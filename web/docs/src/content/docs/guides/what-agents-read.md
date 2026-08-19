@@ -20,6 +20,12 @@ Hubs track it.
 Sync replication never counts as a read, and neither does viewing a blob in
 history. Only genuine consumption.
 
+That includes your own: a member opening a file in the hub records a human
+read under their own account, so on a small or new project an author checking
+their own page can be a real share of the count. Repeat opens by the same
+reader inside 10 minutes count once. Every surface that prints a read count
+says so beside it.
+
 Agent reads require the hooks from [Set up with your agent](/start/setup/) —
 registered once per machine, in the agent's own user config, so every device
 whose agents you want counted needs its own `bdrive init` (or `bdrive hooks
@@ -65,6 +71,26 @@ Two things worth knowing:
 - The join is on a session id the sync hook stamps, never on the run's note —
   the note is free text anyone can set with `bdrive sync --note`, so joining on
   it would let one person's changes attach to another person's card.
+
+### Undoing a whole run
+
+The card's header carries **Undo this run**: one click puts back every file
+that run touched. A file it edited returns to the content it had just before
+the run; a file it created is removed. The confirm lists every path with what
+will happen to it before anything is written, so you can read the whole thing
+and cancel.
+
+Two things it says out loud, because they are the ones that can surprise you:
+
+- **A file someone changed after the run is reverted too**, and the confirm
+  counts them. That is the same last-writer-wins rule the rest of BearDrive
+  follows, but it is worth seeing before you click.
+- **A file already holding its pre-run content is skipped**, not written —
+  reported as skipped rather than as a failure.
+
+Nothing is erased. The undo is new changes appended to history like any other,
+written in a single batch, so it is itself a run card you can undo. Undoing
+needs write access on the project; a read-only member sees no button.
 
 Per-session detail is kept for 30 days by default
 (`reads.session_retention_days`, see [Hub config](/reference/hub-config/));

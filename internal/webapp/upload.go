@@ -173,6 +173,25 @@ func nextLamport(cur int64) int64 {
 // to this server's own journal. Callers fill in Kind/Path and the content
 // fields; Seq, Lamport, Time and the device fields belong to us.
 func (r *RemoteSource) appendOp(ctx context.Context, op journal.Op) error {
+	return r.appendOps(ctx, []journal.Op{op})
+}
+
+// appendOps is the same write for N ops at once, in ONE read-modify-write.
+// Every journal write in this package goes through it — appendOp is the
+// single-op call — so there is exactly one place that stamps the hub's
+// identity and exactly one that rewrites the key.
+//
+// The batch is not an optimization detail: it is what makes a multi-path
+// write atomic. One Put of one object either lands or it does not, so a
+// run-wide undo (undorun.go) can never leave half a run reverted. A caller
+// that loops appendOp instead gets N whole-journal round trips AND a
+// partially-applied write with nothing to report it.
+func (r *RemoteSource) appendOps(ctx context.Context, ops []journal.Op) error {
+	// Never rewrite an unchanged journal: a Put of identical bytes still
+	// bumps Modified, which invalidates every reader's journal cache.
+	if len(ops) == 0 {
+		return nil
+	}
 	r.upmu.Lock()
 	defer r.upmu.Unlock()
 
@@ -187,14 +206,21 @@ func (r *RemoteSource) appendOp(ctx context.Context, op journal.Op) error {
 			mySeq = max(mySeq, prev.Seq)
 		}
 	}
-	// Saturating, like the client's tickLamport. maxLamport is taken over
-	// every journal the hub can see, members' included, and int64 addition
-	// wraps: one pushed op carrying MaxInt64 made the hub's next lamport
-	// MinInt64 — recomputed on every commit, so every later browser upload in
-	// the project silently lost last-writer-wins while commit still answered
-	// 200.
-	op.Seq, op.Lamport, op.Time = mySeq+1, nextLamport(maxLamport), time.Now().UTC()
-	op.Device, op.DeviceName, op.Author = r.Device.ID, r.Device.Name, r.Device.Author
+	now := time.Now().UTC()
+	lam := maxLamport
+	for i := range ops {
+		// Saturating, like the client's tickLamport. maxLamport is taken over
+		// every journal the hub can see, members' included, and int64 addition
+		// wraps: one pushed op carrying MaxInt64 made the hub's next lamport
+		// MinInt64 — recomputed on every commit, so every later browser upload
+		// in the project silently lost last-writer-wins while commit still
+		// answered 200. At saturation the batch's lamports stop increasing and
+		// journal.Less orders the rest through (time, device, seq), which is
+		// still a total order — so replay stays deterministic.
+		lam = nextLamport(lam)
+		ops[i].Seq, ops[i].Lamport, ops[i].Time = mySeq+int64(i)+1, lam, now
+		ops[i].Device, ops[i].DeviceName, ops[i].Author = r.Device.ID, r.Device.Name, r.Device.Author
+	}
 
 	// Read-modify-write of our own journal. A transient read error must fail
 	// the commit — treating it as "no journal yet" would rewrite the key
@@ -214,7 +240,7 @@ func (r *RemoteSource) appendOp(ctx context.Context, op journal.Op) error {
 			return err
 		}
 	}
-	line, err := journal.Marshal([]journal.Op{op})
+	line, err := journal.Marshal(ops)
 	if err != nil {
 		return err
 	}

@@ -32,6 +32,8 @@ flowchart LR
 
     tpl["internal/templates<br/>go:embed'ed starting structures<br/>(docs, wiki, para, skills: skeleton + AGENTS.md)"]
 
+    sec["internal/secrets<br/>six credential rules, stdlib only<br/>shared by the share gate and the sync scan"]
+
     docs["web/docs — docs.beardrive.ai<br/>Astro/Starlight, deploys separately"]
     cloud["cloud/ (PRIVATE nested repo, gitignored)<br/>managed beardrive.ai: swaps AuthProvider,<br/>QuotaProvider, MetaStore seams"]
 
@@ -44,6 +46,8 @@ flowchart LR
     hooks -->|"bdrive sync --hook / --note, read-log<br/>gated: enrolled + not paused"| cli
     srv --> store
     srv --> meta
+    eng -->|"scan: warn, never hold"| sec
+    srv -->|"share mint: refuse · markdown render: badge"| sec
     cli -->|"init --template: seed locally"| tpl
     srv -->|"POST /api/projects template:<br/>seed as ops under the hub's device"| tpl
     fe -->|/api/config, /api/projects, viewer APIs| srv

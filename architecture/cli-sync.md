@@ -31,7 +31,7 @@ classDiagram
         -fetchChunked(ctx, op, basis) error
         -chunkSpans(blob) []span
     }
-    note for Session "syncer also exposes LogEntries (causal order, what bdrive restore walks) plus DisplayTime / SortForDisplay — the newest-first-by-clock order bdrive log prints"
+    note for Session "syncer also exposes LogEntries (causal order, what bdrive restore walks) plus CommitTime / DisplayTime / SortForDisplay — the order bdrive log prints: newest-first by when a change was journaled (CommitTime), tie-broken by the file's own write time (DisplayTime) so one scan reads by edit time"
     note for Session "Restore writes a historical blob back into the working folder as an ordinary edit (fetching it from the hub when this device never held it) — the next Cycle journals it like any other change; it takes no lock and appends to no journal itself"
     note for Session "internal/syncer — scan → commit local ops → pull peer journals → adopt on join → re-assert withdrawn ops → preserve conflicts → refresh rules → prune → materialize → push blobs then own journal"
     note for Session "pull returns TWO lists: newly seen ops, and `gone` — ops a peer deleted from a journal this device had already applied. A peer cannot un-say what we already hold: stillHold re-signs each still-held put into OUR journal (reassertNote). Pull resumes at a byte offset by prefix-matching the local journal copy, so a peer's growing journal is read once"
@@ -98,7 +98,7 @@ classDiagram
         +walkFolder(folder, filter, fn)
         verdict: vSync vSkipFile vDescend vPruneDir vNested
     }
-    note for walkFolder "walk.go — the ONLY copy of the sync predicate; scan, Explain, Measure and SyncedFiles all go through it, so what --explain reports, what init warns about and what bdrive grep searches cannot drift from what leaves"
+    note for walkFolder "walk.go — the ONLY copy of the sync predicate; scan, Explain, Measure, SyncedFiles and Drift all go through it, so what --explain reports, what init warns about, what bdrive grep searches and what status calls unscanned cannot drift from what leaves"
 
     class Measure {
         +Measure(folder, include) files, bytes
@@ -109,6 +109,11 @@ classDiagram
         +SyncedFiles(folder, include, accepted) paths
     }
     note for SyncedFiles "walk.go — the mount-relative paths that sync, in walk order: what bdrive grep searches, so a .bdriveignore rule or a narrowed scope excludes a file from search exactly as it excludes it from sync. Deliberately NOT Explain, which countFiles every pruned dir — a grep in a repo with node_modules/ would walk it in full for a count it discards"
+
+    class Drift {
+        +Drift(folder, include, accepted, cache) added, modified, removed
+    }
+    note for Drift "drift.go — the `local:` line in bdrive status: what is on disk that the state cache has not seen, using the scan's own size+mtime compare. Pure read like its siblings, and load-bearing that it stays one: status is what someone runs when sync is stuck, so it stores no blob, mints no op, rewrites no cache — it does not even mutate the cache map it is handed, which status prints `files:` from"
 
     class Explain {
         +Explain(folder, include, accepted) two lists
@@ -132,10 +137,22 @@ classDiagram
         +LogRead(rel, session) read spool
         +PendingReads dedup on path+session
         +LogInbound / DrainInbound
+        +LoadSecrets / SaveSecrets mountID
         +Lock() flock
     }
+    note for Store "secrets-mount-id.json is the credential-finding record: what `bdrive status` prints and what the agent hook appends a sentence about. Like the inbound spool it outlives the cycle that wrote it — the daemon scans the write seconds before the turn starts — but unlike it, it is STATE and is never drained: a finding stands until the file changes without it"
     note for Store "internal/store — ~/.bdrive/volumes/mount-id: content-addressed blobs, per-device journal copies, state cache, paused marker (free funcs Paused/SetPaused, no flock)"
     note for Store "inbound.jsonl is the read spool's twin, running the other way: materialize appends every path it wrote or removed for a peer, and `sync --hook` drains it into the turn's context (re-read before editing). A spool and not a Result field because the daemon usually materializes the change seconds before the turn starts, so the hook's own cycle sees nothing. Capped, best-effort, never fails a cycle. Result.Inbound now carries the SAME events for the post_sync hook and is not a duplicate to delete: that consumer fires from the cycle itself, and a second drainer would silently empty the agent hook's context"
+
+    class secretLog {
+        <<syncer/secrets.go>>
+        found map path to Findings
+        dirty bool
+        +scanBlob(store, rel, sum)
+        +set / drop per path
+    }
+    note for secretLog "internal/secrets' six rules, run on the path EVERY file takes. Only on the branches that just called PutBlobFile — the cheap size+mtime path never re-reads a file — and it reads the BLOB, i.e. the exact bytes that were hashed and journaled, so a line number can never describe content no op captured"
+    note for secretLog "WARN ONLY: the op is journaled and pushed exactly as before. Holding it would strand the file behind a false positive and break the cycle's degrade-to-offline posture. Merged PER PATH into secrets-mount-id.json and written in finish only when dirty — nearly every cycle scans zero files, so a whole-set rewrite would erase the warning seconds after it appeared. A save error is logged, never returned: advisory telemetry gets no veto over convergence"
 
     class Op {
         +Seq +Lamport +Time +Device
@@ -174,6 +191,8 @@ classDiagram
     Session --> Filter : SkipUp on scan, Skip on materialize
     Session --> walkFolder : scan
     Explain --> walkFolder : same predicate
+    Drift --> walkFolder : same predicate
+    Drift --> Filter : own fresh instance
     SyncedFiles --> walkFolder : same predicate
     SyncedFiles --> Filter : own fresh instance
     Measure --> walkFolder : same predicate
@@ -181,6 +200,8 @@ classDiagram
     Explain --> Filter : own fresh instance
     Explain ..> Entry : not-synced lines
     walkFolder --> Filter : SkipUp / PruneDir / addNestedMount
+    Session --> secretLog : scan flags, finish persists
+    secretLog --> Store : reads the blob, writes secrets-mount-id.json
     Session ..> Op : commits, replays
     Session --> Result
     Store o-- Op : journal files
@@ -202,13 +223,13 @@ classDiagram
 
     class Commands {
         init login logout
-        sync stop scope grep forget status log
+        sync stop scope grep stale forget status log
         restore url share export import
         web daemon hooks read-log
         resume autostart
     }
     note for Commands "cmd/bdrive — thin cobra layer; init is the front door (one command: login + hooks + sync + link), stop pauses"
-    note for Commands "grep searches file CONTENTS in the working folder via syncer.SyncedFiles — LoadProject not ResolveMount (a read must not enroll the device), no session, no flock, and the volume store is opened only if it already exists, so a search creates nothing. Exit 1 on no match is a status, not an error (errNoMatch + SilenceErrors)"
+    note for Commands "grep searches file CONTENTS in the working folder via syncer.SyncedFiles — LoadProject not ResolveMount (a read must not enroll the device), no session, no flock, and the volume store is opened only if it already exists, so a search creates nothing. Exit 1 on no match is a status, not an error (errNoMatch + SilenceErrors). stale copies that whole posture and swaps the predicate: it extracts path-shaped references from synced markdown, keeps only the ones resolving into the SyncedFiles set, and flags a doc whose reference was written later. It dates a path from the JOURNAL, not os.Stat — materialize stamps a peer's file with this device's mtime, so mtime comparison reports nothing on a freshly cloned machine — folding st.AllOps() to the max syncer.DisplayTime per path, which drops a forged future stamp instead of dating that path to year 1. Unlike grep it exits 0 either way: advisory output, not a gate"
     note for Commands "Every peer-authored string status / log / whoami print goes through safeField first — a teammate's file name is attacker-controlled text landing in your terminal, and an escape sequence there rewrites the line above it. grep runs BOTH the path and the matched line through it — a matched line is a teammate's file content, the widest version of that surface. login now does PKCE on the loopback callback (no compat arm) and both its client and init's refuse to follow a redirect off the hub's origin with the device token attached"
 
     class Templates {

@@ -862,6 +862,75 @@ func TestCLITemplateRefusals(t *testing.T) {
 	}
 }
 
+// The same six rules, on the path every file takes. `bdrive status` names a
+// synced file that looked like it held a credential when it last changed —
+// and the file synced anyway, which is the posture: warn, never block.
+func TestCLISecretsWarnOnSync(t *testing.T) {
+	e := newCLIEnv(t)
+	run := e.run
+
+	work := t.TempDir()
+	// Fabricated, AWS-shaped. Not a credential.
+	const plantedKey = "AKIAIOSFODNN7EXAMPLE"
+	if err := os.WriteFile(filepath.Join(work, "clean.md"), []byte("# Clean\n\nnothing here\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run(work, "init", "--name", "secret-warn", "--yes"); err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+	defer run(work, "stop", work)
+
+	// Nothing planted yet: the block is absent entirely, not empty.
+	out, err := run(work, "status", work)
+	if err != nil {
+		t.Fatalf("status: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "secrets:") {
+		t.Fatalf("status names credentials with none found:\n%s", out)
+	}
+
+	if err := os.WriteFile(filepath.Join(work, "deploy.md"), []byte(
+		"# Deploy\n\nexport AWS_ACCESS_KEY_ID="+plantedKey+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run(work, "sync"); err != nil {
+		t.Fatalf("sync: %v\n%s", err, out)
+	}
+	out, err = run(work, "status", work)
+	if err != nil {
+		t.Fatalf("status: %v\n%s", err, out)
+	}
+	for _, want := range []string{"secrets:", "deploy.md:3", "an AWS access key", "when they last changed"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("status missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, plantedKey) {
+		t.Fatalf("status echoed the key back:\n%s", out)
+	}
+
+	// It synced anyway — warn, never hold. The hub has the file.
+	if out, err := run(work, "share", "deploy.md", "--force"); err != nil || !strings.Contains(out, "/s/") {
+		t.Fatalf("the flagged file did not reach the hub: %v\n%s", err, out)
+	}
+
+	// Fixing the file is the whole remedy: no command, no flag.
+	if err := os.WriteFile(filepath.Join(work, "deploy.md"), []byte(
+		"# Deploy\n\nread AWS_ACCESS_KEY_ID from the environment\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run(work, "sync"); err != nil {
+		t.Fatalf("sync: %v\n%s", err, out)
+	}
+	out, err = run(work, "status", work)
+	if err != nil {
+		t.Fatalf("status: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "secrets:") {
+		t.Fatalf("the warning outlived the credential:\n%s", out)
+	}
+}
+
 // `bdrive share` refuses a file that looks like it holds credentials, and
 // --force is the way past it. This is the flow BEA-111 exists for: the CLI
 // used to print the URL and nothing else.
@@ -924,5 +993,123 @@ func TestCLIShareSecretGate(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 || !strings.Contains(string(body), "Deploy") {
 		t.Fatalf("forced link does not serve: %d %s", resp.StatusCode, body)
+	}
+}
+
+// bdrive share <folder> used to say the folder wasn't synced yet, so users went
+// looking for a sync fault that wasn't there — and the CLI bolted a "run bdrive
+// sync" hint onto it. Folders now get the real answer, hint-free.
+func TestCLIShareFolder(t *testing.T) {
+	e := newCLIEnv(t)
+	run := e.run
+
+	work := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(work, "notes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"notes/readme.md", "notes/zeta.md"} {
+		if err := os.WriteFile(filepath.Join(work, filepath.FromSlash(f)), []byte("# "+f+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out, err := run(work, "init", "--name", "share-folder", "--yes"); err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+	defer run(work, "stop", work)
+	if out, err := run(work, "sync"); err != nil {
+		t.Fatalf("sync: %v\n%s", err, out)
+	}
+
+	out, err := run(work, "share", "notes")
+	if err == nil {
+		t.Fatalf("share of a folder succeeded:\n%s", out)
+	}
+	for _, want := range []string{"per-file", "notes/readme.md"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("folder error missing %q:\n%s", want, out)
+		}
+	}
+	for _, unwanted := range []string{"wait a few seconds", "not synced", "400 Bad Request"} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("folder error should not contain %q:\n%s", unwanted, out)
+		}
+	}
+
+	// A path that really is missing keeps the sync-timing diagnosis and its hint.
+	out, err = run(work, "share", "missing.md")
+	if err == nil {
+		t.Fatalf("share of a missing file succeeded:\n%s", out)
+	}
+	for _, want := range []string{"not synced to this project yet", "wait a few seconds"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing-file error missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestCLIStatusReportsUnscannedWork is BEA-106: with the daemon stopped,
+// `status` answered from the state cache and the journal — neither of which
+// has seen an edit nobody scanned — and reported the folder clean. A wrong
+// "you're clean" is worse than no answer, so status now walks the folder
+// read-only and reports that drift on its own line.
+func TestCLIStatusReportsUnscannedWork(t *testing.T) {
+	e := newCLIEnv(t)
+	run := e.run
+
+	work := t.TempDir()
+	if err := os.WriteFile(filepath.Join(work, "index.md"), []byte("# Index\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run(work, "init", "--name", "status-drift", "--yes"); err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+	defer run(work, "stop", work)
+	if out, err := run(work, "sync"); err != nil {
+		t.Fatalf("sync: %v\n%s", err, out)
+	}
+	if out, err := run(work, "stop", work); err != nil {
+		t.Fatalf("stop: %v\n%s", err, out)
+	}
+
+	// Clean and stopped: the line is present and reads zero.
+	out, err := run(work, "status")
+	if err != nil {
+		t.Fatalf("status: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "local:    0 change(s) not yet scanned") {
+		t.Fatalf("clean status missing a zeroed local line:\n%s", out)
+	}
+
+	// Now the reported case: edit with no daemon to scan it.
+	if err := os.WriteFile(filepath.Join(work, "index.md"), []byte("# Index\n\nappended by hand\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err = run(work, "status")
+	if err != nil {
+		t.Fatalf("status: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "local:    1 change(s) not yet scanned (0 new, 1 edited, 0 removed)") {
+		t.Fatalf("status did not report the unscanned edit:\n%s", out)
+	}
+	// And it stays distinct from `pending`, which is still legitimately zero.
+	if !strings.Contains(out, "pending:  0 local change(s) not yet pushed") {
+		t.Fatalf("status conflated drift with pending:\n%s", out)
+	}
+
+	// status is a pure read: the edit is still uncommitted afterwards, so the
+	// sync that follows is the one that journals it. (`stop` paused this
+	// folder, so resuming it is `init` again.)
+	if out, err := run(work, "init", "--yes"); err != nil {
+		t.Fatalf("init resume: %v\n%s", err, out)
+	}
+	if out, err := run(work, "sync"); err != nil {
+		t.Fatalf("sync: %v\n%s", err, out)
+	}
+	out, err = run(work, "status")
+	if err != nil {
+		t.Fatalf("status: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "local:    0 change(s) not yet scanned") {
+		t.Fatalf("drift did not clear after a sync:\n%s", out)
 	}
 }

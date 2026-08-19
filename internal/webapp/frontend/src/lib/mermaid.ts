@@ -83,11 +83,26 @@ export async function renderMermaid(html: string, palette: Palette = DARK): Prom
       wrap.className = "mermaid-diagram";
       wrap.innerHTML = svg;
       pre.replaceWith(wrap);
-    } catch {
+    } catch (err) {
       const note = doc.createElement("div");
       note.className = "mermaid-err";
       note.textContent = "Couldn't render this diagram.";
       pre.after(note);
+      // mermaid's parse error IS the diagnostic: a line number, the offending
+      // source, a caret column and the expected tokens. It lands in a sibling
+      // so .mermaid-err's text stays exactly what it has always been.
+      //
+      // textContent, never innerHTML: the message quotes the author's source
+      // verbatim, and what this helper returns is mounted through
+      // dangerouslySetInnerHTML. The line number is the DIAGRAM's — the helper
+      // only ever sees rendered HTML, never the .md around it.
+      const msg = err instanceof Error ? err.message.trim() : "";
+      if (msg) {
+        const detail = doc.createElement("div");
+        detail.className = "mermaid-err-detail";
+        detail.textContent = msg.slice(0, 2000);
+        note.after(detail);
+      }
     }
   }
   // mermaid.render measures in a temporary `d<id>` element on the live body

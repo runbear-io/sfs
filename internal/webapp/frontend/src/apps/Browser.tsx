@@ -9,7 +9,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { atLeast } from "../api/types";
 import { getJSON, postJSON } from "../api/http";
-import type { Project, ServerConfig } from "../api/types";
+import type { Project, ServerConfig, UndoPlan } from "../api/types";
 import { useHeat, useTree } from "../hooks/useBrowse";
 import { useShares } from "../hooks/useHub";
 import { urlForPath, urlForView, type Route } from "../router";
@@ -30,34 +30,12 @@ import { Palette, type PaletteItem } from "../components/Palette";
 import { ConnectGuide } from "../components/ConnectGuide";
 import { Insights, useInsightsDevices } from "../components/Insights";
 import { HistoryView, historyTitle } from "../components/HistoryView";
+import type { Run } from "../lib/runs";
+import { armGoal, applyGoal, noteScroll, type Goal } from "../lib/scroll";
 import { VersionBanner } from "../components/VersionBanner";
-
-// The hub's six share-time credential rules, in words. Only one caller
-// (shareNow), so it lives here rather than in its own file.
-const SECRET_LABELS: Record<string, string> = {
-  aws_access_key_id: "an AWS access key",
-  openai_api_key: "an OpenAI API key",
-  github_pat: "a GitHub token",
-  slack_token: "a Slack token",
-  private_key: "a private key",
-  gitlab_pat: "a GitLab token",
-};
-
-// secretsMessage phrases the 409 for the confirm dialog. The second sentence
-// is not decoration: a link always serves the file's LATEST content, so the
-// copy may only ever claim what was true at the moment of sharing — never
-// that the file is clean.
-function secretsMessage(findings: { rule: string; line: number }[] = []): string {
-  const parts = findings.map((f) => `${SECRET_LABELS[f.rule] ?? f.rule} (line ${f.line})`);
-  const what =
-    parts.length > 1
-      ? parts.slice(0, -1).join(", ") + " and " + parts[parts.length - 1]
-      : parts[0] || "something credential-shaped";
-  return (
-    `BearDrive found ${what} in this file. The check covers the file at the moment you share it — ` +
-    `a link always serves the file's latest content, so later changes are never checked. Share anyway?`
-  );
-}
+import { secretsMessage } from "../lib/secrets";
+import { ConflictBanner } from "../components/ConflictBanner";
+import { parseConflict } from "../lib/conflict";
 
 // The browsing surface shared by hub projects and single-volume mode: the
 // file tree, folder listings, file views, and every topbar action. Sidebar
@@ -161,28 +139,42 @@ export default function Browser(props: {
   }, []);
 
   /* ---- per-route scroll restoration ----
-     Back/forward returns to where the reader was; fresh navigations start
-     at the top. Views call onRendered when their content lands (and again
-     when async sections grow), and we re-apply the target until it fits. */
+     Back/forward returns the reader to where they were; fresh navigations
+     start at the top. Views call onRendered when their content lands (and
+     again when async sections grow), and we re-apply the target until it
+     fits — until the reader scrolls, which retires the goal for good. The
+     state machine itself lives in lib/scroll, where it can be tested. */
   const contentRef = useRef<HTMLElement>(null);
   const memo = useRef(new Map<string, number>());
-  const scrollGoal = useRef({ key: "", want: 0, attempts: 0 });
-  useEffect(() => {
-    scrollGoal.current = {
-      key: routeKey,
-      want: currentNavType() === "POP" ? (memo.current.get(routeKey) ?? 0) : 0,
-      attempts: 0,
-    };
-  }, [routeKey]);
+  const scrollGoal = useRef<Goal>(armGoal("", 0));
   const onRendered = useCallback(() => {
     const c = contentRef.current;
-    const g = scrollGoal.current;
-    if (!c || g.key !== routeKey || g.attempts >= 3) return;
-    g.attempts++;
-    c.scrollTo({ top: g.want, behavior: "instant" });
+    if (!c) return;
+    const top = applyGoal(scrollGoal.current, routeKey);
+    // "instant" is load-bearing: #content carries scroll-behavior: smooth
+    // (style.css), and an animated restore would fire intermediate scroll
+    // events that noteScroll would read as the reader taking over.
+    if (top !== null) c.scrollTo({ top, behavior: "instant" });
   }, [routeKey]);
+  useEffect(() => {
+    scrollGoal.current = armGoal(
+      routeKey,
+      currentNavType() === "POP" ? (memo.current.get(routeKey) ?? 0) : 0,
+    );
+    // Apply once right here. Views call onRendered from their own effects,
+    // and React runs CHILD effects before the parent's — so this route's
+    // onRendered has already fired, against the goal of the route we just
+    // LEFT, and was discarded on the key check. Without this the new goal
+    // would sit armed and never applied, which is why Back landed at the
+    // top instead of the remembered offset. Later onRendered calls still
+    // cover content that grows after first paint.
+    onRendered();
+  }, [routeKey, onRendered]);
   const onScroll = useCallback(() => {
-    if (contentRef.current) memo.current.set(routeKey, contentRef.current.scrollTop);
+    const c = contentRef.current;
+    if (!c) return;
+    memo.current.set(routeKey, c.scrollTop);
+    noteScroll(scrollGoal.current, routeKey, c.scrollTop, c.scrollHeight - c.clientHeight);
   }, [routeKey]);
 
   /* ---- navigation ---- */
@@ -201,7 +193,7 @@ export default function Browser(props: {
   );
 
   /* ---- topbar state + actions ---- */
-  const [meta, setMeta] = useState("");
+  const [meta, setMeta] = useState<ReactNode>("");
   const [share, setShare] = useState<{ url: string; copied: boolean } | null>(null);
   const [moreOpen, setMoreOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -359,6 +351,98 @@ export default function Browser(props: {
     [apiBase, qc],
   );
 
+  /* ---- undo a whole agent run ----
+     The run-wide form of the two above, and the reason the feed groups runs
+     at all: reverting a bad run used to mean clicking file by file and hoping
+     you got them all.
+
+     Two calls, both to the same endpoint. The first (`preview: true`) writes
+     nothing and asks the SERVER which paths the run touched and what would
+     happen to each — the loaded window is paged and filterable, so a list
+     computed from what is on screen is wrong exactly when the run is old or
+     filtered. The second does it, recomputing the plan server-side rather
+     than trusting the one the dialog showed; an op that lands between the two
+     makes the confirm one op stale, never the write wrong.
+
+     The warning block is the one thing here that can burn someone: a path a
+     teammate changed AFTER the run is reverted too. That is the model
+     (last-writer-wins, and per-row restore already behaves this way), so the
+     dialog says it out loud instead of the undo being a surprise. */
+  const [undoingRun, setUndoingRun] = useState("");
+  const onUndoRun = useCallback(
+    async (run: Run) => {
+      const id = run.session || run.note;
+      const sel = run.session
+        ? { session: run.session, device: run.entries[0]?.device?.id }
+        : { note: run.note, device: run.entries[0]?.device?.id };
+      setUndoingRun(id);
+      try {
+        const plan = await postJSON<UndoPlan>(apiBase + "undo-run", { ...sel, preview: true });
+        const after = new Set(plan.changed_after);
+        if (!plan.undone.length) {
+          toast("Nothing to undo — every file this run touched already holds its pre-run content.");
+          return;
+        }
+        const ok = await modalConfirm(
+          "Undo this run?",
+          <>
+            <div>
+              {run.note || id} — {plan.undone.length} file
+              {plan.undone.length === 1 ? "" : "s"}
+            </div>
+            <div className="undo-list">
+              {plan.undone.map((a) => (
+                <div className="undo-row" key={a.path}>
+                  <span className="undo-path">{a.path}</span>
+                  {after.has(a.path) && <span className="undo-after">changed after this run</span>}
+                  <span className="undo-what">
+                    {a.action === "remove" ? "remove (the run created it)" : "restore to pre-run version"}
+                  </span>
+                </div>
+              ))}
+            </div>
+            {after.size > 0 && (
+              <div className="undo-warn">
+                {after.size} file{after.size === 1 ? " was" : "s were"} changed by someone else after
+                this run. Undoing overwrites {after.size === 1 ? "that change" : "those changes"} too.
+              </div>
+            )}
+            {plan.skipped.length > 0 && (
+              <div>
+                {plan.skipped.length} already hold{plan.skipped.length === 1 ? "s" : ""} its pre-run
+                content and will be left alone.
+              </div>
+            )}
+            {/* Never silently drop a category: a path the hub's own upload
+                door refuses is left out of the undo, and a dialog that
+                listed only what it WILL do would read as "all of it". */}
+            {plan.refused.length > 0 && (
+              <div>
+                {plan.refused.length} path{plan.refused.length === 1 ? "" : "s"} can't be written by
+                the hub and will be left alone: {plan.refused.join(", ")}.
+              </div>
+            )}
+          </>,
+          "Undo run",
+          true,
+        );
+        if (!ok) return;
+        const done = await postJSON<UndoPlan>(apiBase + "undo-run", sel);
+        qc.invalidateQueries({ queryKey: ["history", apiBase] });
+        qc.invalidateQueries({ queryKey: ["tree", apiBase] });
+        qc.invalidateQueries({ queryKey: ["render", apiBase] });
+        qc.invalidateQueries({ queryKey: ["text"] });
+        const skipped = done.skipped.length ? `, skipped ${done.skipped.length} (already current)` : "";
+        toast(`Undid ${done.undone.length} file${done.undone.length === 1 ? "" : "s"}${skipped}.`);
+      } catch (err) {
+        toast("Undo failed: " + (err as Error).message, true);
+      } finally {
+        setUndoingRun("");
+      }
+    },
+    [apiBase, qc],
+  );
+
   const historyNow = useCallback(() => {
     if (!path) return openHistory("");
     openHistory(isDir ? path + "/" : path);
@@ -393,7 +477,12 @@ export default function Browser(props: {
         props.onClosePanel?.();
         navigate(to);
       };
-      add("folder", "Go to project root", "action", go("/" + pid));
+      // Labelled with the project's name and tagged `project`, so typing the
+      // name of the project you are IN finds it: the switcher loop below
+      // rightly excludes the current project, which left nothing carrying its
+      // name while the palette copy promised project search (BEA-105). One row,
+      // not two — still the first, still unconditional, so BEA-52 holds.
+      add("folder", project.name + " — project root", "project", go("/" + pid));
       add("dashboard", "Dashboard", "action", go(urlForView("dashboard", pid)));
       add("terminal", "Installation", "action", go(urlForView("install", pid)));
       add("gear", "Settings", "action", go(urlForView("settings", pid)));
@@ -460,11 +549,13 @@ export default function Browser(props: {
         apiBase={apiBase}
         target={route.viewTarget || ""}
         isFolder={isFolderFn}
+        flatFiles={flatFiles}
         onOpen={openPath}
         onMeta={setMeta}
         onRendered={onRendered}
         restore={canRestore ? { onRestore, busy: restoring } : undefined}
         remove={canRestore ? { onRemove, busy: removing } : undefined}
+        undoRun={canRestore ? { onUndoRun, busy: undoingRun } : undefined}
         filters={route.filters}
         /* push, not replace: a filter is a navigation, and Back undoes it */
         onFilters={(f) => navigate(urlForView("history", project?.id, route.viewTarget || "", f))}
@@ -511,6 +602,7 @@ export default function Browser(props: {
       // A PDF page is unreadable squeezed into the 768px reading column.
       pageWidth = HTML_EXT.test(path) || PDF_EXT.test(path) ? "wide" : "read";
       pageClass = "markdown";
+      const conflict = parseConflict(path);
       view = (
         <>
           {version && (
@@ -521,12 +613,23 @@ export default function Browser(props: {
               onViewCurrent={() => openPath(path)}
             />
           )}
+          {conflict && (
+            <ConflictBanner
+              conflict={conflict}
+              originalHref={
+                flatFiles.some((f) => f.path === conflict.original)
+                  ? () => openPath(conflict.original)
+                  : undefined
+              }
+            />
+          )}
           <FileView
             apiBase={apiBase}
             path={path}
             version={version}
             heatMap={heatMap}
             flatFiles={flatFiles}
+            projectId={project?.id}
             onOpenFile={openPath}
             onMeta={setMeta}
             onRendered={onRendered}

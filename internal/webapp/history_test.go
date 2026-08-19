@@ -193,8 +193,8 @@ func TestHistoryAPI(t *testing.T) {
 func TestRenderVersion(t *testing.T) {
 	srv, p, root := newHub(t, false, nil)
 	f := newFakeRemoteAt(t, filepath.Join(root, p.ID))
-	f.putAs("dev1", "alice@x.io", "Alice", "guide.md", "# Guide\n\nFirst version.\n")
-	f.putAs("dev1", "alice@x.io", "Alice", "guide.md", "# Guide\n\nSecond version, longer.\n")
+	f.putAs("dev1", "alice@x.io", "Alice", "guide.md", "---\nstatus: draft\n---\n\n# Guide\n\nFirst version.\n")
+	f.putAs("dev1", "alice@x.io", "Alice", "guide.md", "---\nstatus: final\n---\n\n# Guide\n\nSecond version, longer.\n")
 	var err error
 	if srv.Reads, err = OpenReadLedger(filepath.Join(t.TempDir(), "reads.json"), 0); err != nil {
 		t.Fatal(err)
@@ -216,11 +216,19 @@ func TestRenderVersion(t *testing.T) {
 		t.Fatalf("render version: %d %s", rec.Code, rec.Body)
 	}
 	var doc struct {
-		Path string `json:"path"`
-		HTML string `json:"html"`
+		Path        string            `json:"path"`
+		HTML        string            `json:"html"`
+		Frontmatter []FrontmatterPair `json:"frontmatter"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
 		t.Fatal(err)
+	}
+	// That version's frontmatter, not today's — the panel follows the bytes.
+	if len(doc.Frontmatter) != 1 || doc.Frontmatter[0] != (FrontmatterPair{Key: "status", Value: "draft"}) {
+		t.Fatalf("version frontmatter = %+v", doc.Frontmatter)
+	}
+	if strings.Contains(doc.HTML, `class="frontmatter"`) {
+		t.Fatalf("version render bakes the table into html: %q", doc.HTML)
 	}
 	if !strings.Contains(doc.HTML, "First version") || strings.Contains(doc.HTML, "Second version") {
 		t.Fatalf("rendered the wrong version: %q", doc.HTML)
@@ -233,7 +241,7 @@ func TestRenderVersion(t *testing.T) {
 	}
 	// current content still renders from the snapshot
 	rec = do(t, h, "GET", base+"render?path=guide.md", nil)
-	if !strings.Contains(rec.Body.String(), "Second version") {
+	if !strings.Contains(rec.Body.String(), "Second version") || !strings.Contains(rec.Body.String(), `"final"`) {
 		t.Fatalf("current render = %s", rec.Body)
 	}
 

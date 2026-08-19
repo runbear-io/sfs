@@ -460,9 +460,9 @@ type ShareOpen struct {
 // HeatEntry.LastRead is cross-kind, so a member viewing the file in the hub
 // would otherwise move the "opened through the link" date.
 //
-// Counts, never identities — the share actor is token+"/"+IP, a public
-// credential joined to an IP, and it must not leave the ledger. There is
-// deliberately no distinct-openers field.
+// Counts, never identities — the share actor is token+"/"+IP+"/"+UA hash, a
+// public credential joined to a network and a browser, and it must not leave
+// the ledger. There is deliberately no distinct-openers field.
 //
 // One byKey scan per project, never one per share: callers build this map
 // once and index it, because byKey is the full map and a project with 40

@@ -91,8 +91,8 @@ export function ConnectGuide({ project, existing }: { project: Project; existing
         <details className="gd-manual">
           <summary>Or run it yourself</summary>
           <p className="gd-desc">
-            Same result, in the folder you want the files. One command: init signs this device in,
-            registers the sync hooks and starts syncing.
+            Same result, in the folder you want the files. Install the CLI, point it at this hub,
+            then bdrive init registers the sync hooks and starts syncing.
           </p>
           <GuideCode code={manual} />
           <p className="gd-desc">

@@ -1048,6 +1048,43 @@ func TestSec_Render_MarkdownCannotShipActiveContent(t *testing.T) {
 				t.Errorf("RenderMarkdown emitted active content (%s) for input %q:\n%s",
 					why, p.src, out)
 			}
+			// The viewer's entry point is a second door onto the same room:
+			// it must not be a way around the escaping above. The frontmatter
+			// half is the deliberate difference — those values leave as
+			// LITERAL text (asserted below) and the client renders them as
+			// text nodes — so only the HTML is judged here.
+			_, out, err = RenderMarkdownPairs([]byte(p.src))
+			if err != nil {
+				return
+			}
+			for _, why := range secdefActiveContent(out) {
+				t.Errorf("RenderMarkdownPairs emitted active content (%s) for input %q:\n%s",
+					why, p.src, out)
+			}
+		})
+	}
+
+	// The new field carries the raw scalar: escaping moved to the client,
+	// which puts it in a React text node. A value that arrived pre-escaped
+	// here would show up as &lt;img …&gt; on screen instead.
+	for _, c := range []struct{ name, src, key, want string }{
+		{"value", "---\ntitle: <img src=x onerror=alert(1)>\n---\nbody\n",
+			"title", "<img src=x onerror=alert(1)>"},
+		{"key", "---\n\"<img src=x onerror=alert(1)>\": v\n---\nbody\n",
+			"<img src=x onerror=alert(1)>", "v"},
+		{"nested", "---\na:\n  b: \"</code><script>alert(1)</script>\"\n---\nbody\n",
+			"a", "b: \"</code><script>alert(1)</script>\""},
+	} {
+		t.Run("pairs "+c.name, func(t *testing.T) {
+			pairs, _, err := RenderMarkdownPairs([]byte(c.src))
+			if err != nil || len(pairs) != 1 {
+				t.Fatalf("pairs = %+v, err = %v", pairs, err)
+			}
+			if pairs[0].Key != c.key || pairs[0].Value != c.want {
+				t.Errorf("pair = %+v, want key %q value %q — the frontmatter field is "+
+					"contracted to be literal text; pre-escaping it here would double-escape "+
+					"on the client", pairs[0], c.key, c.want)
+			}
 		})
 	}
 }

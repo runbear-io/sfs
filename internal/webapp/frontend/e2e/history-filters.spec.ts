@@ -142,3 +142,35 @@ test("?path= lands on that file's feed, normalizes the URL, and keeps filters", 
   await expect(page.locator("#crumb")).toHaveText("History — guide.md");
   await expect(page).toHaveURL(`/${pid}/history/guide.md?path=notes/readme.md`);
 });
+
+// BEA-131: the filters are in the query key, so changing one drops the feed
+// back to no-data. It used to render the bar and nothing else — pixel-identical
+// to "nothing matched", and a reader concluded twice that a file had no history
+// when it had three entries. Both strings are asserted here, because the whole
+// point is that the two states look different.
+test("a filter change shows a loading row, never a premature 'no matches'", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/history`);
+  await expect(page.locator(rows).first()).toBeVisible();
+
+  const stall = (url: URL) => url.pathname.endsWith("/history");
+  await page.route(stall, async (route) => {
+    await new Promise((r) => setTimeout(r, 2000));
+    await route.continue();
+  });
+
+  await page.fill(".hfilters input[type=search]", "runbook");
+  await page.waitForURL(`/${pid}/history?q=runbook`);
+
+  const empty = page.locator(".history .empty");
+  await expect(empty).toHaveText("Loading…");
+  await expect(page.locator(".history .empty", { hasText: "No changes match these filters." })).toHaveCount(0);
+  // and the bar is still there, still holding what was typed
+  await expect(page.locator(".hfilters input[type=search]")).toHaveValue("runbook");
+
+  // …then the rows land and the loading row goes away.
+  await expect(page.locator(rows).first()).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator(".history .empty")).toHaveCount(0);
+  await page.unroute(stall);
+});

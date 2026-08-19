@@ -32,9 +32,33 @@ test("wikilink navigates to the target file", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
   await page.goto(`/${pid}/index.md`);
-  await page.click('#content a:has-text("guide")');
+  const link = page.locator('#content a:has-text("guide")');
+  // BEA-136: the href itself, not just the click. Copy-link-address,
+  // middle-click and open-in-new-tab all read this attribute, and it used to
+  // be the unresolvable string "wiki:guide".
+  await expect(link).toHaveAttribute("href", `/${pid}/guide.md`);
+  await page.evaluate(() => ((window as Window & { __spa?: number }).__spa = 1));
+  await link.click();
   await page.waitForURL(`/${pid}/guide.md`);
   await expect(page.locator("#content")).toContainText("Second version");
+  // Still the same document: a plain click must SPA-route, not reload.
+  expect(await page.evaluate(() => (window as Window & { __spa?: number }).__spa)).toBe(1);
+});
+
+// BEA-136: everything the rendered anchor has to get right besides the click.
+test("wikilinks: modified click is the browser's, a dangling one has no href", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/index.md`);
+  // A cmd/ctrl-click belongs to the browser (new tab), so THIS page stays put.
+  await page.locator('#content a:has-text("guide")').click({ modifiers: ["ControlOrMeta"] });
+  await page.waitForTimeout(300);
+  expect(new URL(page.url()).pathname).toBe(`/${pid}/index.md`);
+  // [[nowhere]] matches no file: unresolved, and no dead href to copy.
+  const missing = page.locator("#content a.wiki-missing");
+  await expect(missing).toHaveText("nowhere");
+  expect(await missing.getAttribute("href")).toBeNull();
+  expect(await page.locator("#content").innerHTML()).not.toContain("wiki:");
 });
 
 test("folder listing: counts, change feed, heat dot on a read file", async ({ page }) => {
@@ -153,6 +177,27 @@ test("palette (⌘K) fuzzy-jumps to a file", async ({ page }) => {
   await expect(page.locator("#content h1")).toHaveText("Topic");
 });
 
+// BEA-105: the switcher excludes the project you're in, so typing its own name
+// used to match nothing while the palette copy promised project search. The
+// root row carries the name now — one row, kind `project`, same destination.
+test("palette finds the project you are inside by name", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}`);
+  await page.waitForSelector("#sidebar");
+  await page.keyboard.press("ControlOrMeta+k");
+  await expect(page.locator("#palette")).toBeVisible();
+  // with no query typed, at least one PROJECT row is on screen
+  expect(await page.locator("#palette [cmdk-item] .pkind", { hasText: "project" }).count()).toBeGreaterThan(0);
+
+  await page.fill("#palette input", "wiki");
+  const rows = page.locator("#palette [cmdk-item]", { hasText: "wiki" });
+  await expect(rows).toHaveCount(1); // exactly one, no duplicate root action
+  await expect(rows.first().locator(".pkind")).toHaveText("project");
+  await page.keyboard.press("Enter");
+  await page.waitForURL(`/${pid}`);
+});
+
 // BEA-52: on a path that doesn't resolve the tree entries are gone and the
 // switcher lists only other projects, so the palette used to offer no way
 // back. cmdk owns the list's id (it overwrites ours), hence [cmdk-list].
@@ -163,7 +208,7 @@ test("palette on a dead route still offers the way back", async ({ page }) => {
   await expect(page.locator(".notfound")).toBeVisible();
   await page.keyboard.press("ControlOrMeta+k");
   await expect(page.locator("#palette")).toBeVisible();
-  for (const label of ["Go to project root", "Dashboard", "Installation", "Settings"]) {
+  for (const label of ["project root", "Dashboard", "Installation", "Settings"]) {
     await expect(page.locator("#palette [cmdk-list]")).toContainText(label);
   }
   // exactly one whole-project history entry, no duplicate
@@ -218,6 +263,29 @@ test("share mints a public link that serves the file, revoke kills it", async ({
   await expectToast(page, "Share revoked");
   const gone = await page.request.get(url!);
   expect(gone.status()).toBe(404);
+});
+
+// BEA-147: the same finding the share dialog names, on the path every file
+// takes — the viewer used to render the key as ordinary prose.
+test("a file holding a key carries a badge in the file view", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/deploy.md`);
+
+  const badge = page.locator(".sbadge");
+  await expect(badge).toBeVisible();
+  // Same rule, same line, same words as the share dialog's modal below.
+  await expect(badge).toContainText("an AWS access key (line 3)");
+  // Advisory: the file still renders in full, nothing is redacted.
+  await expect(page.locator("#content h1")).toHaveText("Deploy");
+  await expect(page.locator("#content")).toContainText("AWS_ACCESS_KEY_ID");
+  // The badge itself must never echo the thing it found.
+  await expect(badge).not.toContainText("AKIA");
+
+  // A clean file gets no badge at all.
+  await page.goto(`/${pid}/index.md`);
+  await expect(page.locator("#content h1")).toHaveText("Wiki");
+  await expect(page.locator(".sbadge")).toHaveCount(0);
 });
 
 // BEA-111: sharing a file that looks like it holds credentials asks first.
@@ -1054,6 +1122,22 @@ test("mermaid: a good fence renders, a broken one keeps its code block", async (
   // bad fence must not take the good one on the same page down with it.
   await expect(page.locator("#content pre code.language-mermaid")).toHaveCount(1);
   await expect(page.locator("#content .mermaid-err")).toHaveText("Couldn't render this diagram.");
+  // ...with the parser's own message under it, so the author can fix the fence.
+  const detail = page.locator("#content .mermaid-err-detail");
+  await expect(detail).toHaveCount(1);
+  // Structure, not wording: mermaid is a ^ range and its expected-token list
+  // is the library's, so pinning the exact string would make a minor bump red.
+  await expect(detail).toContainText(/line \d+/i);
+  // The message quotes the author's source, and this string is mounted through
+  // dangerouslySetInnerHTML: the tag has to arrive as text and stay inert.
+  await expect(detail).toContainText("<img onerror=x>");
+  await expect(page.locator("#content img")).toHaveCount(0);
+  // A long expected-token list scrolls inside its own box; the page does not.
+  expect(await detail.evaluate((el) => getComputedStyle(el).overflowX)).not.toBe("visible");
+  expect(await detail.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1),
+  ).toBe(false);
 });
 
 test("a file with no mermaid fence fetches no mermaid chunk", async ({ page }) => {
@@ -1088,4 +1172,177 @@ test("a shared diagram renders on the public page, without one there is no scrip
   await expect(svg).toHaveCount(1);
   await expect(svg).toContainText("Teammate");
   await expect(page.locator(".mermaid-err")).toHaveText("Couldn't render this diagram.");
+  // The diagnostics ride along on the share page too — share-mermaid.ts needs
+  // no change of its own, which is exactly what asserting it here proves. The
+  // share shell has its own inline CSS, so this also catches a rule that only
+  // ever landed in the app's stylesheet.
+  const detail = page.locator(".mermaid-err-detail");
+  await expect(detail).toContainText(/line \d+/i);
+  await expect(detail).toContainText("<img onerror=x>");
+  await expect(page.locator("img")).toHaveCount(0);
+  expect(await detail.evaluate((el) => getComputedStyle(el).whiteSpace)).toBe("pre");
+});
+
+/* BEA-61: a read count that doesn't say your own views are in it reads as
+   other people's interest. Every surface printing one discloses it — the file
+   header can't do it visibly (#meta is nowrap + ellipsis), so it does it by
+   hover text and a screen-reader span. */
+test("read counts disclose that your own views count", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+
+  await page.goto(`/${pid}/index.md`);
+  const heat = page.locator("#meta span[title]");
+  await expect(heat).toContainText("/ 30d");
+  await expect(heat).toHaveAttribute("title", /Includes your own views\./);
+  await expect(heat.locator(".sr-only")).toContainText("10 minutes count once");
+
+  // The folder page says it once, out loud, for the summary and every row.
+  await page.goto(`/${pid}/notes`);
+  await expect(page.locator(".dl-heatnote")).toHaveText(
+    "Includes your own views. Repeat opens by the same reader inside 10 minutes count once.",
+  );
+});
+
+/* BEA-155: the scroll restorer. Reading a file is never interrupted by a
+   background refresh — the read-count poll used to call onRendered through
+   MarkdownView's meta effect, and the restorer read that as "content landed"
+   and re-applied scrollTo(0) mid-read. The retire-on-user-scroll rule that
+   fixes it is unit-tested in src/lib/scroll.test.ts (its trigger is a 60s
+   poll, longer than this suite's timeout); these two cover the paths a
+   refactor of the restorer breaks. Scroll #content — the document itself
+   never scrolls (helpers.ts). */
+const LONG_DOC =
+  "# Long read\n\n" + Array.from({ length: 200 }, (_, i) => `Paragraph ${i} of the long read.`).join("\n\n");
+
+test("a fresh navigation lands at the top of the new file", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.request.put(`/api/p/${pid}/upload/content?path=scroll/long.md`, { data: LONG_DOC });
+
+  await page.goto(`/${pid}/scroll/long.md`);
+  await expect(page.locator("#content h1")).toHaveText("Long read");
+  const content = page.locator("#content");
+  await content.evaluate((el) => el.scrollTo({ top: 1200, behavior: "instant" }));
+  expect(await content.evaluate((el) => el.scrollTop)).toBeGreaterThan(1000);
+
+  // #content persists across routes, so its carried-over offset must be reset.
+  await page.click('#tree .row[data-path="index.md"]');
+  await page.waitForURL(`/${pid}/index.md`);
+  await expect(page.locator("#content h1")).toHaveText("Wiki");
+  await expect
+    .poll(() => content.evaluate((el) => el.scrollTop), { timeout: 5000 })
+    .toBeLessThanOrEqual(2);
+});
+
+test("back returns to the remembered offset, not to the top", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.request.put(`/api/p/${pid}/upload/content?path=scroll/long.md`, { data: LONG_DOC });
+
+  await page.goto(`/${pid}/scroll/long.md`);
+  await expect(page.locator("#content h1")).toHaveText("Long read");
+  const content = page.locator("#content");
+  await content.evaluate((el) => el.scrollTo({ top: 1200, behavior: "instant" }));
+
+  await page.click('#tree .row[data-path="index.md"]');
+  await page.waitForURL(`/${pid}/index.md`);
+  await page.goBack();
+  await page.waitForURL(`/${pid}/scroll/long.md`);
+  await expect(page.locator("#content h1")).toHaveText("Long read");
+  await expect
+    .poll(() => content.evaluate((el) => el.scrollTop), { timeout: 5000 })
+    .toBeGreaterThan(1000);
+});
+
+/* BEA-154: a doc's YAML frontmatter used to be a table pinned to the top of
+   the reading column, pushing the document below the fold. It is a panel
+   beside the prose now — a rail on a wide window, a closed disclosure on a
+   phone — and the reading column starts with the document. */
+test("frontmatter is a side panel, not a slab on top of the document", async ({ page }) => {
+  // Wide enough for the rail: the breakpoint is arithmetic (style.css), and
+  // the default 1280 viewport is deliberately below it.
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const pid = await wikiId(page);
+  // Seeded at runtime so no other spec's file counts move.
+  const put = async (path: string, body: string) => {
+    const r = await page.request.put(
+      `/api/p/${pid}/upload/content?path=${encodeURIComponent(path)}`,
+      { data: body },
+    );
+    expect(r.ok(), `seeding ${path}: ${r.status()}`).toBeTruthy();
+  };
+  await put(
+    "meta/props.md",
+    "---\ntitle: Q3 findings\nstatus: draft\ntags: [churn, revenue]\nmeta:\n  reviewed: true\n---\n\n# Q3 findings\n\nBody text.\n",
+  );
+
+  await page.goto(`/${pid}/meta/props.md`);
+  const panel = page.locator("#content .fmpanel");
+  await expect(panel).toBeVisible();
+  // The document leads: the h1 is the first thing in the prose column, and
+  // no frontmatter table survives inside the rendered markdown.
+  await expect(page.locator("#content h1")).toHaveText("Q3 findings");
+  await expect(page.locator("#content table.frontmatter")).toHaveCount(0);
+  expect(
+    await page.evaluate(() => {
+      const h1 = document.querySelector("#content h1") as HTMLElement;
+      return h1.getBoundingClientRect().top;
+    }),
+  ).toBeLessThan(
+    await panel.evaluate((el) => el.getBoundingClientRect().bottom),
+  );
+  // Same keys, author order, nested value still compact YAML in <code>.
+  await expect(panel.locator("dt")).toHaveText(["title", "status", "tags", "meta"]);
+  await expect(panel.locator("dd").nth(2)).toHaveText("churn, revenue");
+  await expect(panel.locator("dd code")).toHaveText("reviewed: true");
+  // A rail, not a squeezed column: the prose keeps its 768px measure and the
+  // panel sits to its right.
+  const geom = await page.evaluate(() => {
+    const prose = document.querySelector("#content .markdown > div:not(.fmpanel)") as HTMLElement;
+    const p = document.querySelector(".fmpanel") as HTMLElement;
+    return { prose: prose.getBoundingClientRect(), panel: p.getBoundingClientRect() };
+  });
+  expect(Math.round(geom.prose.width), "prose measure unchanged").toBe(768);
+  expect(geom.panel.left, "panel is to the right of the prose").toBeGreaterThanOrEqual(
+    geom.prose.right,
+  );
+
+  // Collapsing is remembered — across a different file, and across a reload.
+  await panel.locator("summary").click();
+  await expect(panel).not.toHaveAttribute("open", /.*/);
+  await page.goto(`/${pid}/index.md`);
+  await expect(page.locator("#content .fmpanel")).toHaveCount(0); // no frontmatter, no panel
+  await page.goto(`/${pid}/meta/props.md`);
+  await expect(page.locator("#content .fmpanel")).not.toHaveAttribute("open", /.*/);
+  await page.reload();
+  await expect(page.locator("#content .fmpanel")).not.toHaveAttribute("open", /.*/);
+});
+
+test("frontmatter panel on a phone: closed disclosure above the body", async ({ browser }) => {
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const page = await ctx.newPage();
+  await login(page);
+  const pid = await wikiId(page);
+  await page.request.put(`/api/p/${pid}/upload/content?path=meta/phone.md`, {
+    data: "---\ntitle: Q3\nowner: snow\n---\n\n# Q3\n\nBody.\n",
+  });
+  await page.goto(`/${pid}/meta/phone.md`);
+  const panel = page.locator("#content .fmpanel");
+  await expect(panel).toBeVisible();
+  // No stored choice yet: a phone has no room for a rail, so it opens closed
+  // and sits above the body rather than beside it.
+  await expect(panel).not.toHaveAttribute("open", /.*/);
+  const m = await page.evaluate(() => {
+    const p = document.querySelector(".fmpanel") as HTMLElement;
+    const h1 = document.querySelector("#content h1") as HTMLElement;
+    return {
+      above: p.getBoundingClientRect().bottom <= h1.getBoundingClientRect().top,
+      overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+    };
+  });
+  expect(m.above, "390px: panel sits above the body").toBe(true);
+  expect(m.overflow, "390px: horizontal page scroll").toBe(false);
+  await ctx.close();
 });

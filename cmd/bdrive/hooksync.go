@@ -4,12 +4,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/runbear-io/beardrive/internal/secrets"
 	"github.com/runbear-io/beardrive/internal/store"
 )
 
@@ -41,6 +44,11 @@ type hookLink struct {
 	base   string // https://hub/<project-id>[/<the run folder's subpath>]
 	sub    string // the run folder's mount-relative path, "" at or above the mount
 	paths  []store.InboundEvent
+	// secrets is what the last cycle that read these files found in them.
+	// Read from the store rather than the Result for the same reason paths
+	// is: the daemon usually scanned the agent's write seconds ago, so this
+	// cycle's own scan sees an unchanged file and finds nothing.
+	secrets map[string][]secrets.Finding
 }
 
 // hookChangedMax caps the changed-file list the turn pays for. Past it the
@@ -71,8 +79,9 @@ func eventSessionID(data []byte) string {
 // hookSync is one mount's contribution to the turn: where its files live on
 // the hub, and which of them moved since the last turn.
 type hookSync struct {
-	base  string
-	paths []store.InboundEvent
+	base    string
+	paths   []store.InboundEvent
+	secrets map[string][]secrets.Finding
 }
 
 // runHookSync syncs one mount and reports its hub base URL, if it has one,
@@ -107,12 +116,15 @@ func runHookSync(cmd *cobra.Command, target, sessionID, label string) (hookSync,
 	// nothing and the spool is where the record is. Errors are ignored — the
 	// links matter more than the list.
 	paths, _ := sess.Store.DrainInbound()
+	// Not drained: findings are state, not events. They stand until the file
+	// changes without them, so every turn sees the ones still true.
+	found, _ := sess.Store.LoadSecrets(sess.MountID)
 
 	server, projectID, err := splitHubRemote(proj.Remote)
 	if err != nil {
 		return hookSync{}, false // non-hub remote: nothing to link to
 	}
-	return hookSync{base: server + "/" + projectID, paths: paths}, true
+	return hookSync{base: server + "/" + projectID, paths: paths, secrets: found}, true
 }
 
 // hookLinkFor places one mount relative to the folder the hook ran in.
@@ -187,6 +199,9 @@ func emitHookContext(cmd *cobra.Command, links []hookLink) {
 	if changed := hookChanged(links); changed != "" {
 		context += " " + changed
 	}
+	if found := hookSecrets(links); found != "" {
+		context += " " + found
+	}
 
 	out := map[string]any{
 		"hookSpecificOutput": map[string]any{
@@ -253,4 +268,37 @@ func hookAgentPath(l hookLink, path string) (string, bool) {
 	default:
 		return path, true
 	}
+}
+
+// hookSecrets tells the turn which synced files looked like they hold
+// credentials when they last changed. Advisory, exactly like hookChanged:
+// they have ALREADY synced, so there is nothing to block — the useful move is
+// telling the user, which is something an agent can do and a status line the
+// user never runs cannot. Rule labels and line numbers only; the matched
+// bytes never leave internal/secrets.
+func hookSecrets(links []hookLink) string {
+	var parts []string
+	over := 0
+	for _, l := range links {
+		for _, rel := range slices.Sorted(maps.Keys(l.secrets)) {
+			p, ok := hookAgentPath(l, rel)
+			if !ok {
+				continue
+			}
+			if len(parts) >= hookChangedMax {
+				over++
+				continue
+			}
+			f := l.secrets[rel][0]
+			parts = append(parts, fmt.Sprintf("`%s` (%s, line %d)", p, secrets.Label(f.Rule), f.Line))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	s := "These synced files looked like they contain credentials when they last changed: " + strings.Join(parts, ", ")
+	if over > 0 {
+		s += fmt.Sprintf(", +%d more", over)
+	}
+	return s + ". They have already synced to the hub and to teammates, so this is not a blocker to work around — tell the user, and suggest rotating the credential and keeping it out of the folder."
 }

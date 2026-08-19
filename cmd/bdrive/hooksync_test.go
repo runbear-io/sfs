@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/secrets"
 	"github.com/runbear-io/beardrive/internal/store"
 )
 
@@ -441,5 +442,85 @@ func TestSyncHookModeInboundSpoolUnreadable(t *testing.T) {
 	var out map[string]any
 	if err := json.Unmarshal([]byte(got), &out); err != nil {
 		t.Fatalf("hook emitted invalid JSON: %v\n%s", err, got)
+	}
+}
+
+func seedSecrets(t *testing.T, proj config.Project, found map[string][]secrets.Finding) {
+	t.Helper()
+	vdir, err := config.VolumeDir(proj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(vdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveSecrets(proj.ID, found); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The credential warning reaches the agent, whose own cycle found nothing:
+// the daemon scanned that write seconds ago, so — exactly like the inbound
+// spool — the record is what carries it. Advisory: the sentence says the file
+// has ALREADY synced, because it has.
+func TestSyncHookModeReportsSecrets(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	root := t.TempDir()
+	root, _ = filepath.EvalSymlinks(root)
+	proj := mountAt(t, root, "wiki", "https://hub.example.com/p/p-12345678")
+	seedSecrets(t, proj, map[string][]secrets.Finding{
+		"deploy.md": {{Rule: "aws_access_key_id", Line: 12}},
+	})
+
+	got := runHook(t, filepath.Join(root, "wiki"))
+	for _, want := range []string{
+		"looked like they contain credentials when they last changed",
+		"`deploy.md` (an AWS access key, line 12)",
+		"tell the user",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("hook output missing %q:\n%s", want, got)
+		}
+	}
+	// Unlike the inbound spool, findings are state and are NOT drained: the
+	// file still holds the key on the next turn, so the next turn still says so.
+	if again := runHook(t, filepath.Join(root, "wiki")); !strings.Contains(again, "`deploy.md`") {
+		t.Errorf("the warning vanished after one turn:\n%s", again)
+	}
+}
+
+// Every path carries its own mount's prefix — a credential in one project must
+// never be reported as a path in another.
+func TestSyncHookModeSecretsMultipleMounts(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	root := t.TempDir()
+	root, _ = filepath.EvalSymlinks(root)
+	a := mountAt(t, root, "projA", "https://hub.example.com/p/p-aaaaaaaa")
+	b := mountAt(t, root, "projB", "https://hub.example.com/p/p-bbbbbbbb")
+	seedSecrets(t, a, map[string][]secrets.Finding{"a.md": {{Rule: "private_key", Line: 1}}})
+	seedSecrets(t, b, map[string][]secrets.Finding{"b.md": {{Rule: "slack_token", Line: 2}}})
+
+	got := runHook(t, root)
+	for _, want := range []string{"`projA/a.md` (a private key, line 1)", "`projB/b.md` (a Slack token, line 2)"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("hook output missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// The empty case is the common one, paid on every turn of every session: the
+// context must be byte-identical to what it was before this check existed.
+func TestSyncHookModeNoSecretsSaysNothing(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	root := t.TempDir()
+	root, _ = filepath.EvalSymlinks(root)
+	mountAt(t, root, "wiki", "https://hub.example.com/p/p-12345678")
+
+	got := runHook(t, filepath.Join(root, "wiki"))
+	for _, unwanted := range []string{"credential", "secret"} {
+		if strings.Contains(strings.ToLower(got), unwanted) {
+			t.Errorf("a clean mount mentions %q on every turn:\n%s", unwanted, got)
+		}
 	}
 }

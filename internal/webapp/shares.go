@@ -1,6 +1,8 @@
 package webapp
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -12,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/runbear-io/beardrive/internal/secrets"
 )
 
 // Share links make one file publicly readable at /s/<unguessable-token> —
@@ -237,6 +241,22 @@ func (db *ShareDB) List(project string) []Share {
 	return out
 }
 
+// firstFileUnder returns the lexicographically smallest file under the folder
+// p, or "" if p is not a folder. The prefix is p+"/" and never bare p: "notes"
+// is a prefix of "notes-archive/x.md", and that mistake turns a genuine
+// "not synced" into a wrong "that's a folder". Smallest, not whatever map
+// iteration hands back, so identical calls suggest the same file.
+func firstFileUnder(files map[string]FileInfo, p string) string {
+	prefix := p + "/"
+	best := ""
+	for k := range files {
+		if strings.HasPrefix(k, prefix) && (best == "" || k < best) {
+			best = k
+		}
+	}
+	return best
+}
+
 // ---- HTTP ----
 
 // handleShareCreate mints (or returns) the share link for a file. Any
@@ -266,6 +286,13 @@ func (s *Server) handleShareCreate(v *volume, w http.ResponseWriter, r *http.Req
 		return
 	}
 	if _, ok := snap.files[p]; !ok {
+		// snap.files maps FILES, so a fully synced folder misses here just like
+		// a path that does not exist. Tell those apart before answering, or the
+		// user goes off to fix a sync fault that isn't there.
+		if inside := firstFileUnder(snap.files, p); inside != "" {
+			http.Error(w, fmt.Sprintf("share links are per-file; %s is a folder - try a file inside it, e.g. %s", p, inside), http.StatusBadRequest)
+			return
+		}
 		http.Error(w, fmt.Sprintf("%s is not synced to this project yet", p), http.StatusNotFound)
 		return
 	}
@@ -289,13 +316,13 @@ func (s *Server) handleShareCreate(v *volume, w http.ResponseWriter, r *http.Req
 		// 1 MiB and close: source.Open streams from the object store, so this
 		// aborts the rest of the transfer rather than pulling a 500 MB file
 		// down to look at its first megabyte. Don't "fix" it into a ReadAll.
-		buf, err := io.ReadAll(io.LimitReader(rc, secretScanLimit))
+		buf, err := io.ReadAll(io.LimitReader(rc, secrets.ScanLimit))
 		rc.Close()
 		if err != nil {
 			storageErr(w, http.StatusServiceUnavailable, "could not read the file to check it for credentials", err)
 			return
 		}
-		if findings := scanSecrets(buf); len(findings) > 0 {
+		if findings := secrets.Scan(buf); len(findings) > 0 {
 			writeJSONStatus(w, http.StatusConflict, map[string]any{
 				"error":    "this file looks like it contains credentials",
 				"findings": findings,
@@ -475,6 +502,21 @@ func (s *Server) shareCreatorStillBelongs(sh Share) bool {
 
 // handleShared serves a share link: public, sandboxed, always the latest
 // synced content.
+// shareActor identifies one reader of a link well enough to debounce their
+// own reloads without folding a whole office into a single visit: token+IP
+// alone made every browser behind one NAT the same reader (BEA-151).
+//
+// The User-Agent is HASHED, never stored raw — Record persists the actor into
+// the read buckets and out through ReadRepo, and a raw User-Agent there is a
+// fingerprint sitting in storage indefinitely. Truncated because this only
+// ever needs to GROUP, never to identify, and it must not leave the ledger
+// either way. token+"/"+IP stays the prefix so the existing leak assertions
+// keep covering the wider key.
+func (s *Server) shareActor(r *http.Request, token string) string {
+	sum := sha256.Sum256([]byte(r.UserAgent()))
+	return token + "/" + s.clientIP(r) + "/" + hex.EncodeToString(sum[:8])
+}
+
 func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 	// Sandbox everything under /s/ before anything can answer the request:
 	// shared content executes in an opaque origin (scripts allowed — charts in
@@ -518,9 +560,9 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fi := snap.files[sp]
-	// A share hit is external consumption. Actor is token+IP: one audience
-	// member reloading is debounced to a visit, distinct visitors still count.
-	s.Reads.Record(sh.Project, sp, ReadKindShare, sh.Token+"/"+s.clientIP(r))
+	// A share hit is external consumption: one audience member reloading is
+	// debounced to a visit, distinct visitors still count.
+	s.Reads.Record(sh.Project, sp, ReadKindShare, s.shareActor(r, sh.Token))
 
 	// Share links are the only unauthenticated door to stored bytes, so they
 	// are the only egress a plan actually caps. The per-IP limiter above
@@ -633,7 +675,9 @@ footer.bdrive a{color:inherit}
 .updated{font-size:12.5px;color:#57606a;margin-bottom:28px}
 .mermaid-diagram{margin:20px 0;overflow-x:auto}
 .mermaid-diagram svg{max-width:100%%;height:auto}
-.mermaid-err{font-size:12.5px;color:#57606a;margin:-8px 0 20px}
+.mermaid-err{font-size:12.5px;color:#57606a;margin:-8px 0 4px}
+.mermaid-err-detail{font:11.5px/1.5 ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;color:#57606a;
+margin:0 0 20px;white-space:pre;overflow:auto;max-height:12em}
 /* Dark theme LAST: these rules sit at the same specificity as the light ones
    above, so source order is the whole fix — a dark block placed earlier loses
    to every light rule that follows it. Values are the hub's @theme tokens
@@ -655,7 +699,7 @@ table.frontmatter th,table.frontmatter td{border-bottom-color:rgba(255,255,255,.
 table.frontmatter th{color:#868b93}
 footer.bdrive{border-top-color:rgba(255,255,255,.07);color:#868b93}
 .updated{color:#868b93}
-.mermaid-err{color:#868b93}}
+.mermaid-err,.mermaid-err-detail{color:#868b93}}
 </style>%s</head><body>%s%s
 <footer class="bdrive">Shared with <a href="https://github.com/runbear-io/beardrive" rel="noopener">BearDrive</a> — synced files for AI agent teams</footer>
 </body></html>`

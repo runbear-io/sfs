@@ -3,6 +3,8 @@
 // The API is deliberately storage-blind: nothing here ever names a bucket,
 // remote URL, or credential, and heat responses carry no actor identities.
 
+import type { SecretFinding } from "../lib/secrets";
+
 // GET /api/config (handleConfig, server.go)
 export interface ServerConfig {
   mode: "volume" | "hub";
@@ -150,16 +152,32 @@ export interface Node {
   children?: Node[];
 }
 
+// One key/value row of a document's YAML frontmatter, in author order.
+// `value` is plain text, never markup — the panel renders it as a text node,
+// so escaping is React's job and not a rule anyone has to remember. `code`
+// marks the nested values that read as compact YAML.
+export interface FrontmatterPair {
+  key: string;
+  value: string;
+  code?: boolean;
+}
+
 // GET .../render (handleRender, server.go)
 export interface RenderDoc {
   path: string;
   html: string;
+  // Absent when the document has none: no field, no panel.
+  frontmatter?: FrontmatterPair[];
   size: number;
   time?: string;
   user?: string;
   user_name?: string;
   author?: string;
   device?: string;
+  // The share gate's credential scan, run on the render path too (BEA-147).
+  // Omitted by the server when the file is clean, so a truthiness test is
+  // the whole check. Rule ids and line numbers only — never the matched text.
+  findings?: SecretFinding[];
 }
 
 // GET .../heat (handleHeat, reads.go) — counts only, never who.
@@ -250,4 +268,16 @@ export interface UploadPlan {
   url?: string;
   method?: string;
   headers?: Record<string, string>;
+}
+
+// POST .../undo-run (handleUndoRun, undorun.go). The same shape answers a
+// `preview: true` call and the real one, so the dialog and the result read
+// from one type — and the plan the dialog showed is recomputed server-side
+// before anything is written.
+export interface UndoPlan {
+  ok: boolean;
+  undone: { path: string; action: "restore" | "remove" }[];
+  skipped: string[]; // already at their pre-run content: nothing to write
+  changed_after: string[]; // someone landed a change on this path after the run
+  refused: string[]; // a path the hub's own upload door would refuse
 }
