@@ -114,12 +114,20 @@ Status as of 2026-08-19. Check = the named test/tour step that closes it.
 | Restore / undo-remove (hub proxy) | done | `restore`/`remove`/`undo-run` proxied with origin guard (`TestDesktopServer` restore step + `desktop.spec.ts` restore spec); `canRestore` takes the same desktop exception as `canShare` |
 | Project create / templates | done | Owner decision 2026-08-20: `POST /api/projects` proxies to the signed-in hub; `upload.enabled: true` in desktop config offers the dialog (`TestDesktopServer` create step + `desktop.spec.ts` dialog spec). Known gap: the new project isn't browsable in the app until `bdrive init` links a folder |
 | Permissions view (read-only) | done | `GET /permissions` proxied to the hub (`TestDesktopServer` permissions step); grant edits stay hub-web-only |
+| Project settings (rename/icon/default level/grants, delete) | done | Found by the 2026-08-20 audit pass. Edits proxy to the hub (`TestDesktopServer` rename+grant steps); on desktop `project.perm` carries the hub's real level (HubApp resolves it from the proxied `/permissions` — the one place, replacing the scattered `config.desktop \|\|` exceptions) so the admin gate is accurate (`desktop.spec.ts` settings spec) |
 | Org/admin surfaces | wontfix | Hub web app's job; the app links out |
 | External links open in the default browser (not the webview) | built — needs unlocked session | `on_navigation`: non-sidecar URLs → `open`. Known gap: `target=_blank` doesn't route through this handler. Manual: click a web link in a markdown file |
 | Window state restore (size/position across launches) | built — needs unlocked session | `tauri-plugin-window-state`. Manual: resize, quit, relaunch |
 
 Rows may be added, never silently dropped. When the audit harness finds a
 web-app behavior not listed here, add it as a row first, then decide.
+
+**Audit pass (2026-08-20)**: walked the hub SPA's routes/components and API
+route table against this matrix. One unlisted gap found — project settings
+edits — added above and closed the same round. Remaining surfaces all map to
+existing rows: `/join` (sign-up row), run cards & `?by=device` (heat proxy),
+frontmatter/mermaid (local render), org/billing/analytics (wontfix or
+managed-only). No other gaps.
 
 `built — needs unlocked session` = implemented, gates green, but the check
 itself requires a live interactive webview (a click inside the window, a

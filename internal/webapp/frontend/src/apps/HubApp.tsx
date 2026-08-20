@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { postJSON } from "../api/http";
 import type { InviteAccepted, Project, ProjectCreated, ServerConfig } from "../api/types";
-import { useOrgs, usePending, useProjects, useHubRefresh } from "../hooks/useHub";
+import { useOrgs, usePending, usePermissions, useProjects, useHubRefresh } from "../hooks/useHub";
 import { decodePath, parseRoute, projectByName, urlForPath, urlForView } from "../router";
 import { linkProps, navigate, Redirect, useLocationPath } from "../nav";
 import { AppShell, Page, Topbar, VaultHeader, closeSidebarOnMobile } from "../components/shell";
@@ -95,6 +95,17 @@ export default function HubApp({ config }: { config: ServerConfig }) {
       null
     );
   }, [projects, route.project, joinedOrgId]);
+
+  // On desktop the sidecar reports every project as "read" — that guards the
+  // LOCAL stores, which never take writes. The account's real level lives on
+  // the project's hub and arrives through the proxied /permissions. Resolving
+  // it here, once, keeps every downstream surface (share, restore, settings)
+  // platform-blind on project.perm — no scattered desktop checks.
+  const hubPerms = usePermissions(config.desktop ? current?.id : undefined);
+  const project: Project | null = useMemo(() => {
+    if (!current || !config.desktop) return current;
+    return { ...current, perm: hubPerms.data?.me ?? current.perm };
+  }, [current, config.desktop, hubPerms.data]);
 
   useEffect(() => {
     document.title = current
@@ -313,7 +324,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
           crumb: "Project settings",
           body: (
             <ProjectSettings
-              project={current}
+              project={project ?? current}
               org={org}
               onDeleted={async () => {
                 // The id is dead now: refresh drops it from the list, and
@@ -376,7 +387,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
       apiBase={"/api/p/" + current.id + "/"}
       route={route}
       hub
-      project={current}
+      project={project ?? current}
       projects={projects}
       sidebar={{
         vault,

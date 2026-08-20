@@ -100,10 +100,18 @@ func desktopHandler() http.Handler {
 	mux.HandleFunc("POST /api/p/{project}/restore", originGuard(proxyProject))
 	mux.HandleFunc("POST /api/p/{project}/remove", originGuard(proxyProject))
 	mux.HandleFunc("POST /api/p/{project}/undo-run", originGuard(proxyProject))
-	// The People panel: the local registry has no grants, so answering
-	// locally showed an empty (wrong) list — the hub owns the truth. Reads
-	// only; grant edits stay hub-web-only.
+	// The permission surface: the local registry has no grants, so answering
+	// locally showed an empty (wrong) list — the hub owns the truth, for
+	// reads AND edits. The GET also carries `me`, the account's real level,
+	// which the frontend uses as project.perm on desktop.
 	mux.HandleFunc("GET /api/p/{project}/permissions", proxyProject)
+	mux.HandleFunc("PUT /api/p/{project}/permissions", originGuard(proxyProject))
+	mux.HandleFunc("PUT /api/p/{project}/permissions/{email}", originGuard(proxyProject))
+	mux.HandleFunc("DELETE /api/p/{project}/permissions/{email}", originGuard(proxyProject))
+	// Project metadata edits and deletion are hub writes like everything
+	// else; the hub's admin gate is the gate.
+	mux.HandleFunc("PATCH /api/projects/{project}", originGuard(proxyProject))
+	mux.HandleFunc("DELETE /api/projects/{project}", originGuard(proxyProject))
 	// Project creation and its template seeding are hub writes (2026-08-20
 	// owner decision): create goes to the signed-in hub, uploads go to the
 	// project's hub — for a just-created project that's the default-hub

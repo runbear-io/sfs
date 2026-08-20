@@ -26,6 +26,7 @@ func TestDesktopServer(t *testing.T) {
 
 	// Fake hub: answers heat and shares, checks the device token arrives.
 	var hubSawAuth, shareSawAuth, shareBody, restoreSawAuth, createSawAuth, uploadPath string
+	var grantSawAuth, renameSawAuth string
 	var uploadBytes int64
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -47,6 +48,12 @@ func TestDesktopServer(t *testing.T) {
 			io.WriteString(w, `{"ok":true}`)
 		case r.Method == "GET" && r.URL.Path == "/api/p/"+hubID+"/permissions":
 			io.WriteString(w, `{"default":"write","me":"admin","grants":[{"email":"mino@runbear.io","level":"read"}]}`)
+		case r.Method == "PUT" && r.URL.Path == "/api/p/"+hubID+"/permissions/mino@runbear.io":
+			grantSawAuth = r.Header.Get("Authorization")
+			io.WriteString(w, `{"ok":true}`)
+		case r.Method == "PATCH" && r.URL.Path == "/api/projects/"+hubID:
+			renameSawAuth = r.Header.Get("Authorization")
+			io.WriteString(w, `{"ok":true}`)
 		case r.Method == "POST" && r.URL.Path == "/api/projects":
 			createSawAuth = r.Header.Get("Authorization")
 			io.WriteString(w, `{"id":"33333333-4444-4555-8666-777777777777","name":"fresh","perm":"admin"}`)
@@ -282,9 +289,17 @@ func TestDesktopServer(t *testing.T) {
 		t.Fatalf("upload proxy: %d, hub got %d bytes at %q", code, uploadBytes, uploadPath)
 	}
 
-	// Local writes refuse: project rename, store push.
+	// Project metadata and grant edits are hub writes: proxied with the
+	// token, admin-gated by the hub itself.
+	if code, _ := doOrigin("PATCH", "/api/projects/"+hubID, strings.NewReader(`{"name":"renamed"}`)); code != 200 || renameSawAuth != "Bearer tok123" {
+		t.Fatalf("rename proxy = %d (hub saw %q)", code, renameSawAuth)
+	}
+	if code, _ := doOrigin("PUT", "/api/p/"+hubID+"/permissions/mino@runbear.io", strings.NewReader(`{"level":"write"}`)); code != 200 || grantSawAuth != "Bearer tok123" {
+		t.Fatalf("grant proxy = %d (hub saw %q)", code, grantSawAuth)
+	}
+
+	// Local writes refuse: the store push (a journal write) never proxies.
 	for _, w := range []struct{ method, path, body string }{
-		{"PATCH", "/api/projects/" + hubID, `{"name":"x"}`},
 		{"PUT", "/api/p/" + hubID + "/store/object?key=journal/evil.jsonl", "{}"},
 	} {
 		req, _ := http.NewRequest(w.method, ts.URL+w.path, strings.NewReader(w.body))

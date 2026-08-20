@@ -60,6 +60,14 @@ test("heat reaches the dashboard through the hub proxy", async ({ page }) => {
   await expect(page.getByText("index.md").first()).toBeVisible();
 });
 
+test("settings reflect the hub's real permission, not the local read-only", async ({ page }) => {
+  // The fake hub answers /permissions with me:"admin" — so this account may
+  // edit, and the grants list is the hub's, not the empty local registry's.
+  await page.goto(`/${HUB_ID}/settings`);
+  await expect(page.getByText("reader@example.com").first()).toBeVisible();
+  await expect(page.locator(".ps-chip", { hasText: "Read-only" })).toHaveCount(0);
+});
+
 test("new-project dialog opens with templates (creation proxies to the hub)", async ({ page }) => {
   await page.goto(`/${HUB_ID}/`);
   await page.waitForSelector("#sidebar");

@@ -202,11 +202,10 @@ export default function Browser(props: {
 
   const panel = props.panel ?? null;
   // Minting a public link is a write. A read-only member sees no Share
-  // button rather than a button that 403s. On desktop every project reads
-  // as perm "read" (the local sidecar never writes), but shares are proxied
-  // to the hub, which enforces the caller's real permission — so the button
-  // shows and a genuinely read-only member gets the hub's 403 as a toast.
-  const canShare = !panel && hub && !!project && isFile && (config.desktop || atLeast(project.perm, "write"));
+  // button rather than a button that 403s. On desktop project.perm carries
+  // the hub's answer for this account (HubApp resolves it from the proxied
+  // /permissions), so this same gate is accurate there too.
+  const canShare = !panel && hub && !!project && isFile && atLeast(project.perm, "write");
   // The project's live public links, filtered to the open file. One query
   // for the whole project (Settings reads the same cache entry), so opening
   // a file costs no extra request.
@@ -287,9 +286,9 @@ export default function Browser(props: {
      only delete control in the web UI, and a restore produces no run card.
      Non-danger styling on purpose: restore adds content, it takes none away. */
   const [restoring, setRestoring] = useState("");
-  // Same desktop exception as canShare: the sidecar proxies restore/remove/
-  // undo-run to the hub, which enforces the caller's real permission.
-  const canRestore = hub && !!project && (config.desktop || atLeast(project?.perm, "write"));
+  // On desktop project.perm already carries the hub's answer (HubApp resolves
+  // it from the proxied /permissions), so no desktop exception is needed here.
+  const canRestore = hub && !!project && atLeast(project?.perm, "write");
   const onRestore = useCallback(
     async (p: string, sha: string, recreates: boolean) => {
       if (
