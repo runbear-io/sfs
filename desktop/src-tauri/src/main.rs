@@ -290,6 +290,9 @@ fn open_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()
 
 fn main() {
     let app = tauri::Builder::default()
+        // Remembers the window's size/position across launches (and across
+        // close-to-tray → Open), keyed by window label.
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         // App-menu events (the tray has its own handler; ids are disjoint).
         .on_menu_event(|app, e| match e.id().as_ref() {
             "nav-back" => navigate(app, "history.back()"),

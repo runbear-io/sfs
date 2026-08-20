@@ -45,10 +45,13 @@ test("restore is offered on desktop (hub-backed)", async ({ page }) => {
   await expect(page.locator(".hrestore-btn").first()).toBeVisible();
 });
 
-test("share mints through the hub proxy", async ({ page }) => {
+test("share mints through the hub proxy and lands on the clipboard", async ({ page }) => {
   await page.goto(`/${HUB_ID}/index.md`);
   await page.locator("#share-btn").click();
   await expect(page.getByText("e2e-share").first()).toBeVisible();
+  // The copy control is the whole point of a share link on desktop.
+  const copied = await page.evaluate(() => navigator.clipboard.readText());
+  expect(copied).toContain("/s/e2e-share");
 });
 
 test("heat reaches the dashboard through the hub proxy", async ({ page }) => {

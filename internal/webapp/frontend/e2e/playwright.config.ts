@@ -24,7 +24,7 @@ export default defineConfig({
     {
       name: "desktop",
       testMatch: "**/desktop.spec.ts",
-      use: { baseURL: "http://localhost:8994", permissions: ["clipboard-write"] },
+      use: { baseURL: "http://localhost:8994", permissions: ["clipboard-write", "clipboard-read"] },
     },
   ],
   webServer: [

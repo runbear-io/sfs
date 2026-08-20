@@ -109,14 +109,14 @@ Status as of 2026-08-19. Check = the named test/tour step that closes it.
 | Zoom (Cmd+= / Cmd+- / Cmd+0) | built | View menu items → `apply_zoom` (`set_zoom`, level survives reopen). Manual: visual check pending unlock |
 | Cmd+K palette, Esc, arrow nav inside the page | done | UI tour palette step |
 | Downloads from the webview (Download button saves a file) | built | `on_download` saves to ~/Downloads with collision suffixes. Manual: click Download, check ~/Downloads |
-| Copy-link / clipboard buttons | open | Verify webview clipboard permissions; tour step |
+| Copy-link / clipboard buttons | done | `desktop.spec.ts` share spec asserts the minted link lands on the clipboard |
 | Uploads (hub proxy) | open — OWNER DECISION | Proxy `upload/*` to the project's hub like shares; frontend already gates on `upload.enabled` — needs a capability flag decision |
 | Restore / undo-remove (hub proxy) | done | `restore`/`remove`/`undo-run` proxied with origin guard (`TestDesktopServer` restore step + `desktop.spec.ts` restore spec); `canRestore` takes the same desktop exception as `canShare` |
 | Project create / templates | open — OWNER DECISION | Hub write — proxy or `wontfix` (decide with the owner) |
 | Permissions view (read-only) | done | `GET /permissions` proxied to the hub (`TestDesktopServer` permissions step); grant edits stay hub-web-only |
 | Org/admin surfaces | wontfix | Hub web app's job; the app links out |
 | External links open in the default browser (not the webview) | built | `on_navigation`: non-sidecar URLs → `open`. Known gap: `target=_blank` doesn't route through this handler. Manual: click a web link in a markdown file |
-| Window state restore (size/position across launches) | open | Shell; low priority |
+| Window state restore (size/position across launches) | built | `tauri-plugin-window-state`. Manual: resize, quit, relaunch |
 
 Rows may be added, never silently dropped. When the audit harness finds a
 web-app behavior not listed here, add it as a row first, then decide.
