@@ -110,9 +110,9 @@ Status as of 2026-08-19. Check = the named test/tour step that closes it.
 | Cmd+K palette, Esc, arrow nav inside the page | done | UI tour palette step |
 | Downloads from the webview (Download button saves a file) | built | `on_download` saves to ~/Downloads with collision suffixes. Manual: click Download, check ~/Downloads |
 | Copy-link / clipboard buttons | done | `desktop.spec.ts` share spec asserts the minted link lands on the clipboard |
-| Uploads (hub proxy) | open — OWNER DECISION | Proxy `upload/*` to the project's hub like shares; frontend already gates on `upload.enabled` — needs a capability flag decision |
+| Uploads (hub proxy) | done | Owner decision 2026-08-20: `upload/init\|content\|commit` proxied (streaming — 3 MiB body pinned in `TestDesktopServer`), with default-hub fallback for projects that have no local mount yet. Note the web app itself has no drag-drop upload UI; uploads serve the create/template flow |
 | Restore / undo-remove (hub proxy) | done | `restore`/`remove`/`undo-run` proxied with origin guard (`TestDesktopServer` restore step + `desktop.spec.ts` restore spec); `canRestore` takes the same desktop exception as `canShare` |
-| Project create / templates | open — OWNER DECISION | Hub write — proxy or `wontfix` (decide with the owner) |
+| Project create / templates | done | Owner decision 2026-08-20: `POST /api/projects` proxies to the signed-in hub; `upload.enabled: true` in desktop config offers the dialog (`TestDesktopServer` create step + `desktop.spec.ts` dialog spec). Known gap: the new project isn't browsable in the app until `bdrive init` links a folder |
 | Permissions view (read-only) | done | `GET /permissions` proxied to the hub (`TestDesktopServer` permissions step); grant edits stay hub-web-only |
 | Org/admin surfaces | wontfix | Hub web app's job; the app links out |
 | External links open in the default browser (not the webview) | built | `on_navigation`: non-sidecar URLs → `open`. Known gap: `target=_blank` doesn't route through this handler. Manual: click a web link in a markdown file |

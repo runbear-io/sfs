@@ -73,6 +73,10 @@ func desktopHandler() http.Handler {
 		Volume:   "BearDrive",
 		Refresh:  2 * time.Second,
 		Desktop:  true,
+		// Reported in /api/config so the frontend offers project creation
+		// (canCreate); the create and its uploads are hub proxies below.
+		// Local write routes stay refused through the PermRead resolver.
+		Upload: webapp.UploadConfig{Enabled: true},
 		DesktopMe: func() (string, string) {
 			s, _ := config.LoadSettings()
 			if s.Token == "" {
@@ -100,6 +104,15 @@ func desktopHandler() http.Handler {
 	// locally showed an empty (wrong) list — the hub owns the truth. Reads
 	// only; grant edits stay hub-web-only.
 	mux.HandleFunc("GET /api/p/{project}/permissions", proxyProject)
+	// Project creation and its template seeding are hub writes (2026-08-20
+	// owner decision): create goes to the signed-in hub, uploads go to the
+	// project's hub — for a just-created project that's the default-hub
+	// fallback in proxyProject. Known gap: the new project has no local
+	// folder until `bdrive init` links one, so the app can't browse it yet.
+	mux.HandleFunc("POST /api/projects", originGuard(proxyDefaultHub))
+	mux.HandleFunc("POST /api/p/{project}/upload/init", originGuard(proxyProject))
+	mux.HandleFunc("PUT /api/p/{project}/upload/content", originGuard(proxyProject))
+	mux.HandleFunc("POST /api/p/{project}/upload/commit", originGuard(proxyProject))
 	mux.HandleFunc("PATCH /api/shares/{token}", originGuard(proxyDefaultHub))
 	mux.HandleFunc("DELETE /api/shares/{token}", originGuard(proxyDefaultHub))
 	mux.HandleFunc("GET /api/desktop/status", desktopStatus)
@@ -536,12 +549,15 @@ func originGuard(h http.HandlerFunc) http.HandlerFunc {
 // desktop keys projects by hub id — so only host and Authorization change,
 // and the hub enforces the caller's real permission on its side.
 func proxyProject(w http.ResponseWriter, r *http.Request) {
-	m, ok := desktopMounts()[r.PathValue("project")]
-	if !ok {
-		http.Error(w, "no such project", http.StatusNotFound)
+	if m, ok := desktopMounts()[r.PathValue("project")]; ok {
+		proxyHub(w, r, m.server)
 		return
 	}
-	proxyHub(w, r, m.server)
+	// Not one of this machine's mounts — but it may still be the caller's
+	// project on the signed-in hub (a project just created from the app has
+	// no local folder yet; template seeding uploads into it immediately).
+	// The hub enforces membership either way.
+	proxyDefaultHub(w, r)
 }
 
 // proxyDefaultHub forwards a token-scoped request (share revoke/expiry —
@@ -568,14 +584,21 @@ func proxyHub(w http.ResponseWriter, r *http.Request, server string) {
 	if r.URL.RawQuery != "" {
 		u += "?" + r.URL.RawQuery
 	}
-	var body []byte
-	if r.Body != nil {
-		body, _ = io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	// Streamed, not buffered: upload/content bodies are whole files, and the
+	// sha the hub checks is a property of the exact bytes.
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, u, r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
 	}
-	if len(body) == 0 {
-		body = nil
+	req.ContentLength = r.ContentLength
+	if ct := r.Header.Get("Content-Type"); ct != "" {
+		req.Header.Set("Content-Type", ct)
 	}
-	resp, err := serverDo(r.Method, u, token, body)
+	if token != "" && tokenGoesTo(server) {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := initClient.Do(req)
 	if err != nil {
 		http.Error(w, "hub unreachable: "+err.Error(), http.StatusBadGateway)
 		return

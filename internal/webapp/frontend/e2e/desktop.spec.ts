@@ -60,6 +60,13 @@ test("heat reaches the dashboard through the hub proxy", async ({ page }) => {
   await expect(page.getByText("index.md").first()).toBeVisible();
 });
 
+test("new-project dialog opens with templates (creation proxies to the hub)", async ({ page }) => {
+  await page.goto(`/${HUB_ID}/`);
+  await page.waitForSelector("#sidebar");
+  await page.locator(".nav-add").click();
+  await expect(page.getByText("Docs + decision records").first()).toBeVisible();
+});
+
 test("command palette opens and finds files", async ({ page }) => {
   await page.goto(`/${HUB_ID}/`);
   await page.waitForSelector("#sidebar");

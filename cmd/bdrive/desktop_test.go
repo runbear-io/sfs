@@ -25,7 +25,8 @@ func TestDesktopServer(t *testing.T) {
 	const hubID = "0b5e8a1f-2c3d-4e5f-8a9b-0c1d2e3f4a5b"
 
 	// Fake hub: answers heat and shares, checks the device token arrives.
-	var hubSawAuth, shareSawAuth, shareBody, restoreSawAuth string
+	var hubSawAuth, shareSawAuth, shareBody, restoreSawAuth, createSawAuth, uploadPath string
+	var uploadBytes int64
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -46,6 +47,13 @@ func TestDesktopServer(t *testing.T) {
 			io.WriteString(w, `{"ok":true}`)
 		case r.Method == "GET" && r.URL.Path == "/api/p/"+hubID+"/permissions":
 			io.WriteString(w, `{"default":"write","me":"admin","grants":[{"email":"mino@runbear.io","level":"read"}]}`)
+		case r.Method == "POST" && r.URL.Path == "/api/projects":
+			createSawAuth = r.Header.Get("Authorization")
+			io.WriteString(w, `{"id":"33333333-4444-4555-8666-777777777777","name":"fresh","perm":"admin"}`)
+		case r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/p/") && strings.HasSuffix(r.URL.Path, "/upload/content"):
+			n, _ := io.Copy(io.Discard, r.Body)
+			uploadPath, uploadBytes = r.URL.Path, n
+			io.WriteString(w, `{"ok":true}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -127,7 +135,9 @@ func TestDesktopServer(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &cfg); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Mode != "hub" || !cfg.Desktop || cfg.Auth.Enabled || !cfg.Reads.Enabled || cfg.Upload.Enabled {
+	// upload.enabled=true is what offers project creation in the UI; the
+	// create and its uploads are hub proxies, never local writes.
+	if cfg.Mode != "hub" || !cfg.Desktop || cfg.Auth.Enabled || !cfg.Reads.Enabled || !cfg.Upload.Enabled {
 		t.Fatalf("config = %s", body)
 	}
 
@@ -245,11 +255,37 @@ func TestDesktopServer(t *testing.T) {
 		t.Fatalf("permissions proxy: %d %s", code, body)
 	}
 
-	// Local writes refuse: project rename, store push, upload.
+	// Project creation goes to the signed-in hub (2026-08-20 owner decision),
+	// and template seeding streams uploads to the project's hub — falling
+	// back to the signed-in hub for a project that has no local mount yet.
+	// The 3 MiB body pins streaming: the old buffered proxy capped at 1 MiB.
+	doOrigin := func(method, path string, body io.Reader) (int, string) {
+		t.Helper()
+		req, _ := http.NewRequest(method, ts.URL+path, body)
+		req.Header.Set("Origin", ts.URL)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+	code, body = doOrigin("POST", "/api/projects", strings.NewReader(`{"name":"fresh"}`))
+	if code != 200 || !strings.Contains(body, "fresh") || createSawAuth != "Bearer tok123" {
+		t.Fatalf("project create proxy: %d %s (hub saw %q)", code, body, createSawAuth)
+	}
+	const freshID = "33333333-4444-4555-8666-777777777777"
+	big := strings.Repeat("x", 3<<20)
+	code, _ = doOrigin("PUT", "/api/p/"+freshID+"/upload/content?path=index.md", strings.NewReader(big))
+	if code != 200 || uploadBytes != int64(len(big)) || !strings.Contains(uploadPath, freshID) {
+		t.Fatalf("upload proxy: %d, hub got %d bytes at %q", code, uploadBytes, uploadPath)
+	}
+
+	// Local writes refuse: project rename, store push.
 	for _, w := range []struct{ method, path, body string }{
 		{"PATCH", "/api/projects/" + hubID, `{"name":"x"}`},
 		{"PUT", "/api/p/" + hubID + "/store/object?key=journal/evil.jsonl", "{}"},
-		{"POST", "/api/p/" + hubID + "/upload/init", `{}`},
 	} {
 		req, _ := http.NewRequest(w.method, ts.URL+w.path, strings.NewReader(w.body))
 		req.Header.Set("Content-Type", "application/json")
