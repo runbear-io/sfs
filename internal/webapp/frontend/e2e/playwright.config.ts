@@ -18,12 +18,13 @@ export default defineConfig({
     permissions: ["clipboard-write"],
   },
   projects: [
-    { name: "hub", testIgnore: "**/desktop.spec.ts" },
+    { name: "hub", testIgnore: "**/desktop*.spec.ts" },
     // The same SPA served by the desktop sidecar over local state — see
-    // desktop.spec.ts and .claude/desktop-goal.md.
+    // desktop.spec.ts and .claude/desktop-goal.md. desktop-signedout.spec.ts
+    // overrides baseURL to the :8995 virgin-home harness.
     {
       name: "desktop",
-      testMatch: "**/desktop.spec.ts",
+      testMatch: "**/desktop*.spec.ts",
       use: { baseURL: "http://localhost:8994", permissions: ["clipboard-write", "clipboard-read"] },
     },
   ],
@@ -42,9 +43,16 @@ export default defineConfig({
     },
     {
       command:
-        "cd ../../../.. && BDRIVE_E2E_DESKTOP=1 go test -count=1 -timeout 3h -run TestE2EDesktop ./cmd/bdrive",
+        "cd ../../../.. && BDRIVE_E2E_DESKTOP=1 go test -count=1 -timeout 3h -run 'TestE2EDesktop$' ./cmd/bdrive",
       url: "http://localhost:8994/api/config",
       reuseExistingServer: false, // same staleness rule as the hub harness
+      timeout: 60_000,
+    },
+    {
+      command:
+        "cd ../../../.. && BDRIVE_E2E_DESKTOP=1 go test -count=1 -timeout 3h -run 'TestE2EDesktopSignedOut$' ./cmd/bdrive",
+      url: "http://localhost:8995/api/config",
+      reuseExistingServer: false,
       timeout: 60_000,
     },
   ],

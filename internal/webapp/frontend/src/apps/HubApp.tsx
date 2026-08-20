@@ -205,7 +205,15 @@ export default function HubApp({ config }: { config: ServerConfig }) {
         topbar={<Topbar />}
       >
         <Page>
-          <EmptyState onNew={() => setCreating(true)} canCreate={canCreate} />
+          <EmptyState
+            onNew={() => setCreating(true)}
+            canCreate={canCreate}
+            signIn={
+              config.desktop && !config.me
+                ? () => desktopAuth("/api/desktop/login", "Finish signing in in your browser…")
+                : undefined
+            }
+          />
         </Page>
         {newProjectDialog}
       </AppShell>
