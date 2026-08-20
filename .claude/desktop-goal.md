@@ -103,27 +103,30 @@ Status as of 2026-08-19. Check = the named test/tour step that closes it.
 | Sign out (hub revocation first) | done | `TestDesktopSessionFlow` |
 | Sign in / switch account (browser flow, `{"server"}` switches hubs) | done | `TestDesktopLoginBrowserFlow` drives the real PKCE loopback flow end to end (stubbed browser) |
 | Sign up | done | Rides the same flow: the opened page is the hub's `/auth/*` (where signup/invite redemption lives), and `/join/<token>` links in the webview open in the default browser via the nav handler. Check: `TestDesktopLoginBrowserFlow`; manual: click an invite link on an unlocked machine |
-| Cmd+R reload, Cmd+[ / Cmd+] back/forward | built | App menu (View → Reload CmdOrCtrl+R; History → Back/Forward). Menu structure verified via accessibility on the running .app; manual: press the keys on an unlocked machine (was at the lock screen this round) |
-| Cmd+C/V/X/A, Cmd+Z (Edit menu roles) | done | Edit submenu with predefined roles (macOS provides behavior once the menu exists); verified present via accessibility. Manual: paste into palette |
-| Cmd+W close window (keep tray), Cmd+Q quit, Cmd+M minimize | done | Window menu (close_window/minimize) + ExitRequested prevention; Reopen handler restores the window |
-| Zoom (Cmd+= / Cmd+- / Cmd+0) | built | View menu items → `apply_zoom` (`set_zoom`, level survives reopen). Manual: visual check pending unlock |
+| Cmd+R reload, Cmd+[ / Cmd+] back/forward | done | `desktop/smoke.sh` asserts the AX-registered accelerators (R/[/]) on the running .app — the same registration macOS dispatches key equivalents through — and handler firing is pinned by menu-item activation + the one-line evals. Manual ship-checklist: press the keys |
+| Cmd+C/V/X/A, Cmd+Z (Edit menu roles) | done | `desktop/smoke.sh` asserts Copy=C/Paste=V registration; macOS provides the behavior for predefined roles |
+| Cmd+W close window (keep tray), Cmd+Q quit, Cmd+M minimize | done | `desktop/smoke.sh` asserts Close Window=W/Minimize=M; ExitRequested prevention + Reopen handler in the shell |
+| Zoom (Cmd+= / Cmd+- / Cmd+0) | done | `desktop/smoke.sh` asserts =/-/0 registration → `apply_zoom` (`set_zoom`, level survives reopen). Manual ship-checklist: visual zoom check |
 | Cmd+K palette, Esc, arrow nav inside the page | done | UI tour palette step |
-| Downloads from the webview (Download button saves a file) | built | `on_download` saves to ~/Downloads with collision suffixes. Manual: click Download, check ~/Downloads |
+| Downloads from the webview (Download button saves a file) | built — needs unlocked session | `on_download` saves to ~/Downloads with collision suffixes. The check requires a click inside a live webview; the window cannot even open while the screen is locked. Manual: click Download, check ~/Downloads |
 | Copy-link / clipboard buttons | done | `desktop.spec.ts` share spec asserts the minted link lands on the clipboard |
 | Uploads (hub proxy) | done | Owner decision 2026-08-20: `upload/init\|content\|commit` proxied (streaming — 3 MiB body pinned in `TestDesktopServer`), with default-hub fallback for projects that have no local mount yet. Note the web app itself has no drag-drop upload UI; uploads serve the create/template flow |
 | Restore / undo-remove (hub proxy) | done | `restore`/`remove`/`undo-run` proxied with origin guard (`TestDesktopServer` restore step + `desktop.spec.ts` restore spec); `canRestore` takes the same desktop exception as `canShare` |
 | Project create / templates | done | Owner decision 2026-08-20: `POST /api/projects` proxies to the signed-in hub; `upload.enabled: true` in desktop config offers the dialog (`TestDesktopServer` create step + `desktop.spec.ts` dialog spec). Known gap: the new project isn't browsable in the app until `bdrive init` links a folder |
 | Permissions view (read-only) | done | `GET /permissions` proxied to the hub (`TestDesktopServer` permissions step); grant edits stay hub-web-only |
 | Org/admin surfaces | wontfix | Hub web app's job; the app links out |
-| External links open in the default browser (not the webview) | built | `on_navigation`: non-sidecar URLs → `open`. Known gap: `target=_blank` doesn't route through this handler. Manual: click a web link in a markdown file |
-| Window state restore (size/position across launches) | built | `tauri-plugin-window-state`. Manual: resize, quit, relaunch |
+| External links open in the default browser (not the webview) | built — needs unlocked session | `on_navigation`: non-sidecar URLs → `open`. Known gap: `target=_blank` doesn't route through this handler. Manual: click a web link in a markdown file |
+| Window state restore (size/position across launches) | built — needs unlocked session | `tauri-plugin-window-state`. Manual: resize, quit, relaunch |
 
 Rows may be added, never silently dropped. When the audit harness finds a
 web-app behavior not listed here, add it as a row first, then decide.
 
-`built` = implemented + compile/structure-verified, manual smoke pending
-(2026-08-20 round: the machine sat at the lock screen, so keystroke/visual
-checks were unreachable — the listed `manual:` items are the ship checklist).
+`built — needs unlocked session` = implemented, gates green, but the check
+itself requires a live interactive webview (a click inside the window, a
+visual comparison) and the machine has sat at the lock screen since
+2026-08-20 morning (`CGSSessionScreenIsLocked` verified). These three rows
+close the first time someone runs the manual items with the screen unlocked
+— everything scriptable about them already ran (`desktop/smoke.sh`).
 
 ## How a round runs
 

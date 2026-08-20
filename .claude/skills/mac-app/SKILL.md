@@ -23,6 +23,10 @@ first and treat the app build as packaging. Design + status:
   project: `npx playwright test -c e2e --project=desktop` (seeded sidecar
   harness, `TestE2EDesktop`).
 
+After launching a build, run `./desktop/smoke.sh` — it asserts the sidecar
+answers in desktop mode, the menu bar + every shortcut accelerator is
+registered (via the AX tree, works even over SSH), and the tray is up.
+
 ## 2. Build (+ optional ship)
 
     ./desktop/dist.sh [taildrop-target]
