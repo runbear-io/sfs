@@ -287,7 +287,9 @@ export default function Browser(props: {
      only delete control in the web UI, and a restore produces no run card.
      Non-danger styling on purpose: restore adds content, it takes none away. */
   const [restoring, setRestoring] = useState("");
-  const canRestore = hub && !!project && atLeast(project?.perm, "write");
+  // Same desktop exception as canShare: the sidecar proxies restore/remove/
+  // undo-run to the hub, which enforces the caller's real permission.
+  const canRestore = hub && !!project && (config.desktop || atLeast(project?.perm, "write"));
   const onRestore = useCallback(
     async (p: string, sha: string, recreates: boolean) => {
       if (

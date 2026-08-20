@@ -496,7 +496,9 @@ func sameOriginLink(server, link string) string {
 	return link
 }
 
-func openBrowser(url string) error {
+// openBrowser opens url in the user's default browser. A var so the desktop
+// login test can stand in for the user completing the sign-in.
+var openBrowser = func(url string) error {
 	switch runtime.GOOS {
 	case "darwin":
 		return exec.Command("open", url).Start()

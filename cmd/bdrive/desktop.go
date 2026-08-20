@@ -88,6 +88,18 @@ func desktopHandler() http.Handler {
 	mux.HandleFunc("GET /api/p/{project}/heat", proxyProject)
 	mux.HandleFunc("GET /api/p/{project}/shares", proxyProject)
 	mux.HandleFunc("POST /api/p/{project}/shares", originGuard(proxyProject))
+	// Restore/remove/undo-run are writes, so the desktop never performs them
+	// locally (one journal, one writer): they proxy to the project's hub,
+	// which journals the op under this account and enforces its real
+	// permission. The local RemoteSource picks the change up on refresh like
+	// any other peer edit.
+	mux.HandleFunc("POST /api/p/{project}/restore", originGuard(proxyProject))
+	mux.HandleFunc("POST /api/p/{project}/remove", originGuard(proxyProject))
+	mux.HandleFunc("POST /api/p/{project}/undo-run", originGuard(proxyProject))
+	// The People panel: the local registry has no grants, so answering
+	// locally showed an empty (wrong) list — the hub owns the truth. Reads
+	// only; grant edits stay hub-web-only.
+	mux.HandleFunc("GET /api/p/{project}/permissions", proxyProject)
 	mux.HandleFunc("PATCH /api/shares/{token}", originGuard(proxyDefaultHub))
 	mux.HandleFunc("DELETE /api/shares/{token}", originGuard(proxyDefaultHub))
 	mux.HandleFunc("GET /api/desktop/status", desktopStatus)

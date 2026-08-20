@@ -25,7 +25,7 @@ func TestDesktopServer(t *testing.T) {
 	const hubID = "0b5e8a1f-2c3d-4e5f-8a9b-0c1d2e3f4a5b"
 
 	// Fake hub: answers heat and shares, checks the device token arrives.
-	var hubSawAuth, shareSawAuth, shareBody string
+	var hubSawAuth, shareSawAuth, shareBody, restoreSawAuth string
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -41,6 +41,11 @@ func TestDesktopServer(t *testing.T) {
 			io.WriteString(w, `{"shares":[]}`)
 		case r.Method == "DELETE" && r.URL.Path == "/api/shares/sh-abc":
 			io.WriteString(w, `{"ok":true}`)
+		case r.Method == "POST" && r.URL.Path == "/api/p/"+hubID+"/restore":
+			restoreSawAuth = r.Header.Get("Authorization")
+			io.WriteString(w, `{"ok":true}`)
+		case r.Method == "GET" && r.URL.Path == "/api/p/"+hubID+"/permissions":
+			io.WriteString(w, `{"default":"write","me":"admin","grants":[{"email":"mino@runbear.io","level":"read"}]}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -209,9 +214,39 @@ func TestDesktopServer(t *testing.T) {
 		resp.Body.Close()
 	}
 
-	// Writes refuse: restore, project rename, store push, upload.
+	// Restore is hub-backed like shares: same-origin writes proxy through
+	// with the device token (the hub journals the op and enforces the real
+	// permission); a cross-origin write is refused before the hub is reached.
+	restoreReq := func(origin string) int {
+		t.Helper()
+		req, _ := http.NewRequest("POST", ts.URL+"/api/p/"+hubID+"/restore", strings.NewReader(`{"path":"readme.md","sha":"`+sha1+`"}`))
+		req.Header.Set("Content-Type", "application/json")
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := restoreReq("https://evil.example"); code != 403 || restoreSawAuth != "" {
+		t.Fatalf("cross-origin restore = %d (hub saw %q)", code, restoreSawAuth)
+	}
+	if code := restoreReq(ts.URL); code != 200 || restoreSawAuth != "Bearer tok123" {
+		t.Fatalf("restore proxy = %d (hub saw %q)", code, restoreSawAuth)
+	}
+
+	// The People panel reads the hub's grants, not the local registry's
+	// empty ones.
+	code, body = get("/api/p/" + hubID + "/permissions")
+	if code != 200 || !strings.Contains(body, "mino@runbear.io") {
+		t.Fatalf("permissions proxy: %d %s", code, body)
+	}
+
+	// Local writes refuse: project rename, store push, upload.
 	for _, w := range []struct{ method, path, body string }{
-		{"POST", "/api/p/" + hubID + "/restore", `{"path":"readme.md","sha":"` + sha1 + `"}`},
 		{"PATCH", "/api/projects/" + hubID, `{"name":"x"}`},
 		{"PUT", "/api/p/" + hubID + "/store/object?key=journal/evil.jsonl", "{}"},
 		{"POST", "/api/p/" + hubID + "/upload/init", `{}`},
@@ -375,5 +410,77 @@ func TestDesktopSessionFlow(t *testing.T) {
 	// A garbage server URL is refused before anything is touched.
 	if code, _ := call("POST", "/api/desktop/login", `{"server":"ftp://nope"}`, true); code != 400 {
 		t.Fatalf("bad server url = %d", code)
+	}
+}
+
+// TestDesktopLoginBrowserFlow drives the real PKCE loopback flow end to end
+// against a fake auth-enabled hub, with the test standing in for the user's
+// browser: fetch the sign-in URL, follow the hub's redirect into the loopback
+// callback, and let the sidecar exchange the code. This is the flow "Sign
+// in…"/switch-account/sign-up all ride — the hub's /auth page (where signup
+// lives) is what the opened URL serves; the desktop's job ends at opening it
+// and completing the callback.
+func TestDesktopLoginBrowserFlow(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+
+	var exchanged struct{ code, verifier string }
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/config":
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"mode":"hub","auth":{"enabled":true,"cli_login":"/auth/cli"}}`)
+		case r.URL.Path == "/auth/cli":
+			// The hub's sign-in page: a real one authenticates (or signs up)
+			// the user first; this one approves instantly.
+			q := r.URL.Query()
+			http.Redirect(w, r, q.Get("redirect")+"?state="+q.Get("state")+"&code=c0de", http.StatusFound)
+		case r.Method == "POST" && r.URL.Path == "/api/auth/exchange":
+			var req struct {
+				Code     string `json:"code"`
+				Verifier string `json:"code_verifier"`
+			}
+			json.NewDecoder(r.Body).Decode(&req)
+			exchanged.code, exchanged.verifier = req.Code, req.Verifier
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"token":"tok-browser","user":{"email":"new@runbear.io","name":"New"}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer hub.Close()
+
+	// Stand in for the user's browser: fetch the sign-in URL; http.Get
+	// follows the hub's redirect into the loopback callback.
+	prev := openBrowser
+	openBrowser = func(u string) error {
+		go func() {
+			if resp, err := http.Get(u); err == nil {
+				resp.Body.Close()
+			}
+		}()
+		return nil
+	}
+	defer func() { openBrowser = prev }()
+
+	ts := httptest.NewServer(desktopHandler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("POST", ts.URL+"/api/desktop/login", strings.NewReader(`{"server":"`+hub.URL+`"}`))
+	req.Header.Set("X-Bdrive-Desktop", "1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || !strings.Contains(string(body), "new@runbear.io") {
+		t.Fatalf("login: %d %s", resp.StatusCode, body)
+	}
+	if exchanged.code != "c0de" || exchanged.verifier == "" {
+		t.Fatalf("exchange saw code=%q verifier=%q — PKCE verifier must travel", exchanged.code, exchanged.verifier)
+	}
+	s, err := config.LoadSettings()
+	if err != nil || s.Token != "tok-browser" || s.Email != "new@runbear.io" || s.Server != hub.URL {
+		t.Fatalf("settings after browser login = %+v (%v)", s, err)
 	}
 }

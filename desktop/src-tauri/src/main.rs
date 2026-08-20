@@ -9,6 +9,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -170,6 +171,29 @@ fn app_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Menu<
         .paste()
         .select_all()
         .build()?;
+    let view = SubmenuBuilder::new(app, "View")
+        .item(
+            &MenuItemBuilder::with_id("view-reload", "Reload")
+                .accelerator("CmdOrCtrl+R")
+                .build(app)?,
+        )
+        .separator()
+        .item(
+            &MenuItemBuilder::with_id("view-zoom-reset", "Actual Size")
+                .accelerator("CmdOrCtrl+0")
+                .build(app)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id("view-zoom-in", "Zoom In")
+                .accelerator("CmdOrCtrl+=")
+                .build(app)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id("view-zoom-out", "Zoom Out")
+                .accelerator("CmdOrCtrl+-")
+                .build(app)?,
+        )
+        .build()?;
     let history = SubmenuBuilder::new(app, "History")
         .item(
             &MenuItemBuilder::with_id("nav-back", "Back")
@@ -188,8 +212,20 @@ fn app_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Menu<
         .close_window()
         .build()?;
     MenuBuilder::new(app)
-        .items(&[&bear, &edit, &history, &window])
+        .items(&[&bear, &edit, &view, &history, &window])
         .build()
+}
+
+/// Webview zoom, percent. Survives window close/reopen (a fresh webview
+/// resets to 1.0, so open_window re-applies it).
+static ZOOM_PCT: AtomicU32 = AtomicU32::new(100);
+
+fn apply_zoom<R: tauri::Runtime>(app: &tauri::AppHandle<R>, pct: u32) {
+    let pct = pct.clamp(50, 300);
+    ZOOM_PCT.store(pct, Ordering::Relaxed);
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.set_zoom(pct as f64 / 100.0);
+    }
 }
 
 fn navigate<R: tauri::Runtime>(app: &tauri::AppHandle<R>, js: &str) {
@@ -211,7 +247,44 @@ fn open_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()
     )
     .title("BearDrive")
     .inner_size(1280.0, 850.0)
+    // The window is OUR app's viewer; anything not served by the sidecar
+    // (markdown links to the web, the hub's share pages) belongs in the
+    // user's real browser. target=_blank links don't come through here —
+    // known gap on the parity row.
+    .on_navigation(|url| {
+        let ours = url.host_str() == Some("127.0.0.1") && url.port() == Some(8990);
+        if !ours {
+            let _ = Command::new("open").arg(url.as_str()).spawn();
+        }
+        ours
+    })
+    // Downloads land in ~/Downloads under the served name; without this
+    // handler the webview silently drops them.
+    .on_download(|_wv, event| {
+        if let tauri::webview::DownloadEvent::Requested { destination, .. } = event {
+            let name = destination
+                .file_name()
+                .map(|s| s.to_os_string())
+                .unwrap_or_else(|| "download".into());
+            if let Ok(home) = std::env::var("HOME") {
+                let dir = std::path::Path::new(&home).join("Downloads");
+                let mut dest = dir.join(&name);
+                let mut n = 1;
+                while dest.exists() {
+                    dest = dir.join(format!("{} ({n})", name.to_string_lossy()));
+                    n += 1;
+                }
+                *destination = dest;
+            }
+        }
+        true
+    })
     .build()?;
+    // A fresh webview starts at 100%; keep the user's chosen zoom.
+    let pct = ZOOM_PCT.load(Ordering::Relaxed);
+    if pct != 100 {
+        apply_zoom(app, pct);
+    }
     Ok(())
 }
 
@@ -221,6 +294,10 @@ fn main() {
         .on_menu_event(|app, e| match e.id().as_ref() {
             "nav-back" => navigate(app, "history.back()"),
             "nav-forward" => navigate(app, "history.forward()"),
+            "view-reload" => navigate(app, "location.reload()"),
+            "view-zoom-in" => apply_zoom(app, ZOOM_PCT.load(Ordering::Relaxed) + 10),
+            "view-zoom-out" => apply_zoom(app, ZOOM_PCT.load(Ordering::Relaxed).saturating_sub(10)),
+            "view-zoom-reset" => apply_zoom(app, 100),
             _ => {}
         })
         .setup(|app| {
