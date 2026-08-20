@@ -19,7 +19,9 @@ first and treat the app build as packaging. Design + status:
 - Touched `internal/webapp/frontend/src`? Rebuild the committed assets
   (`npm run build` in the frontend dir — `npm ci` first in a fresh worktree)
   and verify with `internal/webapp/frontend/check-dist.sh`. The app embeds
-  `static/`, so a stale build ships silently.
+  `static/`, so a stale build ships silently. Then run the desktop e2e
+  project: `npx playwright test -c e2e --project=desktop` (seeded sidecar
+  harness, `TestE2EDesktop`).
 
 ## 2. Build (+ optional ship)
 

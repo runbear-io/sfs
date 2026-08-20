@@ -28,9 +28,9 @@ wherever a feature exists in both.
 it; it is closed when that check passes.** Checks live in:
 
 - `cmd/bdrive/desktop_test.go` (`TestDesktop*`) — sidecar API behavior.
-- The Playwright UI tour (promote the ad-hoc `tour.mjs` audit into
-  `internal/webapp/frontend/e2e/` so desktop parity runs with `npm run e2e`)
-  — anything a user does with keyboard/mouse in the window.
+- `frontend/e2e/desktop.spec.ts` (the `desktop` Playwright project, against
+  the seeded `TestE2EDesktop` harness on :8994 — runs with `npm run e2e`) —
+  anything a user does with keyboard/mouse in the window.
 - The `mac-app` skill (`.claude/skills/mac-app`) — build → smoke → Taildrop
   loop for what only the real .app can prove (tray, menus, OS shortcuts,
   spawn/quit). OS-level behavior that Playwright cannot reach is verified by
@@ -97,9 +97,9 @@ Status as of 2026-08-19. Check = the named test/tour step that closes it.
 
 | Row | Status | Check / notes |
 |---|---|---|
-| Browse, render, history, versions, dashboard, palette | done | `TestDesktopServer`, UI tour |
-| Read heat (hub proxy) | done | `TestDesktopServer` heat step |
-| Share create/list/revoke (hub proxy) | done | `TestDesktop*` share proxy tests |
+| Browse, render, history, versions, dashboard, palette | done | `TestDesktopServer` + `desktop.spec.ts` (browse/history/palette/deep-link specs) |
+| Read heat (hub proxy) | done | `TestDesktopServer` heat step + `desktop.spec.ts` dashboard spec |
+| Share create/list/revoke (hub proxy) | done | `TestDesktop*` share proxy tests + `desktop.spec.ts` share spec |
 | Sign out (hub revocation first) | done | `TestDesktopSessionFlow` |
 | Sign in / switch account (browser flow, `{"server"}` switches hubs) | done | `TestDesktopLoginBrowserFlow` drives the real PKCE loopback flow end to end (stubbed browser) |
 | Sign up | done | Rides the same flow: the opened page is the hub's `/auth/*` (where signup/invite redemption lives), and `/join/<token>` links in the webview open in the default browser via the nav handler. Check: `TestDesktopLoginBrowserFlow`; manual: click an invite link on an unlocked machine |
@@ -111,7 +111,7 @@ Status as of 2026-08-19. Check = the named test/tour step that closes it.
 | Downloads from the webview (Download button saves a file) | built | `on_download` saves to ~/Downloads with collision suffixes. Manual: click Download, check ~/Downloads |
 | Copy-link / clipboard buttons | open | Verify webview clipboard permissions; tour step |
 | Uploads (hub proxy) | open — OWNER DECISION | Proxy `upload/*` to the project's hub like shares; frontend already gates on `upload.enabled` — needs a capability flag decision |
-| Restore / undo-remove (hub proxy) | done | `restore`/`remove`/`undo-run` proxied with origin guard (`TestDesktopServer` restore step); `canRestore` takes the same desktop exception as `canShare` |
+| Restore / undo-remove (hub proxy) | done | `restore`/`remove`/`undo-run` proxied with origin guard (`TestDesktopServer` restore step + `desktop.spec.ts` restore spec); `canRestore` takes the same desktop exception as `canShare` |
 | Project create / templates | open — OWNER DECISION | Hub write — proxy or `wontfix` (decide with the owner) |
 | Permissions view (read-only) | done | `GET /permissions` proxied to the hub (`TestDesktopServer` permissions step); grant edits stay hub-web-only |
 | Org/admin surfaces | wontfix | Hub web app's job; the app links out |
