@@ -108,7 +108,7 @@ Status as of 2026-08-19. Check = the named test/tour step that closes it.
 | Cmd+W close window (keep tray), Cmd+Q quit, Cmd+M minimize | done | `desktop/smoke.sh` asserts Close Window=W/Minimize=M; ExitRequested prevention + Reopen handler in the shell |
 | Zoom (Cmd+= / Cmd+- / Cmd+0) | done | `desktop/smoke.sh` asserts =/-/0 registration → `apply_zoom` (`set_zoom`, level survives reopen). Manual ship-checklist: visual zoom check |
 | Cmd+K palette, Esc, arrow nav inside the page | done | UI tour palette step |
-| Downloads from the webview (Download button saves a file) | built — needs unlocked session | `on_download` saves to ~/Downloads with collision suffixes. The check requires a click inside a live webview; the window cannot even open while the screen is locked. Manual: click Download, check ~/Downloads |
+| Downloads from the webview (Download button saves a file) | done | Verified live 2026-08-20: a real click on a History row's Download landed README.md (6,475 B) in ~/Downloads. Finding for the docs: the FIRST download triggers macOS's "access your Downloads folder" TCC prompt — expected for a non-sandboxed app; mention it in the install docs |
 | Copy-link / clipboard buttons | done | `desktop.spec.ts` share spec asserts the minted link lands on the clipboard |
 | Uploads (hub proxy) | done | Owner decision 2026-08-20: `upload/init\|content\|commit` proxied (streaming — 3 MiB body pinned in `TestDesktopServer`), with default-hub fallback for projects that have no local mount yet. Note the web app itself has no drag-drop upload UI; uploads serve the create/template flow |
 | Restore / undo-remove (hub proxy) | done | `restore`/`remove`/`undo-run` proxied with origin guard (`TestDesktopServer` restore step + `desktop.spec.ts` restore spec); `canRestore` takes the same desktop exception as `canShare` |
@@ -116,11 +116,17 @@ Status as of 2026-08-19. Check = the named test/tour step that closes it.
 | Permissions view (read-only) | done | `GET /permissions` proxied to the hub (`TestDesktopServer` permissions step); grant edits stay hub-web-only |
 | Project settings (rename/icon/default level/grants, delete) | done | Found by the 2026-08-20 audit pass. Edits proxy to the hub (`TestDesktopServer` rename+grant steps); on desktop `project.perm` carries the hub's real level (HubApp resolves it from the proxied `/permissions` — the one place, replacing the scattered `config.desktop \|\|` exceptions) so the admin gate is accurate (`desktop.spec.ts` settings spec) |
 | Org/admin surfaces | wontfix | Hub web app's job; the app links out |
-| External links open in the default browser (not the webview) | built — needs unlocked session | `on_navigation`: non-sidecar URLs → `open`. Known gap: `target=_blank` doesn't route through this handler. Manual: click a web link in a markdown file |
-| Window state restore (size/position across launches) | built — needs unlocked session | `tauri-plugin-window-state`. Manual: resize, quit, relaunch |
+| External links open in the default browser (not the webview) | done | Verified live 2026-08-20: clicking "Star on GitHub" in the app opened github.com in a new Chrome tab; the webview stayed on its page. Known gap (tracked): `target=_blank` links don't route through `on_navigation` |
+| Window state restore (size/position across launches) | done | Verified live 2026-08-20: resized to 150,90/1100×700 via AX, quit, relaunched — restored exactly |
 
 Rows may be added, never silently dropped. When the audit harness finds a
 web-app behavior not listed here, add it as a row first, then decide.
+
+**Live keystroke verification (2026-08-20, unlocked session)**: real Cmd+=
+presses zoomed the running app visibly (and Cmd+0 reset it) — the full
+accelerator → handler → webview chain confirmed beyond the AX registration
+check. Downloads, external-link open, and window-state restore verified the
+same session (rows above).
 
 **Audit pass (2026-08-20)**: walked the hub SPA's routes/components and API
 route table against this matrix. One unlisted gap found — project settings
@@ -129,12 +135,11 @@ existing rows: `/join` (sign-up row), run cards & `?by=device` (heat proxy),
 frontmatter/mermaid (local render), org/billing/analytics (wontfix or
 managed-only). No other gaps.
 
-`built — needs unlocked session` = implemented, gates green, but the check
-itself requires a live interactive webview (a click inside the window, a
-visual comparison) and the machine has sat at the lock screen since
-2026-08-20 morning (`CGSSessionScreenIsLocked` verified). These three rows
-close the first time someone runs the manual items with the screen unlocked
-— everything scriptable about them already ran (`desktop/smoke.sh`).
+**GOAL REACHED 2026-08-20**: every row `done` or `wontfix`, each with its
+named check; the audit pass found one gap (project settings) and it was
+closed the same round; the live-session verification finished the last
+three physical rows. Future work continues against this matrix — add rows,
+never delete them.
 
 ## How a round runs
 
