@@ -76,6 +76,11 @@ test("connecting reaches the success screen with the agent prompt", async ({ pag
   await expect(page.getByText("Tell your agent")).toBeVisible();
   await expect(page.getByText("Invite teammates")).toBeVisible();
 
+  // The invite card asks the hub and reports what it says (this harness hub
+  // serves no orgs, so the honest answer is an error, not a fake link).
+  await page.locator("#setup-invite").click();
+  await expect(page.locator(".setup-err")).toBeVisible();
+
   // The prompt a teammate pastes into their agent is on the clipboard.
   await page.locator("#setup-copy-prompt").click();
   const copied = await page.evaluate(() => navigator.clipboard.readText());

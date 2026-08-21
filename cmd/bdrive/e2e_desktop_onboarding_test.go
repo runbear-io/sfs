@@ -83,6 +83,8 @@ func TestE2EDesktopOnboarding(t *testing.T) {
 			}
 			io.WriteString(w, `{"project":{"id":"`+id+`","name":"`+req.Name+`","template":"`+req.Template+`"},"created":`+
 				map[bool]string{true: "false", false: "true"}[joined]+`}`)
+		case r.Method == "GET" && r.URL.Path == "/api/orgs":
+			io.WriteString(w, `{"orgs":[]}`) // no orgs here: the invite card must say so
 		default:
 			http.NotFound(w, r) // sync degrades to offline; the wizard still completes
 		}

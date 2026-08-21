@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -124,6 +125,14 @@ func desktopHandler() http.Handler {
 	mux.HandleFunc("POST /api/p/{project}/upload/init", originGuard(proxyProject))
 	mux.HandleFunc("PUT /api/p/{project}/upload/content", originGuard(proxyProject))
 	mux.HandleFunc("POST /api/p/{project}/upload/commit", originGuard(proxyProject))
+	// Orgs live on the hub: the local registry has none, so the empty list the
+	// local handler returns would hide the user's real org (and with it the
+	// invite link the onboarding success screen offers). But the app must keep
+	// working with no hub at all — the whole point of local-first — and the
+	// shell blocks on this list, so an unreachable hub answers "no orgs"
+	// rather than hanging the window on Loading…
+	mux.HandleFunc("GET /api/orgs", proxyOrEmpty)
+	mux.HandleFunc("POST /api/orgs/{org}/invites", originGuard(proxyDefaultHub))
 	mux.HandleFunc("PATCH /api/shares/{token}", originGuard(proxyDefaultHub))
 	mux.HandleFunc("DELETE /api/shares/{token}", originGuard(proxyDefaultHub))
 	mux.HandleFunc("GET /api/desktop/status", desktopStatus)
@@ -583,6 +592,28 @@ func proxyProject(w http.ResponseWriter, r *http.Request) {
 // ponytail: a mount syncing through a DIFFERENT hub than the signed-in one
 // can't manage its shares from the app; per-token server resolution needs a
 // share→project index the desktop doesn't have.
+// proxyOrEmpty forwards a read to the signed-in hub and degrades to an empty
+// list when that is not possible (signed out, offline, hub error). Sync itself
+// degrades to offline rather than failing; a read the UI blocks on must too.
+func proxyOrEmpty(w http.ResponseWriter, r *http.Request) {
+	settings, _ := config.LoadSettings()
+	if settings.Server == "" || settings.Token == "" {
+		writeDesktopJSON(w, map[string]any{"orgs": []any{}})
+		return
+	}
+	rec := httptest.NewRecorder()
+	proxyHub(rec, r, settings.Server)
+	if rec.Code != http.StatusOK {
+		writeDesktopJSON(w, map[string]any{"orgs": []any{}})
+		return
+	}
+	for k, v := range rec.Header() {
+		w.Header()[k] = v
+	}
+	w.WriteHeader(rec.Code)
+	w.Write(rec.Body.Bytes())
+}
+
 func proxyDefaultHub(w http.ResponseWriter, r *http.Request) {
 	settings, _ := config.LoadSettings()
 	if settings.Server == "" {

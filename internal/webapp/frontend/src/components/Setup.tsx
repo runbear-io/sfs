@@ -267,6 +267,8 @@ function Syncing({ onDone }: { onDone: (s: InitStatus) => void }) {
 /** Frame 9: the payoff and exactly three next moves. */
 function Done({ st }: { st: InitStatus }) {
   const [copied, setCopied] = useState("");
+  const [inviting, setInviting] = useState(false);
+  const [inviteErr, setInviteErr] = useState("");
   const name = st.name || "team";
   const prompt =
     `Follow ${INSTALL_DOC}\nto set up the shared ${name}/ folder in my project on ` +
@@ -280,6 +282,27 @@ function Done({ st }: { st: InitStatus }) {
       setCopied("");
     }
   };
+  // Minting an invite is the hub's call (owners only), so the button asks and
+  // reports what the hub says rather than guessing at the user's role.
+  const invite = async () => {
+    setInviting(true);
+    setInviteErr("");
+    try {
+      const orgs = await getJSON<{ orgs: { id: string }[] }>("/api/orgs");
+      const org = orgs.orgs[0]?.id;
+      if (!org) throw new Error("no organization on this hub");
+      const r = await post(`/api/orgs/${org}/invites`, {});
+      if (!r.ok) throw new Error((await r.text()).trim());
+      const out = (await r.json()) as { url: string };
+      await navigator.clipboard.writeText(out.url);
+      setCopied("invite");
+    } catch (e) {
+      setInviteErr((e as Error).message || "could not create an invite link");
+    } finally {
+      setInviting(false);
+    }
+  };
+
   return (
     <div className="setup-done">
       <h2>{name}/ is live</h2>
@@ -299,13 +322,17 @@ function Done({ st }: { st: InitStatus }) {
           <h3>Tell your agent</h3>
           <p>Claude sessions in this folder now share context with your team.</p>
           <GuideCode code={prompt} />
-        </div>
-        <div className="setup-card">
-          <h3>Invite teammates</h3>
-          <p>Send them the same prompt — their agent connects their machine.</p>
           <Button id="setup-copy-prompt" onClick={() => copy("prompt", prompt)}>
             {copied === "prompt" ? "Copied" : "Copy prompt"}
           </Button>
+        </div>
+        <div className="setup-card">
+          <h3>Invite teammates</h3>
+          <p>A link that signs them up straight into this project.</p>
+          <Button id="setup-invite" disabled={inviting} onClick={invite}>
+            {copied === "invite" ? "Copied" : inviting ? "…" : "Copy invite link"}
+          </Button>
+          {inviteErr && <p className="setup-err">{inviteErr}</p>}
         </div>
       </div>
     </div>
