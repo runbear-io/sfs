@@ -65,9 +65,10 @@ test("connecting reaches the success screen with the agent prompt", async ({ pag
   await expect(page.locator("#setup-go")).toBeEnabled();
   await page.locator("#setup-go").click();
 
-  await expect(page).toHaveURL(/\/setup\/syncing$/);
-  await expect(page.getByRole("heading", { name: /Syncing/ })).toBeVisible();
-  await expect(page.getByText("You can close this window — syncing continues from the menu bar.")).toBeVisible();
+  // Against a local hub the whole connect takes well under a second, so the
+  // progress step may already be behind us — assert the transition, not a
+  // frame we might miss. (The progress screen itself is pinned below.)
+  await expect(page).toHaveURL(/\/setup\/(syncing|done)/);
 
   // The first cycle runs against an unreachable hub (offline) and still
   // finishes: the folder is connected either way.
@@ -91,4 +92,13 @@ test("connecting reaches the success screen with the agent prompt", async ({ pag
   const status = await (await page.request.get("/api/desktop/status")).json();
   expect(status.mounts.length).toBe(1);
   expect(status.mounts[0].path).toBe(ROOT + "/team");
+});
+
+// The progress step, deterministically: it takes the folder name from the URL
+// so the heading is right on the first paint — before the first status poll
+// 400ms later, which used to leave it reading "Syncing your folder".
+test("the progress step names the folder immediately", async ({ page }) => {
+  await page.goto("/setup/syncing?name=team");
+  await expect(page.getByRole("heading", { name: "Syncing team/" })).toBeVisible();
+  await expect(page.getByText("You can close this window — syncing continues from the menu bar.")).toBeVisible();
 });

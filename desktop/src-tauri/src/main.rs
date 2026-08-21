@@ -247,6 +247,20 @@ fn apply_zoom<R: tauri::Runtime>(app: &tauri::AppHandle<R>, pct: u32) {
     }
 }
 
+/// Touch a folder from THIS process, which is a GUI app.
+///
+/// macOS gates ~/Desktop, ~/Documents and ~/Downloads behind a privacy prompt
+/// (TCC). The sidecar that does the real work has no UI, so when TCC wants to
+/// ask, it has nobody to ask and the syscall blocks forever — the connect
+/// screen just sat there. A GUI app asking first is what makes the prompt
+/// appear, attributed to BearDrive; afterwards the sidecar inherits the
+/// decision. The result is deliberately ignored: this call exists for the
+/// prompt, and the sidecar reports what it can actually read.
+#[tauri::command]
+fn prime_folder_access(path: String) {
+    let _ = std::fs::read_dir(&path).map(|d| d.count());
+}
+
 fn navigate<R: tauri::Runtime>(app: &tauri::AppHandle<R>, js: &str) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.eval(js);
@@ -322,6 +336,7 @@ fn main() {
             "view-zoom-reset" => apply_zoom(app, 100),
             _ => {}
         })
+        .invoke_handler(tauri::generate_handler![prime_folder_access])
         .setup(|app| {
             app.set_menu(app_menu(app.handle())?)?;
             let child = Command::new(bdrive_path())

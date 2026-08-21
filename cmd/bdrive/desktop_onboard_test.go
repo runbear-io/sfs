@@ -323,3 +323,29 @@ func TestDesktopInitRefusals(t *testing.T) {
 		t.Fatalf("headerless init = %d, want 403", resp.StatusCode)
 	}
 }
+
+// TestDesktopInspectBlockedFolder pins the macOS privacy behavior found on
+// 2026-08-21: a folder the OS gates (Desktop/Documents/Downloads) does not
+// refuse the syscall — it BLOCKS, because the sidecar has no UI for the
+// prompt. The flow must never hang on that; it must say what to do. A blocked
+// filesystem is simulated by a probe that never returns.
+func TestDesktopInspectBlockedFolder(t *testing.T) {
+	slow := make(chan struct{}) // never closed: the call never returns
+	start := time.Now()
+	_, err := probe("/Users/someone/Documents", func() (int, error) {
+		<-slow
+		return 0, nil
+	})
+	if err == nil {
+		t.Fatal("a filesystem call that never returns must not be waited on forever")
+	}
+	if took := time.Since(start); took > 3*time.Second {
+		t.Fatalf("probe waited %s; the whole point is a bound", took)
+	}
+	// The message is the feature: it has to name the folder and the fix.
+	for _, want := range []string{"Documents", "System Settings", "Files and Folders", "BearDrive"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("blocked-folder message %q is missing %q", err, want)
+		}
+	}
+}

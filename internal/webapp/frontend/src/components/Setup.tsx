@@ -94,7 +94,7 @@ function TreePreview({ data, name }: { data: Inspect | null; name: string }) {
 }
 
 /** Frames 5-7: pick the root, name the shared folder, one commit. */
-function Connect({ onStarted }: { onStarted: () => void }) {
+function Connect({ onStarted }: { onStarted: (name: string) => void }) {
   const [root, setRoot] = useState("");
   const [name, setName] = useState("team");
   const [hooks, setHooks] = useState(true);
@@ -103,26 +103,45 @@ function Connect({ onStarted }: { onStarted: () => void }) {
   const [err, setErr] = useState("");
   const [why, setWhy] = useState(false);
 
+  // Ask the SHELL to touch the folder first. macOS gates Desktop/Documents/
+  // Downloads behind a privacy prompt, and only a GUI process can be asked —
+  // the sidecar would block forever. Tauri exposes the command; in a plain
+  // browser (the e2e harness) there is no shell and this is a no-op.
+  const prime = useCallback(async (dir: string) => {
+    const invoke = (window as unknown as { __TAURI__?: { core?: { invoke?: (c: string, a: unknown) => Promise<unknown> } } })
+      .__TAURI__?.core?.invoke;
+    if (!invoke || !dir) return;
+    try {
+      await invoke("prime_folder_access", { path: dir });
+    } catch {
+      /* the prompt is the point; a refusal shows up as the sidecar's error */
+    }
+  }, []);
+
   // Debounced: the preview follows what is typed, without a request per key.
   useEffect(() => {
     if (!root) {
       setData(null);
       return;
     }
-    const t = setTimeout(() => {
+    const t = setTimeout(async () => {
+      await prime(root);
       getJSON<Inspect>(`/api/desktop/inspect?path=${encodeURIComponent(root)}&name=${encodeURIComponent(name)}`)
         .then(setData)
         .catch(() => setData(null));
     }, 200);
     return () => clearTimeout(t);
-  }, [root, name]);
+  }, [root, name, prime]);
 
   const choose = useCallback(async () => {
     const r = await post("/api/desktop/choose-folder");
     if (!r.ok) return;
     const out = (await r.json()) as { path?: string; canceled?: boolean };
-    if (out.path) setRoot(out.path);
-  }, []);
+    if (out.path) {
+      await prime(out.path);
+      setRoot(out.path);
+    }
+  }, [prime]);
 
   const start = useCallback(async () => {
     setBusy(true);
@@ -133,7 +152,7 @@ function Connect({ onStarted }: { onStarted: () => void }) {
       setErr((await r.text()).trim() || "could not connect that folder");
       return;
     }
-    onStarted();
+    onStarted(name);
   }, [root, name, hooks, onStarted]);
 
   const joining = !!data?.join;
@@ -221,13 +240,17 @@ function Connect({ onStarted }: { onStarted: () => void }) {
 
 /** Frame 8: honest progress, and permission to walk away. */
 function Syncing({ onDone }: { onDone: (s: InitStatus) => void }) {
-  const [st, setSt] = useState<InitStatus>({ phase: "creating" });
+  // The name rides in the URL so the heading is right on the FIRST paint —
+  // the status poll is 400ms away, and "Syncing your folder" in the meantime
+  // reads like the app forgot what you just typed.
+  const named = new URLSearchParams(window.location.search).get("name") || "";
+  const [st, setSt] = useState<InitStatus>({ phase: "creating", name: named });
   const done = useRef(false);
   useEffect(() => {
     const id = setInterval(async () => {
       try {
         const s = await getJSON<InitStatus>("/api/desktop/init/status");
-        setSt(s);
+        setSt({ ...s, name: s.name || named });
         if (!done.current && (s.phase === "done" || s.phase === "error")) {
           done.current = true;
           clearInterval(id);
@@ -351,7 +374,7 @@ export function Setup({ step, signedIn, onSignIn }: { step: SetupStep; signedIn:
   return (
     <div className="setup">
       {step === "welcome" && <Welcome onStart={onSignIn} />}
-      {step === "connect" && <Connect onStarted={() => navigate("/setup/syncing")} />}
+      {step === "connect" && <Connect onStarted={(n) => navigate("/setup/syncing?name=" + encodeURIComponent(n))} />}
       {step === "syncing" && (
         <Syncing
           onDone={(s) => {

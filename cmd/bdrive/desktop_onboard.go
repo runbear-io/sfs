@@ -45,6 +45,46 @@ var sharedNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._ -]{0,63}$`)
 // never a directory listing of somebody's home.
 const maxInspectEntries = 8
 
+// fsProbeTimeout bounds every filesystem call this file makes on a folder the
+// user names. It exists because of macOS privacy protection (TCC): ~/Desktop,
+// ~/Documents and ~/Downloads are gated, and the process asking here is the
+// SIDECAR — a background process with no UI. When TCC wants to ask the user,
+// it has nobody to ask, so the syscall does not fail: it blocks forever. A
+// user whose projects live in ~/Documents typed the path and watched the
+// connect screen do nothing, with no prompt and no error (found 2026-08-21).
+//
+// So: never call the filesystem unbounded, and turn the timeout into the one
+// message that actually helps.
+const fsProbeTimeout = 1500 * time.Millisecond
+
+// blockedErr is what the user sees when macOS is sitting on the answer.
+func blockedErr(dir string) error {
+	return fmt.Errorf("macOS is blocking access to %s. Open System Settings → Privacy & Security → "+
+		"Files and Folders, give BearDrive access to that folder, then try again — or pick a folder "+
+		"outside Desktop, Documents and Downloads", filepath.Base(dir))
+}
+
+// probe runs one filesystem call with a deadline. A call that has not returned
+// by then is a privacy prompt nobody can answer, not a slow disk.
+func probe[T any](dir string, fn func() (T, error)) (T, error) {
+	type res struct {
+		v   T
+		err error
+	}
+	ch := make(chan res, 1)
+	go func() {
+		v, err := fn()
+		ch <- res{v, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.v, r.err
+	case <-time.After(fsProbeTimeout):
+		var zero T
+		return zero, blockedErr(dir)
+	}
+}
+
 // validateShared resolves and checks a (root, name) pair, returning the
 // absolute mount path <root>/<name>. Every refusal here is a security row in
 // .claude/onboarding-goal.md: the answer must never be a path outside root.
@@ -59,8 +99,14 @@ func validateShared(root, name string) (string, error) {
 		return "", fmt.Errorf("pick your project folder first")
 	}
 	root = filepath.Clean(root)
-	fi, err := os.Stat(root)
-	if err != nil || !fi.IsDir() {
+	fi, err := probe(root, func() (os.FileInfo, error) { return os.Stat(root) })
+	if err != nil {
+		if strings.HasPrefix(err.Error(), "macOS is blocking") {
+			return "", err
+		}
+		return "", fmt.Errorf("%s is not a folder on this Mac", root)
+	}
+	if !fi.IsDir() {
 		return "", fmt.Errorf("%s is not a folder on this Mac", root)
 	}
 	target := filepath.Join(root, name)
@@ -127,7 +173,8 @@ func handleDesktopInspect(w http.ResponseWriter, r *http.Request) {
 	// promises to recognize — nothing is read, only stat'd.
 	var markers []string
 	for _, m := range []string{".claude", "CLAUDE.md", ".git"} {
-		if _, err := os.Stat(filepath.Join(root, m)); err == nil {
+		p := filepath.Join(root, m)
+		if _, err := probe(root, func() (os.FileInfo, error) { return os.Stat(p) }); err == nil {
 			markers = append(markers, m)
 		}
 	}
@@ -143,21 +190,25 @@ func handleDesktopInspect(w http.ResponseWriter, r *http.Request) {
 		marked[m] = true
 	}
 	entries := []string{}
-	if des, err := os.ReadDir(root); err == nil {
-		for _, de := range des {
-			if de.Name() == name || (strings.HasPrefix(de.Name(), ".") && !marked[de.Name()]) {
-				continue
-			}
-			if len(entries) == maxInspectEntries {
-				out["entries_truncated"] = true
-				break
-			}
-			label := de.Name()
-			if de.IsDir() {
-				label += "/"
-			}
-			entries = append(entries, label)
+	des, derr := probe(root, func() ([]os.DirEntry, error) { return os.ReadDir(root) })
+	if derr != nil {
+		out["error"] = derr.Error()
+		writeDesktopJSON(w, out)
+		return
+	}
+	for _, de := range des {
+		if de.Name() == name || (strings.HasPrefix(de.Name(), ".") && !marked[de.Name()]) {
+			continue
 		}
+		if len(entries) == maxInspectEntries {
+			out["entries_truncated"] = true
+			break
+		}
+		label := de.Name()
+		if de.IsDir() {
+			label += "/"
+		}
+		entries = append(entries, label)
 	}
 	out["entries"] = entries
 
@@ -303,7 +354,14 @@ func handleDesktopInit(w http.ResponseWriter, r *http.Request) {
 // made) so a retry starts clean.
 func runDesktopInit(target, name string, settings config.Settings, hooks bool) {
 	createdFolder := false
-	if _, err := os.Stat(target); os.IsNotExist(err) {
+	// Bounded like inspect: a protected folder blocks the syscall rather than
+	// refusing it, and a connect step that hangs forever is worse than one
+	// that says what to do.
+	if _, err := probe(target, func() (os.FileInfo, error) { return os.Stat(target) }); err != nil {
+		if strings.HasPrefix(err.Error(), "macOS is blocking") {
+			onboarding.fail(err)
+			return
+		}
 		if err := os.MkdirAll(target, 0o755); err != nil {
 			onboarding.fail(err)
 			return
