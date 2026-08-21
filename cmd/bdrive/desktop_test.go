@@ -474,7 +474,7 @@ func TestDesktopSessionFlow(t *testing.T) {
 func TestDesktopLoginBrowserFlow(t *testing.T) {
 	t.Setenv("BDRIVE_HOME", t.TempDir())
 
-	var exchanged struct{ code, verifier string }
+	var exchanged struct{ code, verifier, device string }
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/api/config":
@@ -489,9 +489,10 @@ func TestDesktopLoginBrowserFlow(t *testing.T) {
 			var req struct {
 				Code     string `json:"code"`
 				Verifier string `json:"code_verifier"`
+				Device   string `json:"device"`
 			}
 			json.NewDecoder(r.Body).Decode(&req)
-			exchanged.code, exchanged.verifier = req.Code, req.Verifier
+			exchanged.code, exchanged.verifier, exchanged.device = req.Code, req.Verifier, req.Device
 			w.Header().Set("Content-Type", "application/json")
 			io.WriteString(w, `{"token":"tok-browser","user":{"email":"new@runbear.io","name":"New"}}`)
 		default:
@@ -529,6 +530,10 @@ func TestDesktopLoginBrowserFlow(t *testing.T) {
 	}
 	if exchanged.code != "c0de" || exchanged.verifier == "" {
 		t.Fatalf("exchange saw code=%q verifier=%q — PKCE verifier must travel", exchanged.code, exchanged.verifier)
+	}
+	// The hub should record which app asked, not just which Mac.
+	if !strings.Contains(exchanged.device, "BearDrive Desktop") {
+		t.Fatalf("exchange device = %q, want it to name the app", exchanged.device)
 	}
 	s, err := config.LoadSettings()
 	if err != nil || s.Token != "tok-browser" || s.Email != "new@runbear.io" || s.Server != hub.URL {

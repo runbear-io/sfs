@@ -67,6 +67,9 @@ func desktopCmd() *cobra.Command {
 // volume stores, with GET /api/p/<id>/heat intercepted and proxied to the
 // project's own hub.
 func desktopHandler() http.Handler {
+	// Sign-ins from here are the app's, not the CLI's: the hub records
+	// "<host> (BearDrive Desktop)" for the device.
+	appLabel = "BearDrive Desktop"
 	srv := &webapp.Server{
 		Root:     &volumesBackend{stores: map[string]*store.Store{}},
 		Projects: mustProjects(),
@@ -127,6 +130,13 @@ func desktopHandler() http.Handler {
 	mux.HandleFunc("GET /api/desktop/session", desktopSession)
 	mux.HandleFunc("POST /api/desktop/login", guarded(desktopLogin))
 	mux.HandleFunc("POST /api/desktop/logout", guarded(desktopLogout))
+	// Onboarding (desktop_onboard.go): inspect a candidate folder, then
+	// create-and-connect a shared folder inside it. The writes are guarded
+	// like every other side-effecting desktop route.
+	mux.HandleFunc("GET /api/desktop/inspect", handleDesktopInspect)
+	mux.HandleFunc("GET /api/desktop/init/status", handleDesktopInitStatus)
+	mux.HandleFunc("POST /api/desktop/init", guarded(handleDesktopInit))
+	mux.HandleFunc("POST /api/desktop/choose-folder", guarded(handleDesktopChooseFolder))
 	mux.HandleFunc("POST /api/desktop/p/{project}/pause", guarded(desktopPause))
 	mux.HandleFunc("POST /api/desktop/p/{project}/resume", guarded(desktopResume))
 	mux.HandleFunc("POST /api/desktop/p/{project}/sync", guarded(desktopSync))

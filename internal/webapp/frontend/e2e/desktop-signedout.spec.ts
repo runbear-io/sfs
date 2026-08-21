@@ -13,10 +13,12 @@ test("signed-out first run leads with Sign in, not a false 'signed in'", async (
   const sess = await (await request.get("/api/desktop/session")).json();
   expect(sess.signed_in).toBe(false);
 
+  // A fresh install opens on the welcome step (storyboard frame 2), not on a
+  // project list it has nothing to put in.
   await page.goto("/");
-  await expect(page.getByText("Sign in to your hub to see your projects here.")).toBeVisible();
-  await expect(page.locator("#ob-signin")).toBeVisible();
+  await expect(page).toHaveURL(/\/setup$/);
+  await expect(page.getByRole("heading", { name: "Welcome to BearDrive" })).toBeVisible();
+  await expect(page.getByText("One shared drive for your team and your AI agents")).toBeVisible();
+  await expect(page.locator("#setup-start")).toBeVisible();
   await expect(page.getByText("You're signed in")).toHaveCount(0);
-  // The agent path stays available — an agent can run the sign-in itself.
-  await expect(page.getByText("Follow https://raw.githubusercontent.com").first()).toBeVisible();
 });

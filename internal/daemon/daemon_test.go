@@ -6,6 +6,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -184,5 +185,24 @@ func TestStopRecoversLegacyDaemon(t *testing.T) {
 	}
 	if _, ok := Running(vdir); ok {
 		t.Fatal("legacy daemon still holds the lock after Stop")
+	}
+}
+
+// A test binary must never be re-exec'd as a daemon: os.Args[0] is then the
+// TEST binary, so "daemon run" re-runs the whole suite — which starts another
+// daemon, and so on. One such test took a developer's Mac to load 47 before
+// anyone noticed. Start refuses instead; tests that need a real daemon build
+// the real binary (cli_e2e_test.go).
+func TestStartRefusesToForkTheTestBinary(t *testing.T) {
+	vdir := t.TempDir()
+	pid, err := Start(t.TempDir(), vdir, time.Second, time.Second)
+	if err == nil {
+		t.Fatalf("Start returned pid %d from a test binary — that is the fork bomb", pid)
+	}
+	if !strings.Contains(err.Error(), "test binary") {
+		t.Fatalf("error = %v, want it to name the reason", err)
+	}
+	if _, ok := Running(vdir); ok {
+		t.Fatal("nothing may be left holding the lock")
 	}
 }

@@ -57,6 +57,8 @@ fn wait_ready() -> bool {
 struct MountStatus {
     project: String,
     name: String,
+    #[serde(default)]
+    path: String,
     running: bool,
     paused: bool,
 }
@@ -120,7 +122,19 @@ fn build_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Men
         } else {
             "stopped"
         };
-        let sub = SubmenuBuilder::new(app, format!("{} — {}", m.name, state))
+        // "team — in acme-app": the shared folder and the project it lives
+        // inside, which is what the user recognizes (storyboard frame 10).
+        let parent = std::path::Path::new(&m.path)
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let label = if parent.is_empty() {
+            format!("{} — {}", m.name, state)
+        } else {
+            format!("{} — in {} · {}", m.name, parent, state)
+        };
+        let sub = SubmenuBuilder::new(app, label)
             .text(format!("sync:{}", m.project), "Sync now")
             .text(
                 if m.paused {
@@ -134,7 +148,12 @@ fn build_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Men
         b = b.item(&sub);
     }
     b = b.separator();
-    match fetch_session() {
+    let session = fetch_session();
+    if session.as_ref().map(|s| s.signed_in).unwrap_or(false) {
+        // Later mounts skip the welcome and go straight to the connect step.
+        b = b.text("connect", "Connect a folder…");
+    }
+    match session {
         Some(s) if s.signed_in => {
             let who = MenuItemBuilder::with_id("acct", format!("Signed in as {}", s.email))
                 .enabled(false)
@@ -326,6 +345,12 @@ fn main() {
                     match id {
                         "open" => {
                             let _ = open_window(app);
+                        }
+                        // Later mounts skip the welcome and land on the
+                        // connect step (the sidecar owns what it does).
+                        "connect" => {
+                            let _ = open_window(app);
+                            navigate(app, "location.assign('/setup/connect')");
                         }
                         "quit" => app.exit(0),
                         _ => {

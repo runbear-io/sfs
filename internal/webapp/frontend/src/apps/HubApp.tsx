@@ -14,6 +14,7 @@ import { BillingView } from "../components/BillingView";
 import { ProjectSettings } from "../components/ProjectSettings";
 import { ConnectGuide } from "../components/ConnectGuide";
 import { EmptyState } from "../components/EmptyState";
+import { Setup, type SetupStep } from "../components/Setup";
 import { EXISTING, NewProjectDialog } from "../components/NewProjectDialog";
 import { toast } from "../toast";
 import { lastProject, rememberProject } from "../util";
@@ -30,6 +31,15 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   // closes it. Org administration is a real route — see /orgs/<id> below.
   const [panel, setPanel] = useState<null | { kind: "hub" }>(null);
   useEffect(() => setPanel(null), [loc]);
+
+  // The desktop app's onboarding owns real URLs (/setup, /setup/connect,
+  // /setup/syncing, /setup/done) — same project-less pattern as /join below,
+  // since router.ts is project-scoped. Hub mode never renders it.
+  const setupStep = useMemo<SetupStep | null>(() => {
+    if (!config.desktop) return null;
+    const m = loc.split("?")[0].match(/^\/setup(?:\/(connect|syncing|done))?\/?$/);
+    return m ? ((m[1] as SetupStep) ?? "welcome") : null;
+  }, [loc, config.desktop]);
 
   const joinToken = useMemo(() => {
     const m = loc.split("?")[0].match(/^\/join\/([0-9a-f]+)\/?$/);
@@ -186,6 +196,20 @@ export default function HubApp({ config }: { config: ServerConfig }) {
     <SignedOutBar onSignIn={() => desktopAuth("/api/desktop/login", "Finish signing in in your browser…")} />
   ) : undefined;
 
+  if (setupStep) {
+    return (
+      <AppShell vault={vault} topbar={<Topbar />}>
+        <Page>
+          <Setup
+            step={setupStep}
+            signedIn={!!config.me}
+            onSignIn={() => desktopAuth("/api/desktop/login", "Finish signing in in your browser…")}
+          />
+        </Page>
+      </AppShell>
+    );
+  }
+
   if (!projects || !orgs) {
     return (
       <AppShell vault={vault} topbar={<Topbar />}>
@@ -194,6 +218,13 @@ export default function HubApp({ config }: { config: ServerConfig }) {
         </Page>
       </AppShell>
     );
+  }
+
+  // Frame 2: a fresh install (desktop, signed out, nothing synced yet) opens
+  // on the welcome step rather than an empty project list — /setup owns that
+  // screen, so reload and back/forward work like every other surface.
+  if (config.desktop && !config.me && projects.length === 0) {
+    return <Redirect to="/setup" />;
   }
 
   if (!current) {

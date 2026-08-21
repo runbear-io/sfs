@@ -55,5 +55,12 @@ export default defineConfig({
       reuseExistingServer: false,
       timeout: 60_000,
     },
+    {
+      command:
+        "cd ../../../.. && BDRIVE_E2E_DESKTOP=1 go test -count=1 -timeout 3h -run 'TestE2EDesktopOnboarding$' ./cmd/bdrive",
+      url: "http://localhost:8996/api/config",
+      reuseExistingServer: false,
+      timeout: 60_000,
+    },
   ],
 });
