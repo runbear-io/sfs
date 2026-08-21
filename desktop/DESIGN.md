@@ -81,6 +81,18 @@ can POST to loopback).
   server, report a failed revocation in the response. The tray shows
   "Signed in as …"/Sign out or "Sign in…", and every tray action runs off
   the main thread and refreshes the menu when it completes.
+- **Onboarding — done 2026-08-21** (storyboard:
+  https://claude.ai/code/artifact/d1836ae6-4878-4a11-8dd0-8e60707a008a):
+  a fresh install goes DMG → Welcome (`/setup`) → browser sign-in → connect
+  screen → first sync → success, with no CLI. The opinionated core: the mount
+  is `<root>/<name>` (default `team`) INSIDE the user's own project — the root
+  never syncs — seeded from the LLM wiki template, create-or-join by name so
+  the same screen serves the second teammate. Sidecar owns it
+  (`cmd/bdrive/desktop_onboard.go`: inspect / init / init-status / native
+  chooser); the frontend adds desktop-gated `/setup*` routes; the tray gains
+  "Connect a folder…". Checks: `TestDesktopInspect|InitFounder|InitJoiner|
+  InitRefusals`, `frontend/e2e/desktop-onboarding.spec.ts`, `desktop/smoke.sh`.
+  Working notes and the matrix: `.claude/onboarding-goal.md`.
 - **Phase 3 — remaining for "shipped"**: signing + notarization + updater;
   per-launch bearer token between shell and sidecar (loopback is not an
   auth boundary on multi-user machines); frontend `config.desktop` polish

@@ -42,4 +42,13 @@ osascript -e 'tell application "System Events" to tell process "BearDrive" to ge
   || fail "tray icon missing"
 echo "ok tray present"
 
+# The onboarding entry point for later mounts (storyboard frame 10). Only
+# shown when signed in — a signed-out app has nothing to connect a folder to.
+TRAY=$(osascript -e 'tell application "System Events" to tell process "BearDrive" to get name of menu items of menu 1 of menu bar item 1 of menu bar 2')
+case "$TRAY" in
+  *"Connect a folder"*) echo "ok tray: Connect a folder…" ;;
+  *"Sign in"*) echo "ok tray: signed out (Connect a folder… appears once signed in)" ;;
+  *) fail "tray menu has neither Connect a folder… nor Sign in…: $TRAY" ;;
+esac
+
 echo "smoke: all checks passed"

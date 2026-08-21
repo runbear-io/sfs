@@ -219,15 +219,6 @@ func Start(folder, volDir string, scanInterval, remoteInterval time.Duration) (i
 	if err != nil {
 		return 0, err
 	}
-	// A `go test` binary must never re-exec itself as a daemon: os.Args[0] is
-	// then the TEST binary, so the spawned "daemon run" re-runs the whole
-	// suite — which spawns again. A test that reached this line once took a
-	// developer's Mac to load 47 before anyone noticed. Any test that wants a
-	// real daemon builds the real binary and runs it (cli_e2e_test.go), so
-	// refusing here costs nothing and removes the fork bomb.
-	if strings.HasSuffix(exe, ".test") || strings.Contains(exe, "/_test/") {
-		return 0, fmt.Errorf("refusing to start a daemon from a test binary (%s)", filepath.Base(exe))
-	}
 	// 0600: daemon.log names the mount id, the folder's absolute path, the
 	// remote URL and the device name+id.
 	logf, err := os.OpenFile(LogPath(volDir), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
@@ -235,6 +226,18 @@ func Start(folder, volDir string, scanInterval, remoteInterval time.Duration) (i
 		return 0, err
 	}
 	defer logf.Close()
+	// A `go test` binary must never re-exec itself as a daemon: os.Args[0] is
+	// then the TEST binary, so the spawned "daemon run" re-runs the whole
+	// suite — which spawns again. A test that reached this line once took a
+	// developer's Mac to load 47 before anyone noticed. Any test that wants a
+	// real daemon builds the real binary and runs it (cli_e2e_test.go).
+	//
+	// After the log is opened, not before: the log file's mode is itself a
+	// tested invariant (sec_daemon_test.go), and the state a caller can
+	// observe should not depend on which binary asked.
+	if strings.HasSuffix(exe, ".test") || strings.Contains(exe, "/_test/") {
+		return 0, fmt.Errorf("refusing to start a daemon from a test binary (%s)", filepath.Base(exe))
+	}
 	cmd := exec.Command(exe, "daemon", "run", folder,
 		"--scan-interval", scanInterval.String(),
 		"--remote-interval", remoteInterval.String())
