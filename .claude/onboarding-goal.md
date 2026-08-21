@@ -116,6 +116,14 @@ Owner decisions:
 
 ## Round log
 
+**2026-08-21 — the "New project" button reuses this flow.** On desktop the +
+(sidebar and empty state) routes to `/setup/connect`; the name+template dialog
+no longer renders there, and zero mounts redirects to `/setup` signed in or
+out. Owner decisions the same day: straight to the connect screen (no
+chooser), and the LLM wiki template stays the only structure — other
+templates remain a `bdrive init --template` away. The hub web app is
+untouched (182 hub specs green).
+
 **2026-08-21 — implemented.** Every matrix row is `done`. Two bugs the new
 tests found, both fixed at the root and pinned:
 

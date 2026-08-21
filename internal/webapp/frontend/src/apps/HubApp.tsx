@@ -59,6 +59,13 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   // with zero projects, which covered the empty state's agent paste-prompt
   // and pointer-blocked its own "New project" button.
   const [creating, setCreating] = useState(false);
+  // "New project" means different things on the two platforms. On the hub it
+  // is a record: name it, pick a structure, done. On desktop a project with
+  // no local folder is a dead end — it cannot even appear in the list, which
+  // is built from this machine's mounts — so the button runs the onboarding
+  // connect flow instead: pick the folder, name the shared one, sync. One
+  // way to make a project on the Mac, and it always ends with files moving.
+  const newProject = () => (config.desktop ? navigate("/setup/connect") : setCreating(true));
   // A read-only hub refuses creation server-side (403), so never offer it.
   const canCreate = config.upload.enabled;
 
@@ -82,7 +89,8 @@ export default function HubApp({ config }: { config: ServerConfig }) {
     }
   };
 
-  const newProjectDialog = creating ? (
+  // Never on desktop: newProject() routes there instead of opening it.
+  const newProjectDialog = creating && !config.desktop ? (
     <NewProjectDialog
       templates={config.templates ?? []}
       onCreate={createProject}
@@ -220,10 +228,10 @@ export default function HubApp({ config }: { config: ServerConfig }) {
     );
   }
 
-  // Frame 2: a fresh install (desktop, signed out, nothing synced yet) opens
-  // on the welcome step rather than an empty project list — /setup owns that
-  // screen, so reload and back/forward work like every other surface.
-  if (config.desktop && !config.me && projects.length === 0) {
+  // Nothing synced on this Mac IS onboarding, signed in or not: /setup shows
+  // the welcome step or jumps to connect depending on the session. Reload and
+  // back/forward work because those are real routes.
+  if (config.desktop && projects.length === 0) {
     return <Redirect to="/setup" />;
   }
 
@@ -231,13 +239,13 @@ export default function HubApp({ config }: { config: ServerConfig }) {
     return (
       <AppShell
         vault={vault}
-        projectsNav={<ProjectNav projects={projects} onNew={() => setCreating(true)} />}
+        projectsNav={<ProjectNav projects={projects} onNew={newProject} />}
         orgBar={accountBar}
         topbar={<Topbar />}
       >
         <Page>
           <EmptyState
-            onNew={() => setCreating(true)}
+            onNew={newProject}
             canCreate={canCreate}
             signIn={
               config.desktop && !config.me
@@ -318,7 +326,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
     return (
       <AppShell
         vault={vault}
-        projectsNav={<ProjectNav projects={projects} onNew={() => setCreating(true)} />}
+        projectsNav={<ProjectNav projects={projects} onNew={newProject} />}
         orgBar={accountBar}
         topbar={<Topbar />}
       >
@@ -434,7 +442,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
           <ProjectNav
             projects={projects}
             currentId={current.id}
-            onNew={() => setCreating(true)}
+            onNew={newProject}
             menu={{
               // Scoped views (/dashboard/<path>, /history/<path>) belong to
               // the file/folder — the tree carries the selection, no menu

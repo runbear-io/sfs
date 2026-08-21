@@ -68,11 +68,16 @@ test("settings reflect the hub's real permission, not the local read-only", asyn
   await expect(page.locator(".ps-chip", { hasText: "Read-only" })).toHaveCount(0);
 });
 
-test("new-project dialog opens with templates (creation proxies to the hub)", async ({ page }) => {
+test("new project runs the connect flow, not a hub-only create dialog", async ({ page }) => {
+  // On desktop a project without a local folder cannot appear in the list at
+  // all (it is built from this machine's mounts), so the + goes where a
+  // project actually gets made: pick a folder, name the shared one, sync.
   await page.goto(`/${HUB_ID}/`);
   await page.waitForSelector("#sidebar");
   await page.locator(".nav-add").click();
-  await expect(page.getByText("Docs + decision records").first()).toBeVisible();
+  await expect(page).toHaveURL(/\/setup\/connect$/);
+  await expect(page.getByRole("heading", { name: "Add a shared folder to your project" })).toBeVisible();
+  await expect(page.getByText("Docs + decision records")).toHaveCount(0);
 });
 
 test("command palette opens and finds files", async ({ page }) => {

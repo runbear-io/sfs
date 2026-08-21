@@ -90,8 +90,12 @@ can POST to loopback).
   the same screen serves the second teammate. Sidecar owns it
   (`cmd/bdrive/desktop_onboard.go`: inspect / init / init-status / native
   chooser); the frontend adds desktop-gated `/setup*` routes; the tray gains
-  "Connect a folder…". Checks: `TestDesktopInspect|InitFounder|InitJoiner|
-  InitRefusals`, `frontend/e2e/desktop-onboarding.spec.ts`, `desktop/smoke.sh`.
+  "Connect a folder…", and **"New project" IS this flow on desktop** (2026-08-21
+  owner decision): a hub project with no local folder can never appear in a
+  list built from this machine's mounts, so the + routes to /setup/connect
+  instead of the hub-only create dialog, which no longer renders on the Mac.
+  Checks: `TestDesktopInspect|InitFounder|InitJoiner|InitRefusals`,
+  `frontend/e2e/desktop-onboarding.spec.ts`, `desktop/smoke.sh`.
   Working notes and the matrix: `.claude/onboarding-goal.md`.
 - **Phase 3 — remaining for "shipped"**: signing + notarization + updater;
   per-launch bearer token between shell and sidecar (loopback is not an
