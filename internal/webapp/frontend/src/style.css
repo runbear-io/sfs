@@ -1268,6 +1268,7 @@ pre.plain { background: var(--code-bg); border: 1px solid var(--border); border-
 .setup-toggle { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 13px; }
 .setup-ok { color: var(--add); font-size: 12.5px; margin: 0; }
 .setup-err { color: var(--del); font-size: 12.5px; margin: 0; }
+.setup-warn { color: var(--accent-bright); font-size: 12.5px; margin: 0; line-height: 1.5; }
 .setup-tree { width: 290px; flex: none; background: var(--bg); border: 1px solid var(--border);
   border-radius: var(--r-card); padding: 14px 16px; font-family: var(--mono); font-size: 12px; }
 .setup-tree-head { font-family: inherit; color: var(--text-ghost); font-size: 10.5px; letter-spacing: .06em;

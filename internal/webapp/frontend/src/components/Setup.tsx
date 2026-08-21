@@ -29,6 +29,7 @@ type Inspect = {
   target?: string;
   error?: string;
   conflict?: string;
+  warning?: string;
   markers?: string[];
   is_claude_project?: boolean;
   entries?: string[];
@@ -219,6 +220,11 @@ function Connect({ onStarted }: { onStarted: (name: string) => void }) {
           )}
           {(data?.error || data?.conflict || err) && (
             <p className="setup-err">{err || data?.conflict || data?.error}</p>
+          )}
+          {/* Not an error: the folder works, it just costs a permission
+              prompt per arriving file until the app is signed. */}
+          {data?.warning && !data?.error && !data?.conflict && (
+            <p className="setup-warn">{data.warning}</p>
           )}
 
           <Button variant="primary" id="setup-go" disabled={blocked} onClick={start}>

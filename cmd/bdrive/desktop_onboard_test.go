@@ -349,3 +349,30 @@ func TestDesktopInspectBlockedFolder(t *testing.T) {
 		}
 	}
 }
+
+// TestDesktopInspectProtectedFolderWarns pins the warning that stops a user
+// discovering, a day later, that every arriving file costs a permission
+// prompt: the sync daemon is detached (Setsid), so macOS sees a helper binary
+// rather than the app, and a folder inside Desktop/Documents/Downloads is
+// gated for it. Legal, but worth saying out loud before the folder is picked.
+func TestDesktopInspectProtectedFolderWarns(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home dir")
+	}
+	for _, dir := range []string{"Desktop", "Documents", "Downloads"} {
+		got := protectedWarning(filepath.Join(home, dir, "acme-app", "team"))
+		if got == "" {
+			t.Fatalf("a mount inside ~/%s must warn", dir)
+		}
+		for _, want := range []string{dir, "Full Disk Access", "each time a file arrives"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("~/%s warning %q is missing %q", dir, got, want)
+			}
+		}
+	}
+	// An ordinary work folder says nothing at all.
+	if got := protectedWarning(filepath.Join(home, "work", "acme-app", "team")); got != "" {
+		t.Fatalf("~/work must not warn, got %q", got)
+	}
+}

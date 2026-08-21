@@ -151,6 +151,39 @@ func mountConflict(target string) string {
 	return ""
 }
 
+// protectedRoots are the locations macOS gates behind a privacy prompt. A
+// mount inside one is legal and works — but the SYNC DAEMON is a detached
+// process (daemon.Start uses Setsid so syncing outlives the app), so macOS
+// stops seeing its writes as the app's and asks about the helper binary
+// instead. Until the app ships with a Developer ID that a grant can stick
+// to, that means a prompt for every file that arrives. Say so before the
+// folder is chosen, rather than letting the user discover it a day later.
+func protectedRoots() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	return []string{
+		filepath.Join(home, "Desktop"),
+		filepath.Join(home, "Documents"),
+		filepath.Join(home, "Downloads"),
+		filepath.Join(home, "Library", "Mobile Documents"), // iCloud Drive
+	}
+}
+
+// protectedWarning names the gated location a path sits in, or "".
+func protectedWarning(target string) string {
+	for _, p := range protectedRoots() {
+		if target == p || store.UnderRoot(p, target) {
+			return fmt.Sprintf("macOS protects %s. Syncing works, but the background sync runs as a "+
+				"helper process, so macOS will ask permission each time a file arrives — unless you give "+
+				"BearDrive Full Disk Access. A folder outside Desktop, Documents and Downloads avoids it "+
+				"entirely.", filepath.Base(p))
+		}
+	}
+	return ""
+}
+
 // handleDesktopInspect answers frame 5's live preview: what this folder is,
 // what the shared folder would be, and whether the team already has one by
 // that name (the join state).
@@ -214,6 +247,9 @@ func handleDesktopInspect(w http.ResponseWriter, r *http.Request) {
 
 	if c := mountConflict(target); c != "" {
 		out["conflict"] = c
+	}
+	if warn := protectedWarning(target); warn != "" {
+		out["warning"] = warn
 	}
 	if fi, err := os.Stat(target); err == nil {
 		out["target_exists"] = true

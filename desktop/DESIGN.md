@@ -97,6 +97,15 @@ can POST to loopback).
   Checks: `TestDesktopInspect|InitFounder|InitJoiner|InitRefusals`,
   `frontend/e2e/desktop-onboarding.spec.ts`, `desktop/smoke.sh`.
   Working notes and the matrix: `.claude/onboarding-goal.md`.
+- **macOS privacy (TCC), known and partly worked around**: the sync daemon is
+  detached (`Setsid`, so syncing outlives the app), which takes it out of the
+  app's responsible-process chain — macOS sees an unsigned helper, not
+  BearDrive. Consequences: a folder inside Desktop/Documents/Downloads/iCloud
+  prompts for permission on EVERY arriving file, and a UI-less read of one can
+  block outright. Handled today by bounding every probe with a clear message,
+  priming access from the GUI process, and warning at connect time before a
+  gated folder is chosen. The real fix is Developer ID signing, after which
+  grants stick and the helper rides the app's identity — see phase 3.
 - **Phase 3 — remaining for "shipped"**: signing + notarization + updater;
   per-launch bearer token between shell and sidecar (loopback is not an
   auth boundary on multi-user machines); frontend `config.desktop` polish
