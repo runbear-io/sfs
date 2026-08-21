@@ -177,11 +177,25 @@ func protectedWarning(target string) string {
 		if target == p || store.UnderRoot(p, target) {
 			return fmt.Sprintf("macOS protects %s. Syncing works, but the background sync runs as a "+
 				"helper process, so macOS will ask permission each time a file arrives — unless you give "+
-				"BearDrive Full Disk Access. A folder outside Desktop, Documents and Downloads avoids it "+
-				"entirely.", filepath.Base(p))
+				"that helper Full Disk Access. A folder outside Desktop, Documents and Downloads avoids "+
+				"it entirely.", filepath.Base(p))
 		}
 	}
 	return ""
+}
+
+// helperPath is the binary a user has to add under Full Disk Access — the one
+// the daemon runs, which is this executable. Reported alongside the warning
+// so nobody has to work out where inside the app bundle it lives.
+func helperPath() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	if resolved, rerr := filepath.EvalSymlinks(exe); rerr == nil {
+		return resolved
+	}
+	return exe
 }
 
 // handleDesktopInspect answers frame 5's live preview: what this folder is,
@@ -250,6 +264,7 @@ func handleDesktopInspect(w http.ResponseWriter, r *http.Request) {
 	}
 	if warn := protectedWarning(target); warn != "" {
 		out["warning"] = warn
+		out["helper"] = helperPath()
 	}
 	if fi, err := os.Stat(target); err == nil {
 		out["target_exists"] = true

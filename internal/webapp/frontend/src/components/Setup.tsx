@@ -30,6 +30,7 @@ type Inspect = {
   error?: string;
   conflict?: string;
   warning?: string;
+  helper?: string;
   markers?: string[];
   is_claude_project?: boolean;
   entries?: string[];
@@ -224,7 +225,18 @@ function Connect({ onStarted }: { onStarted: (name: string) => void }) {
           {/* Not an error: the folder works, it just costs a permission
               prompt per arriving file until the app is signed. */}
           {data?.warning && !data?.error && !data?.conflict && (
-            <p className="setup-warn">{data.warning}</p>
+            <div className="setup-warn">
+              <p>{data.warning}</p>
+              {data.helper && (
+                <p className="setup-helper">
+                  Full Disk Access wants this binary:{" "}
+                  <code>{data.helper}</code>{" "}
+                  <button type="button" onClick={() => navigator.clipboard.writeText(data.helper!)}>
+                    Copy path
+                  </button>
+                </p>
+              )}
+            </div>
           )}
 
           <Button variant="primary" id="setup-go" disabled={blocked} onClick={start}>
