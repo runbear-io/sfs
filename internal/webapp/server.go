@@ -888,6 +888,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/p/{project}/permissions/{email}", s.handleProjectPermSet)
 	mux.HandleFunc("DELETE /api/p/{project}/permissions/{email}", s.handleProjectPermClear)
 
+	// Folder rules (folders.go). Same shape as the permission routes above and
+	// the same self-checked pattern — they resolve the project and the level
+	// themselves because the level they need is not the same for read and
+	// write. Nothing enforces a rule on a content route yet; see
+	// docs/folder-permissions-prd.md.
+	mux.HandleFunc("GET /api/p/{project}/folders", s.handleProjectFolders)
+	mux.HandleFunc("PUT /api/p/{project}/folders", s.handleProjectFolderSet)
+	mux.HandleFunc("DELETE /api/p/{project}/folders", s.handleProjectFolderClear)
+
 	// The sync (store) API only exists per project: hub mode is what
 	// storage-blind devices sync through. Reading the store is how a
 	// pull-only (read) device stays current; writing needs write.

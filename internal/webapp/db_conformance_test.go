@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -64,6 +65,7 @@ func metaBackends(t *testing.T) []metaBackend {
 				// should be there. It also used to leave project_perms and
 				// device_rows rows behind for the following test to inherit.
 				db.Exec(`DROP TABLE IF EXISTS accounts, tokens, auth_policy, projects, project_perms,
+					project_folders, project_folder_perms,
 					orgs, org_members, invites, shares, devices, device_rows, read_stats,
 					read_sessions, meta_version, schema_meta`)
 			},
@@ -418,5 +420,142 @@ func TestSQLMigrateAddsPermissionColumns(t *testing.T) {
 			t.Fatalf("grant lost across reopen: %+v", p.Perms)
 		}
 		st.Close()
+	}
+}
+
+// TestMetaStoreFolderRuleConformance runs folder rules (folders.go) through
+// every backend: write two rules, reopen the store over the same storage, and
+// assert both the rules and their per-account grants survived. It also pins
+// the two properties a folder rule shares with a project grant and that a
+// whole-record write would break — a rename must not resurrect a removed rule,
+// and removing one rule must not disturb another.
+func TestMetaStoreFolderRuleConformance(t *testing.T) {
+	for _, be := range metaBackends(t) {
+		t.Run(be.name, func(t *testing.T) {
+			be.reset(t)
+
+			st := be.open(t)
+			projects, err := NewProjectDB(st.Projects())
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, _, err := projects.GetOrCreate("wiki", "o-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(p.Folders) != 0 {
+				t.Fatalf("a fresh project has %d folder rules, want none", len(p.Folders))
+			}
+			if err := projects.SetFolder(p.ID, FolderRule{
+				Prefix: "a/", Default: PermNone,
+				Perms: map[string]string{"liam@x.io": PermWrite, "snow@x.io": PermRead},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := projects.SetFolder(p.ID, FolderRule{Prefix: "b/", Default: PermRead}); err != nil {
+				t.Fatal(err)
+			}
+			st.Close()
+
+			// ---- reopen over the same storage ----
+			st = be.open(t)
+			defer st.Close()
+			projects, err = NewProjectDB(st.Projects())
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, ok := projects.Get(p.ID)
+			if !ok {
+				t.Fatal("project lost")
+			}
+			if len(got.Folders) != 2 {
+				t.Fatalf("%d folder rules survived, want 2: %+v", len(got.Folders), got.Folders)
+			}
+			rule, ok := got.ruleFor("a/secret.md")
+			if !ok || rule.Default != PermNone ||
+				rule.Perms["liam@x.io"] != PermWrite || rule.Perms["snow@x.io"] != PermRead {
+				t.Fatalf("rule for a/ did not round-trip: %+v", rule)
+			}
+			if r, ok := got.ruleFor("b/x.md"); !ok || r.Default != PermRead || len(r.Perms) != 0 {
+				t.Fatalf("rule for b/ did not round-trip: %+v", r)
+			}
+
+			// A metadata write must not carry a permission set. Without this,
+			// a rename by a second hub process puts back every rule an admin
+			// removed — the bug that made project GRANTS row-scoped, one level
+			// down. See rowScopedProjectRepo.
+			if err := projects.ClearFolder(p.ID, "a/"); err != nil {
+				t.Fatal(err)
+			}
+			if err := projects.Rename(p.ID, "wiki-renamed"); err != nil {
+				t.Fatal(err)
+			}
+			projects, err = NewProjectDB(st.Projects())
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, _ = projects.Get(p.ID)
+			if _, ok := got.ruleFor("a/secret.md"); ok {
+				t.Fatal("a removed folder rule came back after an unrelated rename")
+			}
+			if _, ok := got.ruleFor("b/x.md"); !ok {
+				t.Fatal("removing one folder rule removed another")
+			}
+			// The grants of a removed rule must go with it. A stray grant row
+			// whose rule is gone is a permission nothing can display and
+			// nothing can revoke.
+			if err := projects.SetFolder(p.ID, FolderRule{Prefix: "a/", Default: PermNone}); err != nil {
+				t.Fatal(err)
+			}
+			projects, err = NewProjectDB(st.Projects())
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, _ = projects.Get(p.ID)
+			if rule, _ := got.ruleFor("a/secret.md"); len(rule.Perms) != 0 {
+				t.Fatalf("grants outlived their deleted rule: %+v", rule.Perms)
+			}
+		})
+	}
+}
+
+// A missing project_folders table is silently PERMISSIVE — an empty rule set
+// reads as "no folder is restricted", which re-opens every confidential
+// subtree to the whole organization with no error anywhere. Once the store has
+// recorded the schema version that created it, its absence is a rollback or an
+// older dump, and migrate must refuse rather than recreate it empty.
+func TestSQLMigrateRefusesALostFolderTable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "meta.db")
+	st, err := OpenSQLStore("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, err := NewProjectDB(st.Projects())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _, err := projects.GetOrCreate("wiki", "o-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := projects.SetFolder(p.ID, FolderRule{Prefix: "a/", Default: PermNone}); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP TABLE project_folders`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	if _, err := OpenSQLStore("sqlite", path); err == nil {
+		t.Fatal("migrate recreated project_folders empty and opened anyway — " +
+			"every restricted folder is now open and nothing said so")
+	} else if !strings.Contains(err.Error(), "project_folders") {
+		t.Fatalf("refused for the wrong reason: %v", err)
 	}
 }
