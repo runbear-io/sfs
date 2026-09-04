@@ -20,6 +20,13 @@ This is the safe posture for a hub on a public URL. New people get in only
 through an expiring invite link an owner mints; the link lets them create an
 account — bypassing the gates below — and join, in one step.
 
+An owner who mints the link from a project's **Settings → People** ("Invite a
+teammate") gets one scoped to that project: the newcomer lands straight on that
+project's install page, with the agent paste prompt already naming this hub and
+this project, instead of on a list of projects with nothing saying which one
+they were invited for. A link minted from Organization settings still joins the
+org and lands on the normal home view.
+
 To allow self-service signup instead, set `"allow_signup": true` **with a gate**.
 The server refuses to start an open hub that has none, so a fake email can never
 just walk in.

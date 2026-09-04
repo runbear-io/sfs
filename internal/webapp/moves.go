@@ -117,6 +117,14 @@ func buildMoveIndex(ops []journal.Op) moveIndex {
 	for i, c := range creates {
 		byKey[key(c)] = append(byKey[key(c)], i)
 	}
+	// Deletes bucketed the same way, for the reverse one-to-one check below:
+	// that check used to rescan EVERY delete and rebuild key(d2) per step, so
+	// a volume with n moves paid n^2 string builds — 168M of them, ~8s, on
+	// every viewer request. Same buckets, same answer, one map earlier.
+	byKeyDel := map[string][]int{}
+	for i, d := range deletes {
+		byKeyDel[key(d)] = append(byKeyDel[key(d)], i)
+	}
 	pairs := func(a, b half) bool {
 		return a.path != b.path && abs(a.at.Sub(b.at)) <= moveWindow
 	}
@@ -141,8 +149,8 @@ func buildMoveIndex(ops []journal.Op) moveIndex {
 			// ...and one-to-one the other way: two deletes claiming one
 			// create is the same ambiguity seen from the other side.
 			c, n := creates[only], 0
-			for _, d2 := range deletes {
-				if key(d2) == key(c) && pairs(c, d2) {
+			for _, j := range byKeyDel[key(c)] {
+				if pairs(c, deletes[j]) {
 					n++
 				}
 			}

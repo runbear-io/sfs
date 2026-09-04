@@ -133,7 +133,9 @@ func startManagedHub(t *testing.T, callBinder bool) (*httptest.Server, string, s
 
 // cliprovRun signs the CLI in, connects it to the project, and syncs one file.
 // It returns the `bdrive sync` output and the hub's journal directory.
-func cliprovRun(t *testing.T, callBinder bool) (string, string) {
+// Returns the sync's combined output, the hub's journal directory, and the
+// sync's exit status.
+func cliprovRun(t *testing.T, callBinder bool) (string, string, error) {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("builds and execs the bdrive binary; skipped with -short")
@@ -171,18 +173,21 @@ func cliprovRun(t *testing.T, callBinder bool) (string, string) {
 	// The daemon init started keeps cycling; `sync` takes the same volume flock,
 	// so the two serialize rather than race. Not stopped first on purpose —
 	// `bdrive stop` PAUSES the mount, and a paused mount refuses to sync at all.
-	out, err := run(work, "sync", work)
-	if err != nil {
-		t.Fatalf("sync: %v\n%s", err, out)
-	}
-	return out, journalDir
+	// The exit code is returned rather than asserted here: a refused push now
+	// fails the command (BEA-183), so the two callers want opposite answers and
+	// the exit code is part of what each is pinning.
+	out, syncErr := run(work, "sync", work)
+	return out, journalDir, syncErr
 }
 
 // A managed provider that honours the contract: the device binds at mint and
 // the CLI's journal reaches the hub.
 func TestCLIManagedProviderDeviceCanPush(t *testing.T) {
-	out, journalDir := cliprovRun(t, true)
+	out, journalDir, syncErr := cliprovRun(t, true)
 
+	if syncErr != nil {
+		t.Fatalf("sync: %v\n%s", syncErr, out)
+	}
 	if strings.Contains(out, "read-only") {
 		t.Fatalf("a bound device was refused:\n%s", out)
 	}
@@ -203,8 +208,14 @@ func TestCLIManagedProviderDeviceCanPush(t *testing.T) {
 // that ignores the binder produces exactly the reported symptom — a `write`
 // member whose blobs upload and whose journal is refused, forever.
 func TestCLIManagedProviderThatIgnoresTheBinderIsRefused(t *testing.T) {
-	out, journalDir := cliprovRun(t, false)
+	out, journalDir, syncErr := cliprovRun(t, false)
 
+	// Non-zero as well as loud. Printing the refusal and exiting 0 is what let
+	// a day of work sit unpushed and unnoticed (BEA-183): the summary above it
+	// reads `local changes: 0`, so every visible signal said success.
+	if syncErr == nil {
+		t.Fatalf("a refused push exited 0 — the failure reads as success:\n%s", out)
+	}
 	if !strings.Contains(out, "read-only") {
 		t.Fatalf("expected the documented refusal, got:\n%s", out)
 	}

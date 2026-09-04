@@ -181,3 +181,77 @@ test("members table sorts by email", async ({ page }) => {
   const after = await emails.allTextContents();
   expect([...before].reverse()).toEqual(after);
 });
+
+// Project-scoped invites: the link an owner mints from a project's Settings
+// carries "?p=<project-id>", so the newcomer lands on that project's install
+// page — paste prompt already naming the project — instead of a nameless
+// project list. An unresolvable p must fall back to "/", never to the
+// "Project not found" page.
+
+// Mints an org invite through the API and returns its bare token.
+async function mintInvite(page: import("@playwright/test").Page, orgId: string) {
+  const out = await (await page.request.post(`/api/orgs/${orgId}/invites`)).json();
+  return out.url.split("/join/")[1];
+}
+
+async function defaultOrgId(page: import("@playwright/test").Page) {
+  const out = await (await page.request.get("/api/orgs")).json();
+  return out.orgs.find((o: { name: string }) => o.name === "default").id;
+}
+
+test("project settings: an owner mints an invite link scoped to this project", async ({
+  page,
+  context,
+}) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/settings`);
+  await page.click("#ps-invite");
+  await expectToast(page, "Invite link copied");
+  const link = await page.evaluate(() => navigator.clipboard.readText());
+  expect(link).toContain("/join/");
+  expect(link).toContain(`?p=${pid}`);
+
+  // Leave the hub as we found it: the suite shares one hub per run.
+  const tok = link.split("/join/")[1].split("?")[0];
+  await page.request.delete(`/api/orgs/${await defaultOrgId(page)}/invites/${tok}`);
+});
+
+test("project settings: a non-owner is offered no invite button", async ({ page }) => {
+  await login(page, MEMBER);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/settings`);
+  // The card itself renders — it is only the mint control that is owners-only.
+  await expect(page.locator(".ps-people")).toBeVisible();
+  await expect(page.locator("#ps-invite")).toHaveCount(0);
+});
+
+test("a ?p= invite lands the joiner on that project's install page", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const orgId = await defaultOrgId(page);
+  const tok = await mintInvite(page, orgId);
+
+  // Accepting as an existing owner is safe: AddMember never downgrades one.
+  await page.goto(`/join/${tok}?p=${pid}`);
+  await page.waitForURL(new RegExp(`/${pid}/install$`));
+  await expect(page.locator(".guide")).toBeVisible();
+  // The paste prompt names this project, which is the whole point of ?p=.
+  await expect(page.locator(".gd-code").first()).toContainText(pid);
+
+  await page.request.delete(`/api/orgs/${orgId}/invites/${tok}`);
+});
+
+test("an invite naming a project you cannot see falls back to the home view", async ({ page }) => {
+  await login(page);
+  const orgId = await defaultOrgId(page);
+  const tok = await mintInvite(page, orgId);
+
+  await page.goto(`/join/${tok}?p=00000000-0000-0000-0000-000000000000`);
+  await page.waitForURL(/localhost:8993\/$/);
+  await expect(page.locator("#sidebar")).toBeVisible();
+  await expect(page.locator("#content")).not.toContainText("Project not found");
+
+  await page.request.delete(`/api/orgs/${orgId}/invites/${tok}`);
+});

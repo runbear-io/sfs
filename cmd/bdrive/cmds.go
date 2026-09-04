@@ -52,6 +52,16 @@ list in .bdrive/config.json is never pruned against either.`,
 			// both, and a session inside a mount syncs its root.
 			targets := syncTargets(folder)
 
+			// A refused push is the one failure that never self-heals: the
+			// hub said no and will keep saying no until somebody acts. Exiting
+			// 0 is what let a day of work sit unpushed and unnoticed — the
+			// progress line says "uploading 11 files" (the blobs really do
+			// upload; only the journal is refused), the summary says "local
+			// changes: 0", and a script or an agent reads that as success.
+			// Collected across targets rather than returned at the first one:
+			// the other mounts under this folder may be perfectly healthy and
+			// still want syncing.
+			var refused []string
 			syncOne := func(target string) error {
 				// Gate before openSession: hooks fire in every folder on every
 				// turn, and must never enroll this device or resume a paused
@@ -98,6 +108,9 @@ list in .bdrive/config.json is never pruned against either.`,
 				}
 				fmt.Printf("synced %s (project %q)\n", target, proj.Volume)
 				printCycle(res)
+				if res.ReadOnly || res.NoAccess {
+					refused = append(refused, target)
+				}
 				return nil
 			}
 
@@ -138,6 +151,11 @@ list in .bdrive/config.json is never pruned against either.`,
 				if err := syncOne(target); err != nil {
 					return err
 				}
+			}
+			if len(refused) > 0 {
+				return fmt.Errorf("the hub refused this device's changes for %s — nothing was pushed "+
+					"(the reason is printed above; your files are safe on this device)",
+					strings.Join(refused, ", "))
 			}
 			return nil
 		},

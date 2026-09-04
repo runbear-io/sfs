@@ -11,10 +11,11 @@ import { atLeast } from "../api/types";
 import { getJSON, postJSON } from "../api/http";
 import type { Project, ServerConfig, UndoPlan } from "../api/types";
 import { useHeat, useTree } from "../hooks/useBrowse";
+import { fetchBlobText, fileURLFor } from "../hooks/useBlob";
 import { useShares } from "../hooks/useHub";
 import { urlForPath, urlForView, type Route } from "../router";
 import { currentNavType, navigate, useLocationPath } from "../nav";
-import { HTML_EXT, PDF_EXT, copyText } from "../util";
+import { HTML_EXT, IMG_EXT, PDF_EXT, copyText } from "../util";
 import { toast } from "../toast";
 import { modalConfirm } from "../modal";
 import { onSearchRequest } from "../search";
@@ -235,6 +236,11 @@ export default function Browser(props: {
   // Browser upload is deliberately absent (for now): content enters through
   // local sync only; the web app is a read/share/history surface.
   const canDownload = !panel && isFile;
+  // Stated as exclusions rather than an allowlist, so a file with no
+  // extension or an unknown one — the sniffed-as-text case the viewer
+  // already renders as text — still offers Copy. Images, PDFs and the HTML
+  // iframe are the three things a clipboard cannot usefully hold.
+  const canCopy = canDownload && !IMG_EXT.test(path) && !PDF_EXT.test(path) && !HTML_EXT.test(path);
   const canMore = !panel && (isFile || (hub && !!project && isDir));
   // Downloading while a version is open gives you THAT version — the ⋯ menu
   // offering the current bytes under a page framed as historical was half of
@@ -242,6 +248,30 @@ export default function Browser(props: {
   const downloadURL = version
     ? apiBase + "blob?sha=" + version + "&name=" + encodeURIComponent(path) + "&download=1"
     : apiBase + "download?path=" + encodeURIComponent(path);
+
+  // Copy is Download's counterpart: the same bytes, to the clipboard instead
+  // of to disk — whole file, frontmatter included, so what you paste back is
+  // the file. It re-fetches rather than reading the ["text", url] query cache
+  // on purpose: TextView stores a bare string under that key and SniffView
+  // stores a BlobText object, so a cache read would refuse .csv/.txt files
+  // while working fine on the markdown a reviewer would test with.
+  const copyNow = useCallback(async () => {
+    try {
+      const data = await fetchBlobText(fileURLFor(apiBase, path, version));
+      if (data.kind !== "text")
+        return toast(
+          data.kind === "too-large" ? "Too large to copy — use Download." : "That file isn't text — use Download.",
+          true,
+        );
+      // copyText returns false instead of throwing (util.ts), so branching on
+      // it is the whole difference between a failure toast and a success
+      // message over an empty clipboard on every http:// self-host.
+      const ok = await copyText(data.text);
+      toast(ok ? "Copied " + path : "Copy failed — the clipboard needs a secure (https) origin.", !ok);
+    } catch (err) {
+      toast("Copy failed: " + (err as Error).message, true);
+    }
+  }, [apiBase, path, version]);
 
   const shareNow = useCallback(async () => {
     // Shares are per-file; a selected folder has nothing to mint.
@@ -492,6 +522,7 @@ export default function Browser(props: {
       if (isFile) add("share", "Share: " + path, "action", shareNow);
       add("hist", "History: " + path, "action", historyNow);
       if (isFile) add("download", "Download: " + path, "action", () => downloadRef.current?.click());
+      if (canCopy) add("copy", "Copy: " + path, "action", copyNow);
     }
     if (hub && project) add("hist", "History: whole project", "action", () => openHistory(""));
     if (hub) {
@@ -507,7 +538,7 @@ export default function Browser(props: {
     for (const d of dirIndex.keys()) add("folder", d, "folder", () => openPath(d));
     for (const f of flatFiles) add("doc", f.path, "file", () => openPath(f.path));
     return items;
-  }, [hub, project, path, isFile, config.auth?.enabled, dirIndex, flatFiles, props.projects, props.onClosePanel, shareNow, historyNow, openHistory, openPath]);
+  }, [hub, project, path, isFile, canCopy, config.auth?.enabled, dirIndex, flatFiles, props.projects, props.onClosePanel, shareNow, copyNow, historyNow, openHistory, openPath]);
 
   /* ---- "⋯ More" menu (secondary actions on narrow screens) ---- */
   useEffect(() => {
@@ -762,6 +793,11 @@ export default function Browser(props: {
               {webBase && (
                 <button className="more-item" onClick={copyWebLink}>
                   Copy web link
+                </button>
+              )}
+              {canCopy && (
+                <button className="more-item" onClick={copyNow}>
+                  Copy
                 </button>
               )}
               {hub && !!project && (

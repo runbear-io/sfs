@@ -311,6 +311,12 @@ func TestSec_JoinPage_OnlyALiveInviteUnlocksSignupOnAClosedHub(t *testing.T) {
 	if !offersSignup(open("%2Fjoin%2F" + live)) {
 		t.Fatalf("a live invite does not unlock signup — the gate cannot be measured")
 	}
+	// A project-scoped invite ("/join/<tok>?p=<project-id>") is the same live
+	// invite with a landing hint attached. The recipient who most needs the
+	// form is exactly this one, and the query must not hide the token.
+	if !offersSignup(open("%2Fjoin%2F" + live + "%3Fp%3D" + p.ID)) {
+		t.Fatalf("a live project-scoped invite does not unlock signup")
+	}
 
 	for _, next := range []string{
 		"%2Fjoin%2F" + revoked,                       // revoked
@@ -379,5 +385,67 @@ func TestSec_JoinPage_AnInviteThatUnlocksSignupIsAlsoRedeemed(t *testing.T) {
 				"the owner has no record of ghost@x.io; org members: %s",
 				doAs(t, h, "GET", "/api/orgs", nil, c["alice"]).Body)
 		}
+	}
+}
+
+/*
+BEA-170, the logged-out half of a project-scoped invite. A hub ships with
+self-signup CLOSED, so the recipient who most needs the account-creation form
+is the one arriving from "/join/<tok>?p=<pid>". Everything after the form is
+the query surviving safeNext: the 303 has to carry "?p=" back to the join
+route, or the newcomer creates an account and lands nowhere in particular —
+which is the dead end the whole feature exists to remove.
+*/
+func TestJoin_ProjectScopedInvite_CarriesTheLoggedOutFlowEndToEnd(t *testing.T) {
+	h, srv, c, p := permHub(t)
+	auth, ok := srv.Auth.(*BuiltinAuth)
+	if !ok {
+		t.Fatal("fixture has no BuiltinAuth")
+	}
+	auth.AllowSignup = false
+	auth.InviteValid = srv.Dir.ValidInvite
+
+	tok := sec12invite(t, h, p.Org, c["alice"])
+	next := "/join/" + tok + "?p=" + p.ID
+
+	// 1. The form is offered at all.
+	req := httptest.NewRequest("GET", "/auth/signup?next="+url.QueryEscape(next), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), `action="/auth/signup`) {
+		t.Fatalf("no signup form for a project-scoped invite on a closed hub: %d", rec.Code)
+	}
+
+	// 2. Submitting it activates the account and sends the browser BACK to
+	//    the join route with ?p= intact.
+	form := url.Values{
+		"email": {"newbie@x.io"}, "name": {"Newbie"}, "password": {"password1"},
+		"next": {next},
+	}
+	req = httptest.NewRequest("POST", "/auth/signup", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("signup did not complete: %d %s", rec.Code, rec.Body)
+	}
+	if got := rec.Header().Get("Location"); got != next {
+		t.Fatalf("post-signup redirect dropped the project hint: got %q want %q", got, next)
+	}
+	cookies := rec.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("signup returned 303 with no session cookie")
+	}
+
+	// 3. The join route itself serves the SPA shell, which redeems and then
+	//    lands on /<p>/install. Nothing here 404s or bounces to login.
+	req = httptest.NewRequest("GET", next, nil)
+	for _, ck := range cookies {
+		req.AddCookie(ck)
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("join route with ?p= is not the app shell: %d %s", rec.Code, rec.Body)
 	}
 }

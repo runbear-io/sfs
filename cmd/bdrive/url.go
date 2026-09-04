@@ -82,8 +82,23 @@ Computed locally from the folder's config; no network unless --sync.`,
 					return err
 				}
 				defer closeSession(sess)
-				if _, err := sess.Cycle(cmd.Context()); err != nil {
+				res, err := sess.Cycle(cmd.Context())
+				if err != nil {
 					return err
+				}
+				// --sync exists so the link resolves immediately, so a refused
+				// push breaks the one promise the flag makes. The link itself
+				// is still the right URL — it just points at content the hub
+				// does not have — so it goes to stdout as asked and the warning
+				// goes to stderr, where a `bdrive url --sync > link.txt` still
+				// shows it. Same silent-failure class as `bdrive sync` exiting
+				// 0 on a refusal (BEA-183), one file over.
+				if res.ReadOnly || res.NoAccess {
+					fmt.Fprintf(cmd.ErrOrStderr(),
+						"warning: the hub refused this device's changes, so this link will not resolve yet\n")
+					if reason := res.Reason(); reason != "" {
+						fmt.Fprintf(cmd.ErrOrStderr(), "         %s\n", safeField(reason, 300))
+					}
 				}
 			}
 			link := server + "/" + projectID

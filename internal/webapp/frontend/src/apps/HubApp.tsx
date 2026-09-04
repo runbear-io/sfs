@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { postJSON } from "../api/http";
 import type { InviteAccepted, Project, ProjectCreated, ServerConfig } from "../api/types";
-import { useOrgs, usePending, usePermissions, useProjects, useHubRefresh } from "../hooks/useHub";
+import { useFetchProjects, useOrgs, usePending, usePermissions, useProjects, useHubRefresh } from "../hooks/useHub";
 import { decodePath, parseRoute, projectByName, urlForPath, urlForView } from "../router";
 import { linkProps, navigate, Redirect, useLocationPath } from "../nav";
 import { AppShell, Page, Topbar, VaultHeader, closeSidebarOnMobile } from "../components/shell";
@@ -45,6 +45,15 @@ export default function HubApp({ config }: { config: ServerConfig }) {
     const m = loc.split("?")[0].match(/^\/join\/([0-9a-f]+)\/?$/);
     return m ? m[1] : null;
   }, [loc]);
+
+  // "/join/<token>?p=<project-id>": the invite says which project it was sent
+  // about, so the joiner lands on that project's install page instead of a
+  // nameless list. Only a hint — it is never trusted, see onDone below.
+  const joinProject = useMemo(
+    () => new URLSearchParams(loc.split("?")[1] || "").get("p") || "",
+    [loc],
+  );
+  const fetchProjects = useFetchProjects();
 
   const { data: projects } = useProjects(!joinToken);
   const { data: orgs } = useOrgs(!joinToken);
@@ -141,7 +150,18 @@ export default function HubApp({ config }: { config: ServerConfig }) {
         onDone={async (orgId) => {
           setJoinedOrgId(orgId);
           await refresh();
-          navigate("/", { replace: true });
+          // Only an id the SERVER just handed back may be pasted into a URL:
+          // p="/evil.com" would build "//evil.com/install", and navigate's
+          // pushState throws a SecurityError on a cross-origin target.
+          // Resolving against the joiner's own live list is the validator —
+          // no regex needed — and it doubles as the "you cannot see that
+          // project" answer. Anything unresolvable lands on "/", never on
+          // the "Project not found" page below: that is right for a typed
+          // URL and wrong as a new teammate's first screen. A fetch is
+          // needed because useProjects is disabled while this screen is up.
+          const list = joinProject ? await fetchProjects().catch(() => null) : null;
+          const ok = !!list?.projects?.some((p) => p.id === joinProject);
+          navigate(ok ? "/" + joinProject + "/install" : "/", { replace: true });
         }}
       />
     );

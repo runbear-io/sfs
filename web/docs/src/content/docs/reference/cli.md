@@ -20,7 +20,7 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 | `bdrive grep <pattern> [folder]` | Search the text **inside** the files a project syncs. `pattern` is a Go RE2 regexp, or a literal string with `-F`. `-i` ignores case, `-l` prints matching paths only, `-n` caps the lines printed (default 200, `0` = all). Pure read: no daemon, no lock, no network |
 | `bdrive stale [folder]` | Find synced markdown that links to a file written **after** the doc itself — staleness by what moved, not by the calendar. `-l` prints outgrown paths only, `-n` caps the docs printed (default 50, `0` = all). Pure read: no daemon, no lock, no network. Exit status is 0 whether or not anything is stale |
 | `bdrive forget <path>...` | Stop syncing a path and remove it from the hub. Adds the rule to `.bdriveignore` (which syncs) and prunes in one step. Local files are never touched, here or on teammates' devices |
-| `bdrive url [path]` | Internal hub link for a file or folder — sign-in and membership required. `--sync` pushes first; no argument gives the project home. Computed locally |
+| `bdrive url [path]` | Internal hub link for a file or folder — sign-in and membership required. `--sync` pushes first, and warns on stderr if the hub refused that push; no argument gives the project home. Computed locally |
 | `bdrive share <file>` | Public URL for a synced file — links are per-file, so a folder is refused with a file inside it named instead. `--list`, `--revoke`, `--expires` (the hub's Share dialog can also set an expiry on an existing link). Refuses a file whose first 1 MiB holds credential-shaped strings — `--force` shares it anyway |
 | `bdrive sync [folder]` | Run one sync cycle now. Refuses folders this device never `init`ed and folders paused by `bdrive stop`. `--note <text>` stamps session context onto changes; `--note-ttl` (default 30m) bounds it, and a plain `bdrive sync` with no `--note` clears it. `--prune` also removes from the hub what `.bdriveignore` now excludes (files stay on disk everywhere). `--hook <label>` is agent-hook plumbing: it also reports the files teammates changed since the agent's last turn |
 | `bdrive hooks [install\|uninstall]` | Register turn-boundary sync hooks in each detected agent platform's user config — once per machine, covering every folder. Run automatically by `bdrive init`; idempotent; `--agent` overrides detection. `uninstall` removes only BearDrive's own hook entries |
@@ -323,6 +323,13 @@ cheap local-only ticks between remote passes, which never ask the hub anything
 and so never revise its last answer. For the permission answers, the fix is in
 the hub's Project settings → People; see
 [Project permissions](/concepts/permissions/).
+
+`bdrive sync` **exits non-zero** on either. The blobs really do upload — only
+the journal is refused — so the progress line reads `uploading 11 files` and
+the summary reads `local changes: 0`, which a script, an agent, or a person
+skimming takes for success. It isn't one: nothing reached the hub, and nothing
+will until the refusal is dealt with. Being offline still exits 0, because that
+one retries itself.
 
 ### `bdrive login` and switching hubs
 

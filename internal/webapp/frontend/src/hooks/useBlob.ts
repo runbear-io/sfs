@@ -16,7 +16,7 @@ export function blobURL(apiBase: string, sha: string, name?: string, download?: 
   return u;
 }
 
-async function fetchBlobText(url: string): Promise<BlobText> {
+export async function fetchBlobText(url: string): Promise<BlobText> {
   const r = await getResponse(url);
   // Cheap out before reading the body when the server tells us the size.
   // Content-Length is a hint, not a guarantee (a chunked or proxied
@@ -24,6 +24,17 @@ async function fetchBlobText(url: string): Promise<BlobText> {
   const len = Number(r.headers.get("Content-Length"));
   if (len > MAX_BYTES) return { kind: "too-large", size: len };
   return sniffBytes(new Uint8Array(await r.arrayBuffer()));
+}
+
+// The URL a file page reads its bytes from: content-addressed when a version
+// is pinned, the live path otherwise. Exported so Copy builds the same URL
+// the view does instead of a second copy of the expression that can drift.
+// A version is served by content hash; ?name= is what makes the server set a
+// real Content-Type, so images and text render instead of downloading as
+// octet-stream. Note `file?path=`, not the `download?path=` an <a download>
+// points at — same bytes, but Content-Disposition is meaningless to a fetch.
+export function fileURLFor(apiBase: string, path: string, version?: string): string {
+  return version ? blobURL(apiBase, version, path) : apiBase + "file?path=" + encodeURIComponent(path);
 }
 
 // `immutable` is for content-addressed URLs: a sha's bytes never change, so

@@ -89,7 +89,23 @@ func (o *Op) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &w); err != nil {
 		return err
 	}
-	*o = Op(w.opWire)
+	*o = w.op()
+	return nil
+}
+
+// op resolves a decoded wire form into an Op. It is the ONE place path_raw is
+// honored, shared by UnmarshalJSON above and by Parse, which decodes into
+// pathRaw directly instead of going through Op.UnmarshalJSON: a type carrying
+// an UnmarshalJSON method makes encoding/json walk every line TWICE, once to
+// find the value's extent and again inside the method. Replaying a hub's
+// journals is ~60k lines, where that doubling was ~3.5s of the 4.8s parse, on
+// a path every viewer request goes through.
+//
+// The rule itself must not fork between the two readers — two spellings of
+// "when does path_raw win" is exactly how the divergence below comes back —
+// so it lives here and neither caller reimplements it.
+func (w pathRaw) op() Op {
+	o := Op(w.opWire)
 	if w.PathRaw != "" {
 		// path_raw is only ever the byte-exact SOURCE of the path field, so it
 		// is applied only when it re-encodes to the path the line already
@@ -102,7 +118,7 @@ func (o *Op) UnmarshalJSON(data []byte) error {
 			o.Path = string(raw)
 		}
 	}
-	return nil
+	return o
 }
 
 // lossy is what encoding/json does to a string that is not valid UTF-8: each
@@ -331,10 +347,13 @@ func Parse(data []byte) ([]Op, error) {
 		if len(line) == 0 {
 			continue
 		}
-		var op Op
-		if err := json.Unmarshal(line, &op); err != nil {
+		// Decoded as pathRaw, not Op: same bytes, same result (see pathRaw.op),
+		// without the second full scan an UnmarshalJSON method forces.
+		var w pathRaw
+		if err := json.Unmarshal(line, &w); err != nil {
 			continue
 		}
+		op := w.op()
 		// `null`, `{}` and any object with no kind decode without error and
 		// are not operations. They must produce no op: op COUNTS are the sync
 		// engine's cursors (pull's fresh[len(prev):], commit's seqBase), so a

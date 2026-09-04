@@ -4,7 +4,7 @@ import { getJSON } from "../api/http";
 import type { FrontmatterPair, HeatMap, Node, RenderDoc } from "../api/types";
 import { heatTotal, heatText } from "../hooks/useBrowse";
 import { HEAT_DISCLOSURE, staleNote } from "../lib/heat";
-import { useTextAt } from "../hooks/useBlob";
+import { fileURLFor, useTextAt } from "../hooks/useBlob";
 import {
   CSV_EXT,
   HTML_EXT,
@@ -39,12 +39,7 @@ export function FileView(props: {
   onRendered?: () => void;
 }) {
   const { apiBase, path, version, onMeta } = props;
-  // A version is served by content hash; ?name= is what makes the server
-  // set a real Content-Type, so images and text render instead of
-  // downloading as octet-stream.
-  const fileURL = version
-    ? apiBase + "blob?sha=" + version + "&name=" + encodeURIComponent(path)
-    : apiBase + "file?path=" + encodeURIComponent(path);
+  const fileURL = fileURLFor(apiBase, path, version);
 
   useEffect(() => () => onMeta(""), [path, onMeta]); // leaving a file clears its meta line
 

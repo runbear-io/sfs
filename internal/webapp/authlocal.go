@@ -896,6 +896,12 @@ func safeNext(next string) string {
 // arriving at /join/.
 func inviteTokenFromNext(next string) string {
 	const marker = "/join/"
+	// A project-scoped invite is "/join/<tok>?p=<project-id>", so the query
+	// is cut BEFORE the prefix check: it is not part of the route the token
+	// has to BE, and cutting at the FIRST "?" keeps every negative below
+	// closed — "/wiki/note.md?x=/join/<tok>" cuts to "/wiki/note.md" and
+	// still fails the prefix.
+	next, _, _ = strings.Cut(next, "?")
 	if !strings.HasPrefix(next, marker) {
 		return ""
 	}

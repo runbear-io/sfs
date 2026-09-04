@@ -86,8 +86,10 @@ classDiagram
         +useHub
         +useBrowse
         +useTextAt (any URL) → useBlobText (sha-keyed, immutable)
+        +fetchBlobText(url) BlobText
+        +fileURLFor(apiBase, path, version) string
     }
-    note for hooks "TanStack Query wrappers over the viewer APIs. useTextAt fetches any URL and sniffs it — the Content-Length cheap-out lives here (HTTP), the byte decision in lib/sniff.ts (pure). A live path must not be cached immutable; a sha can be"
+    note for hooks "TanStack Query wrappers over the viewer APIs. useTextAt fetches any URL and sniffs it — the Content-Length cheap-out lives here (HTTP), the byte decision in lib/sniff.ts (pure). A live path must not be cached immutable; a sha can be. fileURLFor is the one definition of a file page's byte URL, so Copy and FileView cannot drift; fetchBlobText is exported for Copy, which must NOT read the shared text cache — TextView stores a string there and SniffView a BlobText"
 
     class components {
         FileView FolderListing FileTree
@@ -145,7 +147,7 @@ classDiagram
     hooks --> lib : re-exports heat.ts, sniffBytes
     shareMermaid --> lib : renderMermaid
     hooks --> api
-    Browser --> hooks
+    Browser --> hooks : useTree useHeat useShares, fetchBlobText + fileURLFor (Copy)
     HubApp --> hooks
     hooks --> analytics : initAnalytics + identify on config
     api --> analytics : track(product event)

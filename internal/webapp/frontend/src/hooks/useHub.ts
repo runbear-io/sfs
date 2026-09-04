@@ -6,14 +6,30 @@ import type { OrgList, PendingList, ProjectList, ProjectPerms, ShareInfo } from 
 // without a reload, matching the classic app's 30s refresh) and the orgs
 // the signed-in account belongs to.
 
+const projectsQuery = {
+  queryKey: ["projects"],
+  queryFn: () => getJSON<ProjectList>("/api/projects"),
+};
+
 export function useProjects(enabled: boolean) {
   return useQuery({
-    queryKey: ["projects"],
-    queryFn: () => getJSON<ProjectList>("/api/projects"),
+    ...projectsQuery,
     enabled,
     refetchInterval: 30_000,
     select: (d) => d.projects || [],
   });
+}
+
+// Fetches the project list NOW, even where useProjects is disabled — which is
+// the join screen (useProjects(!joinToken)), the one place that has to answer
+// "is this ?p= a project I can see" before navigating. useHubRefresh cannot:
+// invalidateQueries never fetches a disabled query, so it would resolve with
+// the list still empty and every project-scoped invite would fall back to "/".
+// It seeds the same ["projects"] entry, so the observer that mounts a tick
+// later already has the data.
+export function useFetchProjects() {
+  const qc = useQueryClient();
+  return () => qc.fetchQuery(projectsQuery);
 }
 
 export function useOrgs(enabled: boolean) {

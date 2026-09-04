@@ -254,7 +254,7 @@ hub's own storage, never something a syncing client points at directly:
 | `bdrive grep <pattern> [folder]` | Search the text **inside** the files a project syncs — Go RE2 regexp, or a literal with `-F`; `-i` ignores case, `-l` prints matching paths only, `-n` caps the lines printed (default 200, `0` = all). Output is `path:line: text`. Only files the project actually syncs are searched, so a `.bdriveignore` rule or a narrowed `bdrive scope` excludes a file from search exactly as it excludes it from sync; binary files are skipped. Pure local read — no daemon, no lock, no network, works offline and never blocks a sync in progress. Exit status 0 on match, 1 on none, so it composes in scripts |
 | `bdrive stale [folder]` | Find docs the code has outgrown: synced markdown (`.md`/`.markdown`) that links to a file written **after** the doc itself. Staleness here is not age — a doc goes stale when what it describes moves. Write times come from the **journal**, not `os.Stat`: materialize stamps a peer's file with this device's mtime, so on a freshly synced machine every mtime is identical and only the journal still knows. `-l` prints outgrown paths only, `-n` caps the docs printed (default 50, `0` = all). A reference that does not resolve to a file this project syncs — a URL, a `../` escape, a made-up path — is silently ignored. Pure local read — no daemon, no lock, no network. **Exit status is 0 whether or not anything is stale**: this is advisory, not a gate |
 | `bdrive forget <path>...` | Stop syncing a path *and* remove it from the hub — adds the rule to `.bdriveignore` (which syncs) and prunes in one step. Local files are never touched, here or on teammates' devices |
-| `bdrive url [path]` | Internal hub link for a file/folder (sign-in + membership required; `--sync` pushes first; no arg = project home). Computed locally |
+| `bdrive url [path]` | Internal hub link for a file/folder (sign-in + membership required; `--sync` pushes first, and warns on stderr if the hub refused that push; no arg = project home). Computed locally |
 | `bdrive share <file>` | Public URL for a synced file (`--list`, `--revoke`, `--expires`) |
 | `bdrive sync [folder]` | Run one sync cycle now. `--note <text>` stamps session context (e.g. an agent session id) onto changes — shown in `bdrive log` and hub history; keeps applying to daemon-committed changes until `--note-ttl` (default 30m) expires. A plain `bdrive sync` with no `--note` clears it, so a hand edit is never stamped with the last agent session's note. `--prune` also removes from the hub what `.bdriveignore` now excludes (files stay on disk everywhere). `--hook <label>` is agent-hook plumbing: event JSON on stdin, sync + note, gated-link formula (Claude Code hook JSON) on stdout |
 | `bdrive hooks [install\|uninstall]` | Register turn-boundary sync hooks in each agent platform's user config (Claude Code, Codex, Gemini CLI, Hermes) — pull each turn, push after edits, session-note stamping, agent-read tracking. Once per machine, covering every session; run automatically by `bdrive init`; idempotent (`--agent` overrides detection) |
@@ -460,6 +460,13 @@ this machine's device identity was never bound to your account — update
 `bdrive` and run `bdrive login` here. Project settings will show `write` and
 explain nothing. Both states are recorded only by a cycle that actually
 reached the hub, so the local-only ticks in between never revise the answer.
+
+`bdrive sync` also **exits non-zero** when the hub refused this device's
+changes. The blobs really do upload — only the journal is refused — so the
+progress line reads `uploading 11 files` and the summary reads `local
+changes: 0`, which a script, an agent, or a person skimming takes for
+success. It isn't one: nothing reached the hub, and nothing will until the
+refusal is dealt with. Being offline still exits 0; that one retries itself.
 
 Public `/s/<token>` share links are **unaffected** by any of this: they are
 anonymous by design and keep serving until revoked, so cutting someone's

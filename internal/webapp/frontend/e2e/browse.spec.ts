@@ -1204,6 +1204,138 @@ test("read counts disclose that your own views count", async ({ page }) => {
   );
 });
 
+/* BEA-153: Copy. Download's counterpart — the same bytes, to the clipboard.
+   The whole point is that it is SOURCE, so every assertion here reads the
+   clipboard and looks for markdown syntax the rendered DOM does not contain.
+   Chromium treats http://localhost as a secure context, so navigator.clipboard
+   exists; the permission grant is the only thing standing between these specs
+   and copyText() returning false by design. */
+
+const COPY_MD = ["# Copy me", "", "| col | val |", "| --- | --- |", "| a | 1 |", "", "```sh", "echo hi", "```", ""].join(
+  "\n",
+);
+
+const clip = (page: import("@playwright/test").Page) =>
+  page.evaluate(() => navigator.clipboard.readText());
+
+test("Copy puts a markdown file's raw source on the clipboard", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await login(page);
+  const pid = await wikiId(page);
+  await page.request.put(`/api/p/${pid}/upload/content?path=copy/doc.md`, { data: COPY_MD });
+
+  await page.goto(`/${pid}/copy/doc.md`);
+  await expect(page.locator("#content h1")).toHaveText("Copy me");
+  await page.click("#more-btn");
+  await page.click("#more-menu .more-item:has-text('Copy')");
+  await expectToast(page, "Copied copy/doc.md");
+  // Source, not the rendered DOM: the heading marker, the table pipes and the
+  // fence all survive. The page itself shows an <h1>, a <table> and a <pre> —
+  // none of which contain these characters.
+  expect(await clip(page)).toBe(COPY_MD);
+});
+
+test("Copy on a .csv copies the delimited source, not the rendered table", async ({
+  page,
+  context,
+}) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await login(page);
+  const pid = await wikiId(page);
+  await page.request.put(`/api/p/${pid}/upload/content?path=copy/rows.csv`, { data: SALES_CSV });
+
+  await page.goto(`/${pid}/copy/rows.csv`);
+  await expect(page.locator("#content table.csvview")).toBeVisible();
+  await page.click("#more-btn");
+  await page.click("#more-menu .more-item:has-text('Copy')");
+  await expectToast(page, "Copied copy/rows.csv");
+  expect(await clip(page)).toBe(SALES_CSV);
+});
+
+test("Copy runs from the palette too", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/guide.md`);
+  await expect(page.locator("#content")).toContainText("Second version");
+  await page.keyboard.press("ControlOrMeta+k");
+  await expect(page.locator("#palette")).toBeVisible();
+  await page.fill("#palette input", "Copy: guide.md");
+  await page.locator("#palette [cmdk-item]", { hasText: "Copy: guide.md" }).first().click();
+  await expectToast(page, "Copied guide.md");
+  expect(await clip(page)).toContain("# Guide");
+  expect(await clip(page)).toContain("Second version");
+});
+
+test("Copy on a pinned version yields THAT version's bytes", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/history/guide.md`);
+  // The oldest row is the first version; the current file holds the second.
+  await page.locator(".hentry.add").click();
+  await page.waitForURL(new RegExp(`/${pid}/guide\\.md\\?v=[0-9a-f]{64}$`));
+  await expect(page.locator("#content")).toContainText("First version");
+
+  await page.click("#more-btn");
+  await page.click("#more-menu .more-item:has-text('Copy')");
+  await expectToast(page, "Copied guide.md");
+  const text = await clip(page);
+  expect(text).toContain("First version");
+  // The current file says "Second version" — a ⋯ menu that mixed the two is
+  // exactly what BEA-7 fixed for Download.
+  expect(text).not.toContain("Second version");
+});
+
+test("Copy is absent for an image and for HTML", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.request.put(`/api/p/${pid}/upload/content?path=copy/page.html`, {
+    data: "<h1>hello</h1>",
+  });
+
+  for (const path of ["assets/logo.png", "copy/page.html"]) {
+    await page.goto(`/${pid}/${path}`);
+    await page.click("#more-btn");
+    await expect(page.locator("#more-menu .more-item:has-text('Download')")).toBeVisible();
+    await expect(page.locator("#more-menu .more-item:has-text('Copy')")).toHaveCount(0);
+    await page.keyboard.press("Escape");
+  }
+  // …and the palette does not offer it either, on the page that has no menu item.
+  await page.keyboard.press("ControlOrMeta+k");
+  await expect(page.locator("#palette")).toBeVisible();
+  await page.fill("#palette input", "Copy: copy/page.html");
+  await expect(page.locator("#palette [cmdk-item]", { hasText: "Copy: copy/page.html" })).toHaveCount(0);
+});
+
+test("a clipboard that isn't there gets a failure toast, not a success one", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  // What an http:// self-host looks like from the page's side: no
+  // navigator.clipboard, so copyText returns false by design. Without the
+  // branch on that return value this is a "Copied" toast over an empty
+  // clipboard — the failure mode the toast exists to prevent.
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "clipboard", { get: () => undefined });
+  });
+  await page.goto(`/${pid}/index.md`);
+  await page.click("#more-btn");
+  await page.click("#more-menu .more-item:has-text('Copy')");
+  await expectToast(page, /Copy failed .* secure \(https\) origin/);
+  await expect(page.locator("#toast.show, [data-sonner-toast]").filter({ hasText: "Copied" })).toHaveCount(0);
+});
+
+test("a read-only member can copy — it is a read, like Download", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await login(page, READER);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/index.md`);
+  await page.click("#more-btn");
+  await page.click("#more-menu .more-item:has-text('Copy')");
+  await expectToast(page, "Copied index.md");
+  expect(await clip(page)).toContain("# Wiki");
+});
+
 /* BEA-155: the scroll restorer. Reading a file is never interrupted by a
    background refresh — the read-count poll used to call onRendered through
    MarkdownView's meta effect, and the restorer read that as "content landed"

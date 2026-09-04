@@ -3,8 +3,9 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { useQueryClient } from "@tanstack/react-query";
-import { api } from "../api/http";
+import { api, postJSON } from "../api/http";
 import { modalConfirm, modalPrompt } from "../modal";
+import { copyText } from "../util";
 import { toast } from "../toast";
 import { useHubRefresh, usePermissions, useShares } from "../hooks/useHub";
 import { PROJECT_ICONS, ProjectIcon } from "./shell";
@@ -402,6 +403,37 @@ function People({ project, org }: { project: Project; org: Org | null }) {
       </CardHeader>
       <Separator />
       <CardContent>
+        {/* Minting the link is gated on the ORG role, not on project.perm:
+            handleInviteCreate 403s anyone who is not an org owner, so a
+            project admin who is a plain org member is exactly the account
+            that would be shown a button that fails. The "?p=" is the whole
+            feature — the recipient lands on this project's install page
+            instead of a nameless project list. */}
+        {org?.role === "owner" && (
+          <p className="ps-row">
+            <span>Not in {org.name} yet?</span>
+            <Button
+              id="ps-invite"
+              type="button"
+              variant="subtle"
+              onClick={async () => {
+                try {
+                  const out = await postJSON<{ url: string }>(`/api/orgs/${org.id}/invites`);
+                  const ok = await copyText(out.url + "?p=" + project.id);
+                  toast(
+                    ok
+                      ? "Invite link copied — it opens this project."
+                      : "Invite created — copy it from Organization settings.",
+                  );
+                } catch (e) {
+                  toast((e as Error).message, true);
+                }
+              }}
+            >
+              Invite a teammate
+            </Button>
+          </p>
+        )}
         <p className="ps-row">
           <span>Everyone in {org?.name || "this workspace"} can</span>
           <select
