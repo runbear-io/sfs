@@ -63,7 +63,7 @@ delete the file here and let the next sync carry it.`,
 				return err
 			}
 			if !ok {
-				return fmt.Errorf("%s is not a beardrive project (run `bdrive init` there first)", root)
+				return notAProject(root)
 			}
 			switch syncBlocked(proj) {
 			case "init":

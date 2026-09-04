@@ -221,11 +221,34 @@ func TestDesktopInitFounder(t *testing.T) {
 			t.Fatalf("missing %s in the shared folder: %v", want, err)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(root, ".bdrive")); !os.IsNotExist(err) {
+	// The PROJECT ROOT must never become a mount. Since the workspace manifest
+	// (DESIGN.md §Workspace root and projects) lives in the root's .bdrive,
+	// assert the property itself rather than the directory's absence: no
+	// project config, not a mount, and nothing in there but the manifest.
+	if config.IsMount(root) {
 		t.Fatal("the PROJECT ROOT must never become a mount")
 	}
+	if _, err := os.Stat(filepath.Join(root, config.ProjectDir, "config.json")); !os.IsNotExist(err) {
+		t.Fatal("a project config was written at the PROJECT ROOT")
+	}
+	rootDotBdrive, err := os.ReadDir(filepath.Join(root, config.ProjectDir))
+	if err != nil {
+		t.Fatalf("the root's manifest directory: %v", err)
+	}
+	for _, e := range rootDotBdrive {
+		if e.Name() != config.WorkspaceFile {
+			t.Fatalf("%s written at the PROJECT ROOT: only the workspace manifest belongs there", e.Name())
+		}
+	}
+	if !config.IsWorkspaceRoot(root) {
+		t.Fatal("the connect flow did not index the root it was given")
+	}
+	if w, _, werr := config.LoadWorkspace(root); werr != nil ||
+		len(w.Projects) != 1 || w.Projects[0].Path != "team" {
+		t.Fatalf("root manifest = %+v (%v), want the project just connected", w.Projects, werr)
+	}
 	if _, err := os.Stat(filepath.Join(root, ".bdriveignore")); !os.IsNotExist(err) {
-		t.Fatal("nothing may be written outside <root>/<name>")
+		t.Fatal("nothing but the manifest may be written outside <root>/<name>")
 	}
 	// The mount is registered at the shared folder.
 	mounts, err := config.LoadMounts()
@@ -374,5 +397,130 @@ func TestDesktopInspectProtectedFolderWarns(t *testing.T) {
 	// An ordinary work folder says nothing at all.
 	if got := protectedWarning(filepath.Join(home, "work", "acme-app", "team")); got != "" {
 		t.Fatalf("~/work must not warn, got %q", got)
+	}
+}
+
+// TestDesktopInitFailureUnroots: a connect that fails must hand the user's
+// folder back exactly as it was — including its root-ness.
+//
+// The connect flow is the only thing that designates a workspace root, and
+// nothing un-designates one: no `bdrive workspace` command exists, and
+// `bdrive init` refuses a root outright. So a failed connect that left the
+// manifest behind would silently convert the folder the user pointed at, with
+// a screen saying the connect did not work.
+//
+// The failure is injected after the root is designated: a FILE sits where the
+// wiki template needs the `sources/` directory, so the seed step fails.
+func TestDesktopInitFailureUnroots(t *testing.T) {
+	hub := onboardHub(t, map[string]string{}, nil)
+	ts, root := onboardEnv(t, hub.URL)
+
+	target := filepath.Join(root, "team")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "sources"), []byte("in the way"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, body := postInit(t, ts, `{"root":"`+root+`","name":"team","hooks":false}`)
+	if code != 200 {
+		t.Fatalf("init: %d %s", code, body)
+	}
+	st := waitInit(t, ts)
+	if st["phase"] != "error" {
+		t.Fatalf("phase = %v, want the seed failure this test injects (%v)", st["phase"], st["error"])
+	}
+	// Pin WHICH failure: the point of this test is a failure that lands AFTER
+	// the root is designated. A future change that fails earlier would still
+	// reach phase=error and quietly stop testing anything.
+	if msg, _ := st["error"].(string); !strings.Contains(msg, "template") {
+		t.Fatalf("error = %q, want the template seed failure that lands after designation", msg)
+	}
+
+	if config.IsWorkspaceRoot(root) {
+		t.Fatal("a FAILED connect left the user's folder converted into a workspace root")
+	}
+	// The manifest is gone. An empty .bdrive directory may remain, and that is
+	// deliberate: removing it "only if now empty" also removed one the user
+	// already had, and unlinked a symlink whatever it pointed at. Empty, it is
+	// inert — neither a root nor a mount.
+	if _, err := os.Stat(filepath.Join(root, config.ProjectDir, config.WorkspaceFile)); !os.IsNotExist(err) {
+		t.Fatal("a failed connect left the manifest behind at the root")
+	}
+	if ents, err := os.ReadDir(filepath.Join(root, config.ProjectDir)); err == nil && len(ents) != 0 {
+		t.Fatalf("a failed connect left %v in the root's %s", ents, config.ProjectDir)
+	}
+
+	// And the refusal it would have caused is gone with it: the folder is an
+	// ordinary folder again.
+	if _, ok, err := config.LoadProject(root); err != nil || ok {
+		t.Fatalf("LoadProject at the root = ok:%v %v, want an ordinary folder", ok, err)
+	}
+}
+
+// TestDesktopInitFailureKeepsAPreExistingRoot: the mirror image — when the
+// folder was ALREADY a workspace root, a failed connect must not delete the
+// manifest it did not create.
+//
+// The manifest is left exactly as it was, not edited: designation is a no-op
+// at an existing root, so the failed project was never listed and there is
+// nothing to drop. (An earlier version of this comment and of undo's claimed
+// the entry was dropped; nothing produced that, and the assertion below passed
+// vacuously.) The new project appears when a daemon start next re-indexes.
+func TestDesktopInitFailureKeepsAPreExistingRoot(t *testing.T) {
+	hub := onboardHub(t, map[string]string{}, nil)
+	ts, root := onboardEnv(t, hub.URL)
+
+	// A root the user already had, with a project already in it.
+	existing := filepath.Join(root, "notes")
+	if err := os.MkdirAll(existing, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.SaveProject(existing, config.Project{ID: "m-existing1", Volume: "notes"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.InitWorkspace(root); err != nil {
+		t.Fatal(err)
+	}
+
+	target := filepath.Join(root, "team")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "sources"), []byte("in the way"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, body := postInit(t, ts, `{"root":"`+root+`","name":"team","hooks":false}`)
+	if code != 200 {
+		t.Fatalf("init: %d %s", code, body)
+	}
+	st := waitInit(t, ts)
+	if st["phase"] != "error" {
+		t.Fatalf("phase = %v, want the injected failure (%v)", st["phase"], st["error"])
+	}
+	if msg, _ := st["error"].(string); !strings.Contains(msg, "template") {
+		t.Fatalf("error = %q, want the template seed failure that lands after designation", msg)
+	}
+
+	if !config.IsWorkspaceRoot(root) {
+		t.Fatal("a failed connect deleted a workspace root it did not create")
+	}
+	w, ok, err := config.LoadWorkspace(root)
+	if err != nil || !ok {
+		t.Fatalf("LoadWorkspace: %v (ok=%v)", err, ok)
+	}
+	if len(w.Projects) != 1 || w.Projects[0].Path != "notes" {
+		t.Fatalf("manifest = %+v, want the pre-existing entry, untouched", w.Projects)
+	}
+	// The failed project was never added, so nothing had to be removed — the
+	// assertion above is about the manifest surviving, not about an edit.
+	//
+	// <root>/team itself stays, and should: this test created it beforehand to
+	// plant the failure, and undo only removes a folder the run made itself
+	// ("A folder the user already had keeps its contents").
+	if _, err := os.Stat(filepath.Join(root, "team")); err != nil {
+		t.Fatalf("undo removed a folder it did not create: %v", err)
 	}
 }

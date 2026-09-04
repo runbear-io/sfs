@@ -222,8 +222,17 @@ func projectConfigPath(folder string) string {
 }
 
 // IsMount reports whether folder is a BearDrive mount root, i.e. has a
-// .bdrive/config.json — even an unparseable one, so callers that must not
-// treat a mount as plain files (e.g. a parent mount's scanner) stay safe.
+// .bdrive/config.json — even an unparseable or unreadable one, so callers
+// that must not treat a mount as plain files (e.g. a parent mount's scanner)
+// stay safe.
+//
+// A workspace root is NOT a mount, and needs nothing here: its manifest has
+// its own name (WorkspaceFile), so a root has no config.json to stat. Reading
+// the file to check its kind was tried and reverted — this runs per directory
+// in the syncer's walk, where one unreadable or wedged config would hang a
+// scan that a stat completes. The agent-hook walk-up matches on the same file
+// name for the same reason, so Go and shell agree: a manifest hand-planted in
+// config.json reads as a mount to both.
 func IsMount(folder string) bool {
 	_, err := os.Stat(projectConfigPath(folder))
 	return err == nil
@@ -239,6 +248,12 @@ func LoadProject(folder string) (Project, bool, error) {
 			return p, false, nil
 		}
 		return p, false, err
+	}
+	// A manifest that landed here rather than in WorkspaceFile carries no id,
+	// which the empty-id rule below would read as a legacy pre-id project —
+	// handing every caller a project whose volume path is built from "".
+	if configKind(data) == WorkspaceKind {
+		return Project{}, false, fmt.Errorf("%s: workspace root, not a project", projectConfigPath(folder))
 	}
 	if err := json.Unmarshal(data, &p); err != nil {
 		return p, false, fmt.Errorf("parse %s: %w", projectConfigPath(folder), err)

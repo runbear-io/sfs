@@ -294,6 +294,25 @@ the project:
   "post_sync": "qmd update && qmd embed" }
 ```
 
+- **`.bdrive/workspace.json`** — only in a folder that *holds* projects rather
+  than being one (the Mac app writes it at the folder you connect; the CLI
+  never creates one). It lists which immediate children are project folders —
+  including any this device has paused or never connected — and nothing more:
+
+  ```jsonc
+  // <root>/.bdrive/workspace.json
+  { "kind": "workspace",
+    "projects": [ { "path": "team", "id": "m-5a10b713" } ] }
+  ```
+
+  A root is not a project: nothing in it syncs, and `bdrive init` refuses to
+  mount one. The file is an index only — identity stays in each project's own
+  `config.json` — so a wrong or stale *entry* costs nothing: every daemon
+  start rewrites the list from what is actually on disk. Deleting the file (or
+  corrupting it) is how you un-root the folder; nothing recreates it, and
+  `bdrive init` will then mount the folder like any other. Stop syncing first
+  (`bdrive stop`): a re-index already in flight can write the file back once.
+
 ### `post_sync` — run something when teammates' changes land
 
 Optional. A shell command run **on this device** after a cycle applies changes

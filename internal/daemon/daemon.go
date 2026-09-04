@@ -392,6 +392,27 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 	log.Printf("daemon started: folder=%s mount=%s volume=%s remote=%q device=%s(%s) scan=%s sync=%s",
 		folder, proj.ID, proj.Volume, proj.Remote, dev.Name, dev.ID, scanInterval, remoteInterval)
 
+	// Re-index the workspace root above this project, if there is one. Here
+	// because THIS is what every daemon start passes through — `bdrive resume`
+	// (the reboot path) calls Start directly, so a manifest refreshed only by
+	// `bdrive init` would never notice a project added on another device or a
+	// folder the user deleted.
+	//
+	// In a goroutine, and that is the whole point. The scan reads a directory
+	// the user chose plus one config per child, neither bounded: a wedged
+	// network mount or a TCC-gated sibling blocks it forever. Inline it would
+	// take the daemon with it — before announce that fails a healthy project's
+	// start, and after announce it is worse, because the flock says "running"
+	// while the sync loop never begins. Sync must never wait on an index.
+	//
+	// A no-op when no root sits above, it never creates one, and nothing
+	// resolves state from what it writes.
+	go func() {
+		if err := config.RefreshWorkspaceOf(folder); err != nil {
+			log.Printf("workspace manifest not refreshed: %v", err)
+		}
+	}()
+
 	var be remote.Backend
 	defer func() {
 		if be != nil {

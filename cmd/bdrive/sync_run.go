@@ -30,6 +30,13 @@ func startSync(ctx context.Context, folder string, proj config.Project, foregrou
 	if _, _, err := config.EnrollMount(folder); err != nil {
 		return err
 	}
+	// No workspace-manifest refresh here on purpose. `daemon.Run` does it, off
+	// the startup path, and covers every gesture that reaches a daemon;
+	// repeating it inline here put an unbounded directory scan in front of
+	// `bdrive init` and of the desktop connect's sync step, either of which a
+	// single wedged sibling folder could hang forever. The narrow case it
+	// covered — a daemon that never spawns — leaves the index stale until the
+	// next start, which is exactly what an index is allowed to do.
 	vdir, err := config.VolumeDir(proj.ID)
 	if err != nil {
 		return err

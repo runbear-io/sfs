@@ -37,6 +37,220 @@ local state: mounts.json → projects; working folders → file browse;
   shell passes to the webview — localhost is not an auth boundary on a
   multi-user machine.
 
+## Workspace root and projects (decided 2026-09-01, Snow)
+
+A machine's BearDrive state hangs off a **workspace root** the user connects
+once, holding any number of project folders beside folders BearDrive never
+touches:
+
+```
+project-root/
+  .bdrive/workspace.json       # workspace manifest — the root is NOT a mount
+  non-beardrive-folder-1/      # untouched, never scanned
+  non-beardrive-folder-2/
+  beardrive-folder-1/
+    .bdrive/config.json        # mount identity: m-xxxxxxxx
+  beardrive-folder-2/
+    .bdrive/config.json        # mount identity: m-yyyyyyyy
+```
+
+This extends the onboarding decision below (the mount is `<root>/<name>`, the
+root never syncs) rather than replacing it. What is new: the root carries a
+manifest, and it holds MANY projects rather than one.
+
+### The manifest is an index, not the source of truth
+
+Identity stays where it is today — each project folder's own
+`.bdrive/config.json` (`ID`, `Volume`, `Remote`, `Include`, `PostSync`),
+unchanged. The root manifest only lists which children are projects:
+
+```json
+{
+  "kind": "workspace",
+  "projects": [
+    {"path": "beardrive-folder-1", "id": "m-xxxxxxxx"},
+    {"path": "beardrive-folder-2", "id": "m-yyyyyyyy"}
+  ]
+}
+```
+
+Implemented as `internal/config/workspace.go`: `Workspace`, `LoadWorkspace`,
+`SaveWorkspace`, `ScanWorkspace`, `RefreshWorkspace(Of)`, `InitWorkspace`.
+
+Index and not truth, because a project folder that carries its own id keeps
+the property `internal/config/project.go` states today: copy the folder to
+another machine and `bdrive init` resumes the same project. Move identity up
+to the root and a folder on its own means nothing. Paths are relative to the
+root, so the root can be renamed or moved.
+
+**On disagreement, the folder wins.** The manifest is rebuilt from a scan of
+the root's immediate children; a stale or hand-edited entry is corrected,
+never obeyed. No volume store, journal, or permission is ever keyed off it.
+
+### The name collision, and why the manifest got its own name
+
+This section first specified the manifest AS `.bdrive/config.json`,
+distinguished by its `kind`. That does not survive contact with the agent
+hooks (below), so the manifest is `.bdrive/workspace.json` — a root and a
+project never share a file name, and every existing reader is correct
+without knowing that workspaces exist.
+
+The `kind` field stays as the manifest's self-description, and one Go guard
+uses it: `LoadProject` refuses a config carrying `kind: workspace` and says so
+("workspace root, not a project") rather than reading it as a legacy pre-id
+project. That check is free there — LoadProject has already read the bytes.
+
+`IsMount` deliberately does NOT check the kind. It runs per directory in the
+syncer's walk, and reading each config to classify it puts an unbounded read
+where a stat was: one wedged or unreadable config hangs a whole scan. It was
+tried and reverted. The agent-hook walk-up matches on the file name for the
+same reason, so **Go and shell agree** — a manifest hand-planted in
+`config.json` reads as a mount to both, and neither has to know what a
+workspace is.
+
+That is the stated limit of the collision guards: they cover the case where
+such a file is *loaded as a project*, not the case where its mere presence is
+counted. Nothing writes that layout; it is reachable only by hand.
+
+### The agent-hook walk-up — the constraint that set the file name
+
+`internal/agenthooks` locates a project by walking up for
+`$d/.bdrive/config.json` and stopping at the first hit. Had the manifest
+lived there, the walk would succeed from inside `non-beardrive-folder-1` — a
+folder that does not sync — and every tool call in it would spawn `bdrive`.
+
+Telling the two apart in that walk means inspecting each ancestor's config.
+That is affordable — `read` is a shell builtin, so it need not cost a process,
+and the guard's budget is one `grep`, of `mounts.json` (CLAUDE.md;
+`sec_hooks_test.go` pins it). The objection is not cost but coupling: it makes
+correctness in the machine's hottest guard depend on knowing what a workspace
+is. A distinct file name removes the question — the walk climbs past a root
+untouched and falls through to the `mounts.json` check, which is the right
+answer for a session opened at the root, without having heard of workspaces.
+`TestHookGuardSkipsWorkspaceRoot` fails if the manifest is moved back into
+`config.json`.
+
+### Rules
+
+- A workspace root is never itself a mount. `bdrive init` at a root refuses
+  and points at a child folder.
+- Roots do not nest, and a root is never inside a project. (Nested *mounts*
+  are a different matter — they exist and the syncer handles them; the
+  manifest simply indexes immediate children and leaves them alone.)
+  **Enforced by no shipped code today.** Answering either rule needs a read
+  per ancestor directory, and one wedged ancestor would hang the desktop
+  connect at "connecting" with no cancel and no undo — so the connect applies
+  `config.checkRootHere` (stat and path arithmetic only) and skips them. They
+  live in `CheckRootPlacement`, whose only caller is `InitWorkspace`, which
+  nothing in the product calls: `bdrive init` never designates a root, it only
+  refuses to mount one. So two connects can produce a root inside a root — one
+  folder with two indexes, a cosmetic fault in a file nothing resolves state
+  from. The rules are kept, and tested, for a future "designate this existing
+  tree" gesture that can afford to block.
+- Nothing at the root syncs, the manifest included — a root is not a mount, so
+  no scan ever reaches it. And if one ever did (a root inside a project, which
+  nothing shipped prevents — see above), the manifest still would not sync:
+  it lives in `.bdrive`, which IS in `ReservedDirs`, at any depth. Belt and
+  braces, in that order.
+- Deleting the manifest un-roots the folder. Nothing recreates it, because
+  nothing can tell "this was a root" from "this never was" — the desktop
+  connect flow is the only thing that designates one.
+
+### Migration
+
+None. A project folder with no root above it is exactly today's layout and
+keeps working — no manifest, everything reads as it does now. A manifest is
+written by the desktop connect flow (the one gesture where the user picks a
+root) and re-indexed on every daemon start — `daemon.Run`, so `bdrive resume`
+after a reboot counts, not just `bdrive init`.
+
+That re-index runs in its own goroutine, and that placement is load-bearing.
+The scan reads a directory the user chose plus one config per child, neither
+bounded, so a wedged network path or a TCC-gated sibling blocks it forever.
+Inline before `announce` it fails a healthy project's daemon; inline after
+`announce` it is worse — the flock says "running" while the sync loop never
+begins. **Sync never waits on the index.**
+
+The rule the hard way, four times over: **`ScanWorkspace` may only be called
+where blocking forever is harmless.** Today that is exactly one place, the
+daemon's goroutine. It was tried in `startSync` (hung `bdrive init` and the
+connect's sync step), in `init`'s containing-root guard (hung `bdrive init`),
+and in the connect flow (hung the UI at "connecting", with no undo). Bounding
+it with the `probe` helper does not work either: `probe` abandons a slow call
+without cancelling it, so the write still lands, after the undo that was
+supposed to remove it.
+
+So the connect flow does not scan at all. `DesignateWorkspace` writes a
+manifest holding the one project it just created — one stat, one atomic
+write, over a directory the flow has already proven reachable — and the
+daemon's refresh discovers everything else later, where it can afford to
+block. That also makes un-designation safe: the write is synchronous, so
+`undo` cannot lose a race with it.
+
+### What it buys
+
+The root becomes the thing a user connects and the Mac app can name: one
+place that answers "what on this machine is BearDrive, and what isn't".
+Today that answer exists only in `~/.bdrive/mounts.json` — a machine-global
+registry with no relationship to the user's own folder structure.
+
+### Status
+
+Implemented (`internal/config/workspace.go`, `internal/daemon/daemon.go`,
+`cmd/bdrive/{init,sync_run,desktop_onboard}.go`). `bdrive init` refuses a root
+and names it; `daemon.Run` re-indexes the root above a project on every daemon
+start, `bdrive resume` included; the desktop connect flow designates the folder
+the user picked, and un-designates it if the connect then fails. Checks:
+`TestWorkspace*`/`TestLoadProjectRefusesWorkspace`/
+`TestIsMountFalseAtWorkspaceRoot`/`TestDesignateWorkspaceIsScanFree`/
+`TestWorkspaceRootRefusalCoversTheWholeHome` (`internal/config`),
+`TestHookGuardSkipsWorkspaceRoot`/`TestHookGuardStaysPureShell`
+(`internal/agenthooks`), `TestWorkspaceRefreshOnDaemonStart`/
+`TestWorkspaceRefreshNeverStallsTheDaemon`/
+`TestWorkspaceRefreshNeverCreatesARoot` (`internal/daemon`),
+`TestInitRefusesWorkspaceRoot`/`TestInitInAProjectUnderARootStillWorks`/
+`TestInitNeverScansForRoots`/`TestSyncStartNeverScansTheWorkspaceRoot`/
+`TestLegacyProjectUnchanged`/`TestDesktopInitFounder`/
+`TestDesktopInitFailure*` (`cmd/bdrive`), `TestWorkspaceRootNeverScanned`
+(`internal/syncer`). Working notes and four independent validation passes:
+`.claude/workspace-root-goal.md`, `.claude/workspace-root-validation*.md`.
+
+Not done: no UI names the root yet (the Mac app still lists mounts from
+`mounts.json`); no command designates a root outside the desktop connect flow,
+nor un-designates one (`config.DesignateWorkspace`/`UndesignateWorkspace` are
+the seams, and deleting `.bdrive/workspace.json` is the manual undo — do it
+with syncing stopped, since a refresh already in flight can rewrite it once);
+and `LoadWorkspace` validates
+nothing in what it returns — the first caller that builds a path from an entry
+must check `Path` for traversal and `ID` with `ValidMountID`, the way
+`LoadProject` does. Note also that the manifest indexes project FOLDERS, which
+includes ones this device has paused or never enrolled: a UI that reads it as
+"what is syncing" would be wrong.
+
+`init` refuses a root in both directions — the root itself, and a folder that
+contains one (which would sweep up everything the root exists to hold apart).
+The second is answered from the mount registry alone: for every enrolled
+project below the named folder it walks up to that folder looking for a root,
+so a project nested any distance under its root (`<root>/team/wiki`) is found.
+Only paths this device already syncs are read.
+**Known gap:** a root whose projects this device never enrolled — a tree
+copied from another machine — is invisible, so `init` above it is not refused.
+
+That gap is deliberate. Closing it means reading folders the user did not
+name, and the one attempt at that hung `bdrive init` forever on a single FIFO
+or wedged network child. A guard that can hang the command it guards is worse
+than the gap it closes.
+
+A root is never `$HOME` or anything whose `.bdrive` contains (or sits inside)
+the beardrive home — that directory holds the device token, the identity and
+every project's journals, and an index has no business in it. Containment
+rather than equality, and case-insensitively, since the filesystems here fold
+case. Both sides are canonicalised as far as they exist (`resolveExisting`):
+either the folder or the home can be spelled through a symlink, and the last
+component of each — a `.bdrive` about to be created, a `$BDRIVE_HOME` on a
+machine that has never synced — routinely does not exist, which is precisely
+when a naive `EvalSymlinks` gives up and the alias slips through.
+
 ## Scope (v1)
 
 In: file browser + markdown viewer (wikilinks), per-file history + old
@@ -106,6 +320,10 @@ can POST to loopback).
   priming access from the GUI process, and warning at connect time before a
   gated folder is chosen. The real fix is Developer ID signing, after which
   grants stick and the helper rides the app's identity — see phase 3.
+- **Workspace root — done 2026-09-01**: the root manifest and its guards, see
+  §Workspace root and projects. The manifest is `.bdrive/workspace.json`, not
+  the `config.json` that section first specified — a separate name keeps the
+  agent-hook walk-up correct without it having to know what a workspace is.
 - **Phase 3 — remaining for "shipped"**: signing + notarization + updater;
   per-launch bearer token between shell and sidecar (loopback is not an
   auth boundary on multi-user machines); frontend `config.desktop` polish

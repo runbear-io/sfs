@@ -405,6 +405,10 @@ func handleDesktopInit(w http.ResponseWriter, r *http.Request) {
 // made) so a retry starts clean.
 func runDesktopInit(target, name string, settings config.Settings, hooks bool) {
 	createdFolder := false
+	// Whether THIS run turned the parent into a workspace root, so undo can
+	// hand it back: a connect that failed must not leave the user's folder
+	// converted, and nothing else can un-root it (there is no CLI for that).
+	createdRoot := false
 	// Bounded like inspect: a protected folder blocks the syscall rather than
 	// refusing it, and a connect step that hangs forever is worse than one
 	// that says what to do.
@@ -433,6 +437,17 @@ func runDesktopInit(target, name string, settings config.Settings, hooks bool) {
 		if createdFolder {
 			os.RemoveAll(target)
 		}
+		if createdRoot {
+			// This run designated it; hand the folder back exactly as it was.
+			// Safe to do unconditionally here because designation is
+			// synchronous — there is no in-flight write to lose a race with.
+			_ = config.UndesignateWorkspace(filepath.Dir(target))
+		}
+		// A root that already existed keeps its manifest untouched: designation
+		// is a no-op there, so this run never added an entry and there is
+		// nothing to remove. Rescanning to tidy would put an unbounded read on
+		// the failure path, where hanging means the user never learns the
+		// connect failed at all.
 		onboarding.fail(err)
 	}
 
@@ -456,6 +471,33 @@ func runDesktopInit(target, name string, settings config.Settings, hooks bool) {
 		undo(err)
 		return
 	}
+	// Designate the folder the user picked as their workspace root, holding
+	// the project just created. Scan-free (config.DesignateWorkspace): one
+	// stat and one atomic write, over a directory this flow has already
+	// statted and written inside, so it needs no probe and cannot wedge the
+	// connect. Everything else under the root is discovered later by the
+	// daemon's refresh, which can afford to block.
+	//
+	// Not probed for a second reason: probe abandons a slow call without
+	// cancelling it, so a "bounded" designation could still land the manifest
+	// after undo removed it. Synchronous and fast is the only shape where
+	// createdRoot is true if and only if a manifest exists.
+	//
+	// Named rootCreated, never `created`: that name is already taken by
+	// whether the HUB created the project, which decides whether the template
+	// is seeded. Shadowing it seeds a teammate's folder on the joiner path.
+	root := filepath.Dir(target)
+	rootCreated, werr := config.DesignateWorkspace(root, config.WorkspaceProject{
+		Path: filepath.Base(target), ID: proj.ID,
+	})
+	if werr != nil {
+		// Never fatal — the connect worked and the manifest holds no state —
+		// but not swallowed either: without it this folder is not a root, so
+		// nothing later refuses `bdrive init` above it. Goes to the sidecar's
+		// stderr, which is the app log.
+		fmt.Fprintf(os.Stderr, "workspace root not designated at %s: %v\n", root, werr)
+	}
+	createdRoot = rootCreated
 	ignorePath := filepath.Join(target, ".bdriveignore")
 	if _, err := os.Stat(ignorePath); os.IsNotExist(err) {
 		if err := os.WriteFile(ignorePath, []byte(starterIgnore), 0o644); err != nil {
