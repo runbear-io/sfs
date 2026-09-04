@@ -406,7 +406,13 @@ test("ErrorBoundary: no surface driven this round reaches the app's floor", asyn
 
 test.describe("VolumeApp (single-volume mode)", () => {
   let proc: ChildProcess | undefined;
-  const port = 8995;
+  // Outside 8993-8996: playwright.config.ts reserves that block for the
+  // session-long harnesses, which are already listening when this spawns. A
+  // port inside it binds nowhere and the readiness poll below then answers
+  // 200 from the harness that owns it — every assertion measures the wrong
+  // server (#vault-name reads "BearDrive", /api/tree says "this server hosts
+  // projects") instead of failing.
+  const port = 8997;
   const base = `http://127.0.0.1:${port}`;
   let dir = "";
   const accepted: string[] = [];
