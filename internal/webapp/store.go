@@ -515,6 +515,34 @@ func (s *Server) opsNameTheirAuthor(w http.ResponseWriter, r *http.Request, ops 
 	return true
 }
 
+// opsWithinScope refuses a journal whose ops name a folder this account may
+// not write. Folder rules narrow the project level over a subtree (folders.go);
+// proj() has already established the caller may write the PROJECT.
+func (s *Server) opsWithinScope(w http.ResponseWriter, r *http.Request, ops []journal.Op) bool {
+	p, ok := projectFromCtx(r)
+	if !ok || len(p.Folders) == 0 {
+		return true
+	}
+	base := s.projectPermOf(r, p)
+	if base == PermAdmin {
+		return true
+	}
+	email := normEmail(s.requestUser(r).Email)
+	for _, op := range ops {
+		if atLeast(folderLevel(p, email, op.Path, base), PermWrite) {
+			continue
+		}
+		// The path is named back deliberately: the caller wrote this op, so it
+		// is their own text, and a device whose push is refused with no way to
+		// tell which file caused it cannot be debugged by the person holding
+		// the laptop.
+		http.Error(w, fmt.Sprintf("you have read-only access to %q in this project", op.Path),
+			http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
 // journalKeepsItsOps reports whether an incoming journal body still carries
 // every op the hub already holds under key, matched on the per-device sequence
 // number — the append-only rule the data model states and that /store/object, a
@@ -684,6 +712,21 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if !s.opsNameTheirAuthor(w, r, ops) {
+		return
+	}
+	// The folder gate for the sync wire, and the only write door a device has:
+	// a blob is content-addressed and inert until an op names it, and
+	// handleStoreSign has no path in its request to gate on. So "may this
+	// account write this folder?" is answered exactly here, over the ops the
+	// handler has already parsed for two other checks.
+	//
+	// The whole PUT is refused, not the offending ops: a journal is
+	// append-only and its writer's own record, so the hub may not edit one.
+	// An up-to-date client never reaches this — it learns its scope from
+	// /api/p/<id>/scope and never journals a path it cannot write — which is
+	// what keeps a member who edits a read-only folder from wedging their own
+	// sync forever. This is the check for the stale client and the hostile one.
+	if !s.opsWithinScope(w, r, ops) {
 		return
 	}
 	// Observed only after the write is authorized, and only into a row the

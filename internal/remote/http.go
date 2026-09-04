@@ -547,4 +547,32 @@ func (b *httpBackend) ReportReads(ctx context.Context, reads []ReadEvent) error 
 	return nil
 }
 
+// Scope asks the hub what this account may write in this project. A hub that
+// predates folder permissions answers 404, which is reported as ErrNoScope so
+// the caller can tell "this hub has no opinion" from "the hub is unreachable"
+// — the first means sync everything, the second means keep the last answer.
+func (b *httpBackend) Scope(ctx context.Context) (Scope, error) {
+	var sc Scope
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		b.base+"/api/p/"+b.project+"/scope", nil)
+	if err != nil {
+		return sc, err
+	}
+	resp, err := b.do(req)
+	if err != nil {
+		return sc, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return sc, ErrNoScope
+	}
+	if resp.StatusCode != http.StatusOK {
+		return sc, httpError(resp)
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&sc); err != nil {
+		return sc, err
+	}
+	return sc, nil
+}
+
 func (b *httpBackend) Close() error { return nil }

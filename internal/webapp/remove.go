@@ -54,6 +54,9 @@ func (s *Server) handleRemove(v *volume, w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if !s.writablePath(w, r, p) {
+		return
+	}
 	// The volume snapshot is the same map the tree and viewer serve, so the
 	// API agrees with what the caller was looking at. A stale-snapshot 404 is
 	// a harmless retry; a second, hand-rolled replay could disagree and

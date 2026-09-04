@@ -280,6 +280,12 @@ func (s *Server) handleShareCreate(v *volume, w http.ResponseWriter, r *http.Req
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// A share link is a permanent public read of this path. Minting one for a
+	// folder you may not write is how a member with read on a restricted
+	// subtree would publish it to the internet.
+	if !s.writablePath(w, r, p) {
+		return
+	}
 	snap, err := v.snapshot(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)

@@ -415,6 +415,9 @@ func (s *Server) handleUploadInit(v *volume, w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
+	if !s.writablePath(w, r, req.Path) {
+		return
+	}
 	if !sizeFitsContentAddress(req.SHA256, req.Size) {
 		http.Error(w, "declared size does not match the content address", http.StatusForbidden)
 		return
@@ -473,6 +476,9 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if !s.writablePath(w, r, p) {
+		return
+	}
 	// Spool first, then charge what actually arrived. Content-Length is -1 on
 	// any chunked request, so max(r.ContentLength, 0) admitted an upload of any
 	// size against a quota of zero bytes and billed it at zero — the hole round
@@ -516,6 +522,11 @@ func (s *Server) handleUploadCommit(v *volume, w http.ResponseWriter, r *http.Re
 	}
 	req, ok := s.decodeUpload(w, r, true)
 	if !ok {
+		return
+	}
+	// Commit is what makes a blob part of the volume — it writes the op — so
+	// it is gated even though init already was: a client may call it directly.
+	if !s.writablePath(w, r, req.Path) {
 		return
 	}
 	// The blob may already sit in storage (direct upload), but commit is what

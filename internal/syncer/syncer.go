@@ -94,6 +94,15 @@ type Session struct {
 	// from multiple goroutines.
 	OnProgress func(Progress)
 
+	// readOnly are the folder prefixes the hub says this account may sync down
+	// but never journal a change to (docs/folder-permissions-prd.md). Loaded
+	// from the hub each cycle and persisted in SyncState, so an offline cycle
+	// keeps honouring the last answer. Empty for a raw object-store remote,
+	// for a hub with no folder rules, and for a hub too old to have them.
+	readOnly []string
+	// reverted names the read-only paths this cycle put back, for Result.
+	reverted []string
+
 	// inbound accumulates this cycle's materialized peer paths, for
 	// Result.Inbound. Reset at the top of every cycle — a Session is reused
 	// across cycles by the daemon and by the tests.
@@ -108,6 +117,46 @@ type Session struct {
 func (s *Session) logInbound(rel string, deleted bool) {
 	s.inbound = append(s.inbound, store.InboundEvent{Path: rel, Deleted: deleted, Time: time.Now().UTC()})
 	_ = s.Store.LogInbound(rel, deleted) // best-effort: never fails a cycle
+}
+
+// readOnlyPath reports whether rel sits under a folder this account may read
+// but not write. The prefixes are slash-terminated, so "locked/" governs
+// "locked/x.md" and never a sibling named "lockedout.md".
+func (s *Session) readOnlyPath(rel string) bool {
+	for _, pre := range s.readOnly {
+		if strings.HasPrefix(rel, pre) {
+			return true
+		}
+	}
+	return false
+}
+
+// loadScope refreshes this account's write scope from the hub, falling back to
+// the last answer on disk. A hub that cannot be reached, or that is too old to
+// answer, must not widen what this device will journal: the persisted list
+// stands until the hub itself says otherwise.
+//
+// It runs before the scan, which is what keeps the scan from ever minting an
+// op the hub would refuse — the refusal is a 403 on the whole journal PUT, and
+// a journal is append-only, so one such op wedges this device's sync until
+// somebody edits its journal by hand.
+func (s *Session) loadScope(ctx context.Context, st *store.SyncState) {
+	s.readOnly, s.reverted = st.ReadOnly, nil
+	sc, ok := s.Backend.(remote.Scoper)
+	if !ok {
+		return
+	}
+	got, err := sc.Scope(ctx)
+	switch {
+	case errors.Is(err, remote.ErrNoScope):
+		// The hub has no opinion: it predates folder permissions, so nothing
+		// is restricted and any stale list on disk is from another hub.
+		s.readOnly, st.ReadOnly, st.ScopeTag = nil, nil, ""
+	case err != nil:
+		return // unreachable: keep the last answer
+	default:
+		s.readOnly, st.ReadOnly, st.ScopeTag = got.ReadOnly, got.ReadOnly, got.Tag
+	}
 }
 
 func (s *Session) mountID() string {
@@ -153,6 +202,11 @@ type Result struct {
 	// with one object still lets this device push its own work (Pushed may be
 	// true alongside it), because otherwise one peer's journal line decides
 	// whether anyone else's edits ever leave their machine.
+	// Reverted names paths under a read-only folder whose local edit this
+	// cycle put back from the hub's version, keeping the user's own copy
+	// beside it. Distinct from Conflicts: no op was written and no peer will
+	// ever see the change, so it is not a conflict, it is a refusal.
+	Reverted   []string
 	Offline    bool
 	OfflineErr error
 	ReadOnly   bool // the hub refused our push: pull-only from here
@@ -193,7 +247,8 @@ func accessReason(err error) string {
 func (r *Result) Reason() string { return accessReason(r.AccessErr) }
 
 func (r *Result) Activity() bool {
-	return r.LocalOps > 0 || r.PulledOps > 0 || r.Conflicts > 0 || r.Adopted > 0 || r.Pruned > 0 || r.Materialized > 0
+	return r.LocalOps > 0 || r.PulledOps > 0 || r.Conflicts > 0 || r.Adopted > 0 || r.Pruned > 0 ||
+		r.Materialized > 0 || len(r.Reverted) > 0
 }
 
 // The builtin exclusions (.bdrive — the mount's local identity, syncing it
@@ -314,6 +369,11 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 		}
 	}
 	filter.AcceptRules(st.IgnoreAccepted)
+	// Before the scan, so this device never mints an op the hub would refuse:
+	// a refusal is a 403 on the whole journal PUT, and a journal is
+	// append-only, so one such op wedges this device until somebody edits its
+	// journal by hand.
+	s.loadScope(ctx, &st)
 
 	// 1. Scan the working folder and journal any local changes.
 	localOps, err := s.scan(cache, &st, int64(len(myOps)), filter, sec)
@@ -566,6 +626,7 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	}
 	res.Materialized += n
 	res.Inbound = s.inbound
+	res.Reverted = s.reverted
 
 	// 5. Push our blobs and journal.
 	if s.Backend != nil && !blocked && int64(len(myOps)) > st.PushedOps {
@@ -676,6 +737,14 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 			return nil
 		}
 		seen[rel] = true
+		// A read-only folder is materialized like any other and journaled
+		// never. Marking it seen first is what stops the delete pass below
+		// minting a delete for it. The local edit is not lost and not
+		// silently kept either: materialize puts the project's version back
+		// and leaves the user's own copy beside it.
+		if s.readOnlyPath(rel) {
+			return nil
+		}
 		size, mt := info.Size(), info.ModTime().UnixNano()
 		mode := uint32(info.Mode().Perm())
 		c, ok := cache[rel]
@@ -721,6 +790,11 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 		// findings too: a warning about a file this mount no longer syncs is
 		// one nothing can clear.
 		sec.drop(rel)
+		// Deleting a read-only file locally is a local edit like any other:
+		// not journaled, and put back by materialize on this same cycle.
+		if s.readOnlyPath(rel) {
+			continue
+		}
 		if unsafeRel(rel) || neverSync(rel) {
 			delete(cache, rel)
 			continue
@@ -1257,6 +1331,46 @@ func (s *Session) conflictCopies(myOps []journal.Op, pushed int64, pulled []jour
 	return out, nil
 }
 
+// readOnlyDrifted reports whether a read-only path's file on disk no longer
+// matches what this device last materialized there — edited, or removed. Only
+// consulted for read-only paths, so it costs one Stat on exactly the files
+// whose local changes can never be journaled.
+func (s *Session) readOnlyDrifted(rel, abs string, c store.CachedFile) bool {
+	if !s.readOnlyPath(rel) {
+		return false
+	}
+	fi, err := os.Stat(abs)
+	if err != nil {
+		return true // removed locally: the project still holds it, so put it back
+	}
+	return fi.Size() != c.Size || fi.ModTime().UnixNano() != c.MTimeNS
+}
+
+// keepLocalCopy preserves a read-only file's local edit beside it before the
+// project's version is written back over it. Named like a conflict copy so it
+// reads the same way in a file listing, but it is not one: no op is written,
+// no peer will ever see it, and it stays on this machine.
+//
+// A copy that already holds these exact bytes is not made again — otherwise
+// every cycle after an edit mints another one.
+func (s *Session) keepLocalCopy(abs string) error {
+	dir, base := filepath.Split(abs)
+	ext := filepath.Ext(base)
+	copyAbs := filepath.Join(dir, strings.TrimSuffix(base, ext)+" (local, not synced)"+ext)
+	mine, err := hashFile(abs)
+	if err != nil {
+		return err
+	}
+	if theirs, err := hashFile(copyAbs); err == nil && theirs == mine {
+		return nil
+	}
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(copyAbs, data, 0o644)
+}
+
 // conflictName builds the copy's name. Both variable parts are bounded: the
 // loser's DeviceName is an unvalidated string off a peer's journal, and the
 // result has to be a name the filesystem accepts (NAME_MAX is 255 everywhere
@@ -1383,14 +1497,35 @@ func (s *Session) materialize(target map[string]journal.FileState, cache map[str
 // can land .bdriveignore on its own, before the rules are needed.
 func (s *Session) materializeFile(rel string, want journal.FileState, cache map[string]store.CachedFile) (bool, error) {
 	want.Mode = safeMode(want.Mode) // before the cache compare, or every cycle rewrites
+	abs := filepath.Join(s.Folder, filepath.FromSlash(rel))
 	c, ok := cache[rel]
-	if ok && c.Blob == want.Blob && c.Mode == want.Mode {
+	// The cache agreeing with the target normally means there is nothing to
+	// do — a local edit would have been journaled by the scan, which updates
+	// the cache. Under a read-only folder the scan journals nothing and
+	// updates nothing, so the cache still agrees while the file on disk has
+	// moved: the file itself is the only evidence, and without this the revert
+	// below is unreachable and a read-only file silently diverges forever.
+	if ok && c.Blob == want.Blob && c.Mode == want.Mode && !s.readOnlyDrifted(rel, abs, c) {
 		return false, nil
 	}
-	abs := filepath.Join(s.Folder, filepath.FromSlash(rel))
 	if fi, err := os.Stat(abs); err == nil {
 		if ok && (fi.Size() != c.Size || fi.ModTime().UnixNano() != c.MTimeNS) {
-			return false, nil // dirty: changed mid-cycle, next scan commits it
+			// The one place a dirty file is not left alone. Everywhere else
+			// "dirty" means the next scan will commit it — under a read-only
+			// folder the next scan will NOT, so leaving it would mean a file
+			// that silently stops receiving the project's updates forever and
+			// a local edit nobody else ever sees.
+			//
+			// The user's bytes are never dropped: they are copied aside first,
+			// under the same read-only prefix, so that copy is not journaled
+			// either and stays this machine's business.
+			if !s.readOnlyPath(rel) {
+				return false, nil // dirty: changed mid-cycle, next scan commits it
+			}
+			if err := s.keepLocalCopy(abs); err != nil {
+				return false, err
+			}
+			s.reverted = append(s.reverted, rel)
 		}
 		if !ok {
 			// Untracked file already at this path: adopt if identical,

@@ -42,6 +42,9 @@ func (s *Server) handleRestore(v *volume, w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if !s.writablePath(w, r, p) {
+		return
+	}
 	if !blobRe.MatchString(req.SHA) {
 		http.Error(w, "sha must be 64 lowercase hex chars", http.StatusBadRequest)
 		return

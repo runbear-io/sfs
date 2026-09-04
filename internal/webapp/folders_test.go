@@ -3,6 +3,7 @@ package webapp
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -303,5 +304,26 @@ func TestFolderRulesDoNotYetGateContent(t *testing.T) {
 	rec := doAs(t, h, "GET", "/api/p/"+p.ID+"/tree", nil, cookies["bob"])
 	if rec.Code != 200 {
 		t.Fatalf("Phase 0 changed a content route for a denied member: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// projectView embeds Project, so every field added to Project reaches the
+// client unless projectJSON clears it. A folder rule can name a subtree the
+// caller may not know exists — the one thing /api/p/{id}/folders filters its
+// own output to prevent — so it must never ride along on a project list row.
+func TestProjectListDoesNotLeakFolderRules(t *testing.T) {
+	h, _, cookies, p := permHub(t)
+	rule := map[string]any{"prefix": "secret-plans", "default": PermNone}
+	if rec := doAs(t, h, "PUT", "/api/p/"+p.ID+"/folders", rule, cookies["alice"]); rec.Code != 200 {
+		t.Fatalf("set rule: %d %s", rec.Code, rec.Body)
+	}
+	for _, url := range []string{"/api/projects", "/api/projects/" + p.ID} {
+		rec := doAs(t, h, "GET", url, nil, cookies["bob"])
+		if rec.Code != 200 {
+			t.Fatalf("%s: %d %s", url, rec.Code, rec.Body)
+		}
+		if strings.Contains(rec.Body.String(), "secret-plans") {
+			t.Fatalf("%s leaked a hidden folder's name to a denied member: %s", url, rec.Body)
+		}
 	}
 }

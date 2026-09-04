@@ -823,7 +823,10 @@ func (s *Server) Handler() http.Handler {
 			}
 			// Read recording (and anything else downstream) finds the project
 			// id in the context; permission has already passed at this point.
-			h(v, w, withProjectID(r, id))
+			// The resolved Project rides along too, so a handler needing the
+			// FOLDER level for a path it only learns from its own body
+			// (folders.go) does not re-read the registry a third time.
+			h(v, w, withProject(withProjectID(r, id), p))
 		}
 	}
 
@@ -893,6 +896,7 @@ func (s *Server) Handler() http.Handler {
 	// themselves because the level they need is not the same for read and
 	// write. Nothing enforces a rule on a content route yet; see
 	// docs/folder-permissions-prd.md.
+	mux.HandleFunc("GET /api/p/{project}/scope", s.handleProjectScope)
 	mux.HandleFunc("GET /api/p/{project}/folders", s.handleProjectFolders)
 	mux.HandleFunc("PUT /api/p/{project}/folders", s.handleProjectFolderSet)
 	mux.HandleFunc("DELETE /api/p/{project}/folders", s.handleProjectFolderClear)
@@ -1096,7 +1100,14 @@ type projectView struct {
 func projectJSON(p Project, perm string) projectView {
 	// The grant list and the default belong to /api/p/{id}/permissions, which
 	// has its own gate; they'd be noise on every row of every project list.
-	p.Perms, p.Default = nil, ""
+	//
+	// Folders is not noise, it is a LEAK: a folder rule can name a subtree the
+	// caller may not know exists, and /api/p/{id}/folders filters its own
+	// output (visibleFolders) for exactly that reason. Embedding Project is
+	// what makes this line necessary and is still the right shape — a
+	// hand-listed struct fails silently in the other direction, by dropping a
+	// field nobody remembered to add.
+	p.Perms, p.Default, p.Folders = nil, "", nil
 	return projectView{p, perm}
 }
 

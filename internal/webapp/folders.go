@@ -1,6 +1,7 @@
 package webapp
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -200,6 +201,59 @@ func visibleFolders(p Project, email, base string) []FolderRule {
 	return out
 }
 
+// ---- request plumbing ----
+
+// ctxProjectValKey carries the Project the proj() resolver already resolved,
+// for handlers that learn their path from their own body and so cannot be
+// gated at registration the way a project level is.
+type ctxProjectValKey struct{}
+
+func withProject(r *http.Request, p Project) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), ctxProjectValKey{}, p))
+}
+
+func projectFromCtx(r *http.Request) (Project, bool) {
+	p, ok := r.Context().Value(ctxProjectValKey{}).(Project)
+	return p, ok
+}
+
+// writablePath is the folder gate for a write handler. It answers the request
+// itself and reports false when the caller may not write path.
+//
+// True — permissively — outside hub mode and on a project with no folder
+// rules: there is no rule to apply, and proj() has already enforced the
+// project level. That is the "a hub with no folder rules behaves exactly as
+// today" promise, expressed once instead of at every call site.
+func (s *Server) writablePath(w http.ResponseWriter, r *http.Request, path string) bool {
+	p, ok := projectFromCtx(r)
+	if !ok || len(p.Folders) == 0 {
+		return true
+	}
+	return s.requirePathPerm(w, r, p, path, PermWrite)
+}
+
+// writablePaths is writablePath for an operation that touches several paths at
+// once (undo run). All or nothing: a partial write would leave the caller with
+// half a reverted run and no way to name what was skipped.
+func (s *Server) writablePaths(w http.ResponseWriter, r *http.Request, paths []string) bool {
+	p, ok := projectFromCtx(r)
+	if !ok || len(p.Folders) == 0 {
+		return true
+	}
+	base := s.projectPermOf(r, p)
+	if base == PermAdmin {
+		return true
+	}
+	email := normEmail(s.requestUser(r).Email)
+	for _, path := range paths {
+		if !atLeast(folderLevel(p, email, path, base), PermWrite) {
+			http.Error(w, permDenied(PermWrite), http.StatusForbidden)
+			return false
+		}
+	}
+	return true
+}
+
 // ---- HTTP ----
 
 // handleProjectFolders lists the folder rules the caller may know about, plus
@@ -228,6 +282,40 @@ func (s *Server) handleProjectFolders(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, map[string]any{"folders": out, "scope": scopeTag(p, email, base)})
+}
+
+// handleProjectScope tells a device what IT may do in this project, so an
+// honest client never journals an op the hub would refuse. A member who edits
+// a read-only folder should have that edit reverted on the next cycle — not
+// have their whole push refused forever, which is what happens to a client
+// that does not ask.
+//
+// It reports `readonly` only. A prefix the caller may not READ is deliberately
+// absent: naming it here would hand every member of the project the NAME of
+// every hidden folder, which is most of what "invisible" is supposed to mean,
+// and nothing in Phase 1 consumes it. How denial reaches a client without
+// publishing that list is Phase 3's problem — see the PRD.
+func (s *Server) handleProjectScope(w http.ResponseWriter, r *http.Request) {
+	p, ok := s.project(w, r, r.PathValue("project"), PermRead)
+	if !ok {
+		return
+	}
+	base := s.projectPermOf(r, p)
+	email := normEmail(s.requestUser(r).Email)
+	readonly := []string{}
+	for _, rule := range p.Folders {
+		l := folderLevel(p, email, rule.Prefix, base)
+		// Exactly read: visible, so naming it leaks nothing the caller cannot
+		// already list, and writable-by-nobody is what the client must know.
+		if l == PermRead && atLeast(base, PermWrite) {
+			readonly = append(readonly, rule.Prefix)
+		}
+	}
+	sort.Strings(readonly)
+	writeJSON(w, map[string]any{
+		"scope":    scopeTag(p, email, base),
+		"readonly": readonly,
+	})
 }
 
 // handleProjectFolderSet upserts one rule. Admin only.
