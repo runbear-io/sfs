@@ -134,17 +134,21 @@ func TestSec_Folder_BlobListingHidesUnreadableContent(t *testing.T) {
 // journal that did not grow, so that peer's ops would never be read again.
 func TestFolderScopeTagTravelsWithTheStoreListing(t *testing.T) {
 	h, _, c, p, _ := hiddenHub(t)
+	// A tag is carried only for an account something is actually HIDDEN from.
+	// bob is denied vault/, so he gets one; carol is granted it and alice is an
+	// org owner, so for them nothing is filtered and there is nothing to track.
 	_, bobTag := storeList(t, h, p.ID, "journal/", c["bob"])
-	_, carolTag := storeList(t, h, p.ID, "journal/", c["carol"])
-	if bobTag == "" || carolTag == "" || bobTag == carolTag {
-		t.Fatalf("scope tags are not per-account: bob=%q carol=%q", bobTag, carolTag)
+	if bobTag == "" {
+		t.Fatal("a filtered account was given no scope tag")
 	}
-	// Alice is an org owner: admin everywhere, nothing filtered, so there is
-	// nothing for her device to track.
-	if _, aliceTag := storeList(t, h, p.ID, "journal/", c["alice"]); aliceTag != "" {
-		t.Errorf("an unfiltered listing carried a scope tag: %q", aliceTag)
+	for _, who := range []string{"carol", "alice"} {
+		if _, tag := storeList(t, h, p.ID, "journal/", c[who]); tag != "" {
+			t.Errorf("%s sees an unfiltered project but was given a scope tag: %q", who, tag)
+		}
 	}
-	// Granting bob the folder moves HIS tag.
+	// Granting bob the folder moves his tag — to empty, since he is no longer
+	// filtered at all. That is still a change, which is what makes his device
+	// drop its peer journals and re-pull the ops it was never sent.
 	rule := map[string]any{"prefix": "vault", "default": PermNone,
 		"perms": map[string]string{"carol@x.io": PermRead, "bob@x.io": PermRead}}
 	if rec := doAs(t, h, "PUT", "/api/p/"+p.ID+"/folders", rule, c["alice"]); rec.Code != 200 {
@@ -154,9 +158,13 @@ func TestFolderScopeTagTravelsWithTheStoreListing(t *testing.T) {
 	if bobAfter == bobTag {
 		t.Error("bob's scope tag did not move when his own access did")
 	}
-	_, carolAfter := storeList(t, h, p.ID, "journal/", c["carol"])
-	if carolAfter != carolTag {
-		t.Error("carol's scope tag moved when only bob's access changed — her device would re-sync for nothing")
+	// ...and bob can now see the folder's ops, which is the point of the move.
+	sizes, _ := storeList(t, h, p.ID, "journal/", c["bob"])
+	for key := range sizes {
+		body := sec12agDo(t, h, "GET", "/api/p/"+p.ID+"/store/object?key="+key, nil, c["bob"], modern)
+		if !strings.Contains(body.Body.String(), "vault/secret.md") {
+			t.Errorf("after being granted the folder, bob still cannot see its ops: %s", body.Body)
+		}
 	}
 }
 
@@ -381,5 +389,35 @@ func TestSec_Folder_ManifestIsGatedLikeTheBlobItStandsFor(t *testing.T) {
 	sizes, _ := storeList(t, h, p.ID, "chunks/", c["bob"])
 	if len(sizes) != 0 {
 		t.Errorf("chunks were listed for content nothing chunked: %v", sizes)
+	}
+}
+
+// A project can be full of READ-ONLY folders and hide nothing from anyone.
+// Treating that as filtered costs every read a pass over the rules and puts
+// every journal through the line filter — and, the part that is a bug rather
+// than a cost, refuses that member's older devices under the filtered-journal
+// capability check over folders that are not hidden from them.
+func TestReadOnlyFoldersAloneDoNotMakeAMemberFiltered(t *testing.T) {
+	h, _, c, p := folderHub(t) // "locked/" is read-only for bob, not hidden
+
+	// An older device — no X-Bdrive-Perms — must still sync: nothing about
+	// bob's view is filtered, so there is no byte offset for it to get wrong.
+	if rec := doAs(t, h, "GET", "/api/p/"+p.ID+"/store/list?prefix=journal/", nil, c["bob"]); rec.Code != 200 {
+		t.Fatalf("a read-only folder refused an older device: %d %s", rec.Code, rec.Body)
+	}
+	// And the listing carries no scope tag, because there is nothing to track.
+	if _, tag := storeList(t, h, p.ID, "journal/", c["bob"]); tag != "" {
+		t.Errorf("an unfiltered account was given a scope tag: %q", tag)
+	}
+	// Adding a genuinely hidden folder flips both.
+	hidden := map[string]any{"prefix": "vault", "default": PermNone}
+	if rec := doAs(t, h, "PUT", "/api/p/"+p.ID+"/folders", hidden, c["alice"]); rec.Code != 200 {
+		t.Fatalf("set hidden rule: %d %s", rec.Code, rec.Body)
+	}
+	if rec := doAs(t, h, "GET", "/api/p/"+p.ID+"/store/list?prefix=journal/", nil, c["bob"]); rec.Code != http.StatusForbidden {
+		t.Fatalf("an older device was served a filtered project: %d %s", rec.Code, rec.Body)
+	}
+	if _, tag := storeList(t, h, p.ID, "journal/", c["bob"]); tag == "" {
+		t.Error("a filtered account was given no scope tag")
 	}
 }

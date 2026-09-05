@@ -315,6 +315,24 @@ func (s *Server) visibilityFor(r *http.Request, p Project) pathFilter {
 		return pathFilter{} // admin everywhere; nothing to hide
 	}
 	email := normEmail(s.requestUser(r).Email)
+	// "on" means something is hidden FROM THIS ACCOUNT, not merely that the
+	// project has rules. A project can be full of read-only folders and hide
+	// nothing from anyone; treating that as filtered would cost every read a
+	// pass over the rules, put every journal through the line filter, and —
+	// the part that is a bug rather than a cost — refuse this member's older
+	// devices under the filtered-journal capability check, over folders that
+	// are not hidden from them. Same over-refusal an earlier test caught for
+	// org owners, one level in.
+	hidden := false
+	for _, rule := range p.Folders {
+		if !atLeast(folderLevel(p, email, rule.Prefix, base), PermRead) {
+			hidden = true
+			break
+		}
+	}
+	if !hidden {
+		return pathFilter{}
+	}
 	return pathFilter{
 		project: p, email: email, base: base,
 		tag: scopeTag(p, email, base), on: true,
