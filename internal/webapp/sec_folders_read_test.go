@@ -238,3 +238,46 @@ func TestSec_Folder_ARestrictedFolderKillsItsOlderShareLinks(t *testing.T) {
 		t.Errorf("dead link answered %d, want the ordinary 404", got.Code)
 	}
 }
+
+// TestSec_Folder_OrgShareAuditHidesLinksIntoAHiddenFolder.
+//
+// The org-wide share audit walks every project the caller can read and was
+// gated on the PROJECT level only. A share row carries the public /s/ token,
+// and /s/ answers to the link's creator rather than to whoever presents it —
+// so a member denied a folder could read the token out of this list and fetch
+// the contents through a door that never asks who they are.
+//
+// The route is not behind proj(), so the per-request filter every other read
+// surface uses was inert here.
+func TestSec_Folder_OrgShareAuditHidesLinksIntoAHiddenFolder(t *testing.T) {
+	h, srv, c, p, _ := hiddenHub(t)
+	if srv.Shares == nil {
+		t.Skip("sharing is off in this fixture")
+	}
+	// Alice, who may read the folder, publishes a file inside it.
+	rec := doAs(t, h, "POST", "/api/p/"+p.ID+"/shares",
+		map[string]any{"path": "vault/secret.md"}, c["alice"])
+	if rec.Code != 200 {
+		t.Fatalf("mint: %d %s", rec.Code, rec.Body)
+	}
+	// ...and one outside it, so the control is a filter and not an empty list.
+	if r2 := doAs(t, h, "POST", "/api/p/"+p.ID+"/shares",
+		map[string]any{"path": "notes/open.md"}, c["alice"]); r2.Code != 200 {
+		t.Fatalf("mint open: %d %s", r2.Code, r2.Body)
+	}
+
+	audit := doAs(t, h, "GET", "/api/orgs/"+p.Org+"/shares", nil, c["bob"])
+	if audit.Code != 200 {
+		t.Fatalf("org share audit: %d %s", audit.Code, audit.Body)
+	}
+	if strings.Contains(audit.Body.String(), "vault") {
+		t.Fatalf("the org share audit handed bob a link into a hidden folder: %s", audit.Body)
+	}
+	if !strings.Contains(audit.Body.String(), "notes/open.md") {
+		t.Fatalf("the audit lost a link bob may see: %s", audit.Body)
+	}
+	// Carol is on the folder's list and still sees both.
+	if body := doAs(t, h, "GET", "/api/orgs/"+p.Org+"/shares", nil, c["carol"]).Body.String(); !strings.Contains(body, "vault") {
+		t.Fatalf("carol, who is granted the folder, lost her link: %s", body)
+	}
+}

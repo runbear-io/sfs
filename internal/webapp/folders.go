@@ -296,7 +296,18 @@ type pathFilter struct {
 // that has not used the feature.
 func (s *Server) visibility(r *http.Request) pathFilter {
 	p, ok := projectFromCtx(r)
-	if !ok || len(p.Folders) == 0 {
+	if !ok {
+		return pathFilter{}
+	}
+	return s.visibilityFor(r, p)
+}
+
+// visibilityFor is visibility for a caller holding the project itself — the
+// routes that are NOT behind proj() and so have no stashed Project. There is
+// one, and it is a real one: the org-wide share audit walks every project in
+// the org, and a share row carries the public /s/ token.
+func (s *Server) visibilityFor(r *http.Request, p Project) pathFilter {
+	if len(p.Folders) == 0 {
 		return pathFilter{}
 	}
 	base := s.projectPermOf(r, p)
