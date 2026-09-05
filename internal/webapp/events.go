@@ -47,6 +47,13 @@ const (
 	// keepalive keeps intermediaries from reaping an idle stream. A comment
 	// line is not an event, so clients never see it.
 	keepalive = 20 * time.Second
+	// streamMaxAge ends a stream on purpose after an hour. Both clients
+	// re-dial (EventSource on its own, the daemon on a closed channel), so
+	// this costs nothing — and without it the only thing that ever frees a
+	// subscriber slot is the client hanging up, which a half-open connection
+	// never does. maxSubsTotal is a bound on concurrent streams, not on
+	// abandoned ones.
+	streamMaxAge = time.Hour
 )
 
 // changeEvent is one "something changed" frame. Paths are relative to the
@@ -209,9 +216,13 @@ func (s *Server) handleEvents(v *volume, w http.ResponseWriter, r *http.Request)
 
 	tick := time.NewTicker(keepalive)
 	defer tick.Stop()
+	old := time.NewTimer(streamMaxAge)
+	defer old.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-old.C:
 			return
 		case frame := <-sub.ch:
 			if sub.lost.Swap(false) {
@@ -225,6 +236,17 @@ func (s *Server) handleEvents(v *volume, w http.ResponseWriter, r *http.Request)
 				return
 			}
 		case <-tick.C:
+			// The resync also rides the keepalive, not just the next frame:
+			// a client that overflowed and then saw the project go quiet
+			// would otherwise stay stale until its stream aged out, since
+			// the thing that tells it to refetch is the very traffic that
+			// has stopped.
+			if sub.lost.Swap(false) {
+				if !writeFrame(w, rc, []byte(`{"type":"resync"}`)) {
+					return
+				}
+				continue
+			}
 			if _, err := w.Write([]byte(": keepalive\n\n")); err != nil {
 				return
 			}

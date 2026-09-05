@@ -14,6 +14,31 @@ import (
 	"github.com/runbear-io/beardrive/internal/remote"
 )
 
+// handleEvents blocks until the connection goes away, so the one thing it must
+// never do is outlive it. A ResponseRecorder never disconnects, which is what
+// makes this worth pinning: a future test poking the route with the ordinary
+// do() helper would otherwise hang the whole package until its timeout.
+func TestEventStreamReturnsWhenTheClientGoesAway(t *testing.T) {
+	s := &Server{}
+	ctx, cancel := context.WithCancel(context.Background())
+	r := httptest.NewRequest("GET", "/api/events", nil).WithContext(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.handleEvents(nil, httptest.NewRecorder(), r)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleEvents did not return after the request context was cancelled")
+	}
+	// And it let go of its slot on the way out.
+	if n := s.events().total; n != 0 {
+		t.Fatalf("subscriber count = %d after the stream ended, want 0", n)
+	}
+}
+
 // The other half of the loop: the sync client's Watcher capability against a
 // real hub. This is what replaces the daemon's 10s remote gate, so it is worth
 // exercising over a real connection rather than trusting the two halves apart.

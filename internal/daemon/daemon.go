@@ -378,6 +378,7 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 	// hub that does not implement the route will never start implementing it
 	// mid-connection, so a failed dial backs off instead of retrying per tick.
 	var nextWatch time.Time
+	var watchOpened time.Time
 	stopWatch := func() {
 		if watchCancel != nil {
 			watchCancel()
@@ -468,7 +469,7 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 					// is otherwise working perfectly.
 					nextWatch = time.Now().Add(watchRetry)
 				} else {
-					watch, watchCancel = ch, cancel
+					watch, watchCancel, watchOpened = ch, cancel, time.Now()
 				}
 			} else {
 				nextWatch = time.Now().Add(time.Hour) // not a hub; stop asking
@@ -541,11 +542,16 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 			return nil
 		case _, open := <-watch:
 			if !open {
-				// The stream ended: the hub restarted, a proxy timed it out,
-				// the network moved. Fall back to the tick and re-dial after a
-				// pause — the very next cycle still runs, one tick from now.
+				// The stream ended. A stream that ran a long time was healthy
+				// and hit the hub's streamMaxAge, so re-dial at once; one that
+				// died quickly is a hub that is down or has no such route, and
+				// backs off. Without the distinction every client would go
+				// blind for watchRetry once an hour, on purpose, forever.
+				lived := time.Since(watchOpened)
 				stopWatch()
-				nextWatch = time.Now().Add(watchRetry)
+				if lived < watchRetry {
+					nextWatch = time.Now().Add(watchRetry)
+				}
 				break
 			}
 			// A peer pushed. Clearing the gate makes the cycle below a remote
