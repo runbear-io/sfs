@@ -173,11 +173,17 @@ if o.Size <= localSize && localSize > 0 { continue }   // skip if not grown
 - **`handleStoreList` reports `len(filtered)`** for every `journal/` key,
   computed from the same cache that renders it. Cache key:
   `(device, stored size+mtime, scope hash, perm epoch)`.
-- **The scope tag is the resync trigger.** The store API returns
-  `scopeTag(project, caller, base)` on `list`; the client stores it in sync
-  state, and on a mismatch discards its peer journals and materialization
-  cache and re-pulls that project from zero. Rule changes are rare; a full
-  re-pull is the right price for never reasoning about a moved byte offset.
+- **The scope tag is the resync trigger.** `/api/p/<id>/scope` returns
+  `scopeTag(project, caller, base)`; the client fetches it before every scan,
+  stores it in sync state, and on a mismatch discards its peer journals and
+  re-pulls that project from zero. Rule changes are rare; a full re-pull is the
+  right price for never reasoning about a moved byte offset.
+
+  It was first put on the store LISTING, on the theory that a device should
+  notice its view moved from a call it already makes. Nothing ever consumed it
+  — the client learns its scope from `/scope` regardless — so it is gone. A
+  field nothing reads, carrying a comment calling it load-bearing, is worse
+  than no field.
 - **Old clients are refused, not degraded.** A client that does not advertise
   `X-Bdrive-Perms: 1` gets 403 on any project that has folder rules, with an
   operator-voice "this project uses folder permissions; upgrade bdrive". The
@@ -442,9 +448,10 @@ Three changes to the plan:
       `TestSec_Folder_ListedJournalSizeMatchesTheFilteredBody`.
 - [x] Visible-sha gate on `store/object`, `store/exists` and the blob listing.
       `TestSec_Folder_BlobListingHidesUnreadableContent`.
-- [x] Scope tag on the store listing; the client drops its peer journals and
-      re-pulls on a change. `TestFolderScopeTagTravelsWithTheStoreListing`,
-      `TestScopeChangeReSyncsFromZero`.
+- [x] Scope tag on `/scope`; the client drops its peer journals and re-pulls on
+      a change. `TestFolderScopeTagIsPerAccount`,
+      `TestScopeChangeReSyncsFromZero`,
+      `TestScopeChangeNeverDropsOwnJournal`.
 - [x] `X-Bdrive-Perms` capability, gated on whether THIS caller is filtered
       rather than on whether the project has rules — an org owner sees every op
       either way, and refusing an administrator's device over somebody else's
@@ -523,6 +530,9 @@ the phase's own tests had passed over.
 | 9 | `forgetPeerJournals` could delete this device's own journal | The guard only fails when a stat does |
 | 10 | A filtered member's `bdrive export` lost every large file's content | Same 4 MiB blind spot, one consumer over |
 | 11 | Read-only folders made a member "filtered", refusing their older devices for nothing | Over-refusal looks like working security from the inside |
+| 12 | *(clean)* | — |
+| 13 | The scope tag on the store listing was dead API surface, with a comment calling it load-bearing | Two tests asserted it, so it looked consumed |
+| 14 | *(clean)* | — |
 
 Two lessons worth keeping:
 
