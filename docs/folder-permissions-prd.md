@@ -532,7 +532,14 @@ the phase's own tests had passed over.
 | 11 | Read-only folders made a member "filtered", refusing their older devices for nothing | Over-refusal looks like working security from the inside |
 | 12 | *(clean)* | — |
 | 13 | The scope tag on the store listing was dead API surface, with a comment calling it load-bearing | Two tests asserted it, so it looked consumed |
-| 14 | *(clean)* | — |
+| 14 | *(clean)* — every route in §Surfaces accounted for against the 30 gate call sites | — |
+| 15 | *(clean)* — share revoke/expiry and the frontend's own rendering | — |
+
+One route is deliberately left un-gated on the path, and is worth stating so
+nobody "fixes" it later: `PATCH`/`DELETE /api/shares/{token}` revoke and expiry
+take project write, not folder write. Revoking is destructive, not disclosing,
+and the token is no longer obtainable for a hidden path through any listing —
+so a member who could reach it already had it.
 
 Two lessons worth keeping:
 
