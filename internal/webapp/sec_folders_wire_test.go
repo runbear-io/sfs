@@ -21,7 +21,7 @@ import (
 var modern = map[string]string{"X-Bdrive-Perms": "1"}
 
 // storeList reads a project's store listing as one account.
-func storeList(t *testing.T, h http.Handler, projectID, prefix string, c *http.Cookie) (map[string]int64, string) {
+func storeList(t *testing.T, h http.Handler, projectID, prefix string, c *http.Cookie) map[string]int64 {
 	t.Helper()
 	rec := sec12agDo(t, h, "GET", "/api/p/"+projectID+"/store/list?prefix="+prefix, nil, c, modern)
 	if rec.Code != 200 {
@@ -32,14 +32,13 @@ func storeList(t *testing.T, h http.Handler, projectID, prefix string, c *http.C
 			Key  string `json:"key"`
 			Size int64  `json:"size"`
 		} `json:"objects"`
-		Scope string `json:"scope"`
 	}
 	json.Unmarshal(rec.Body.Bytes(), &out)
 	sizes := map[string]int64{}
 	for _, o := range out.Objects {
 		sizes[o.Key] = o.Size
 	}
-	return sizes, out.Scope
+	return sizes
 }
 
 // TestSec_Folder_TheSyncWireNeverCarriesAHiddenOp.
@@ -51,7 +50,7 @@ func TestSec_Folder_TheSyncWireNeverCarriesAHiddenOp(t *testing.T) {
 	h, _, c, p, sha := hiddenHub(t)
 	key := "journal/webdev.jsonl" // the hub's own device, which the uploads journaled under
 
-	sizes, _ := storeList(t, h, p.ID, "journal/", c["alice"])
+	sizes := storeList(t, h, p.ID, "journal/", c["alice"])
 	if len(sizes) == 0 {
 		t.Fatalf("control: no journals listed at all")
 	}
@@ -99,7 +98,7 @@ func TestSec_Folder_TheSyncWireNeverCarriesAHiddenOp(t *testing.T) {
 func TestSec_Folder_ListedJournalSizeMatchesTheFilteredBody(t *testing.T) {
 	h, _, c, p, _ := hiddenHub(t)
 	for _, who := range []string{"bob", "carol", "alice"} {
-		sizes, _ := storeList(t, h, p.ID, "journal/", c[who])
+		sizes := storeList(t, h, p.ID, "journal/", c[who])
 		for key, size := range sizes {
 			body := sec12agDo(t, h, "GET", "/api/p/"+p.ID+"/store/object?key="+key, nil, c[who], modern)
 			if body.Code != 200 {
@@ -118,49 +117,50 @@ func TestSec_Folder_ListedJournalSizeMatchesTheFilteredBody(t *testing.T) {
 // the sha, a key to try elsewhere.
 func TestSec_Folder_BlobListingHidesUnreadableContent(t *testing.T) {
 	h, _, c, p, sha := hiddenHub(t)
-	bobSizes, _ := storeList(t, h, p.ID, "blobs/", c["bob"])
+	bobSizes := storeList(t, h, p.ID, "blobs/", c["bob"])
 	if _, ok := bobSizes["blobs/"+sha]; ok {
 		t.Errorf("the blob listing named a hidden folder's content to bob")
 	}
-	carolSizes, _ := storeList(t, h, p.ID, "blobs/", c["carol"])
+	carolSizes := storeList(t, h, p.ID, "blobs/", c["carol"])
 	if _, ok := carolSizes["blobs/"+sha]; !ok {
 		t.Errorf("the blob listing hid content carol may read: %v", carolSizes)
 	}
 }
 
-// The listing carries the tag its sizes were computed under, so a device can
-// notice its own view moved and re-pull from zero. Without it a revocation
-// leaves every peer journal shorter than the copy on disk — and pull skips a
-// journal that did not grow, so that peer's ops would never be read again.
-func TestFolderScopeTagTravelsWithTheStoreListing(t *testing.T) {
+// The scope tag is what makes a device notice its own view moved and re-pull
+// from zero. Without it a revocation leaves every peer journal shorter than the
+// copy on disk — and pull skips a journal that did not grow, so that peer's ops
+// would never be read again, silently and forever.
+//
+// It is served by /scope, which loadScope calls before every scan. It is NOT on
+// the store listing: that was the first design, nothing ever consumed it, and a
+// field with a comment calling it load-bearing is worse than no field.
+func TestFolderScopeTagIsPerAccount(t *testing.T) {
 	h, _, c, p, _ := hiddenHub(t)
-	// A tag is carried only for an account something is actually HIDDEN from.
-	// bob is denied vault/, so he gets one; carol is granted it and alice is an
-	// org owner, so for them nothing is filtered and there is nothing to track.
-	_, bobTag := storeList(t, h, p.ID, "journal/", c["bob"])
-	if bobTag == "" {
-		t.Fatal("a filtered account was given no scope tag")
+	bobTag := scopeOf(t, h, p.ID, c["bob"])     // denied vault/
+	carolTag := scopeOf(t, h, p.ID, c["carol"]) // granted vault/
+	if bobTag == "" || carolTag == "" || bobTag == carolTag {
+		t.Fatalf("scope tags are not per-account: bob=%q carol=%q", bobTag, carolTag)
 	}
-	for _, who := range []string{"carol", "alice"} {
-		if _, tag := storeList(t, h, p.ID, "journal/", c[who]); tag != "" {
-			t.Errorf("%s sees an unfiltered project but was given a scope tag: %q", who, tag)
-		}
-	}
-	// Granting bob the folder moves his tag — to empty, since he is no longer
-	// filtered at all. That is still a change, which is what makes his device
-	// drop its peer journals and re-pull the ops it was never sent.
+
+	// Granting bob the folder moves HIS tag and leaves carol's alone — a
+	// project-wide counter would have re-synced every device on the hub for
+	// one person's grant.
 	rule := map[string]any{"prefix": "vault", "default": PermNone,
 		"perms": map[string]string{"carol@x.io": PermRead, "bob@x.io": PermRead}}
 	if rec := doAs(t, h, "PUT", "/api/p/"+p.ID+"/folders", rule, c["alice"]); rec.Code != 200 {
 		t.Fatalf("regrant: %d %s", rec.Code, rec.Body)
 	}
-	_, bobAfter := storeList(t, h, p.ID, "journal/", c["bob"])
-	if bobAfter == bobTag {
+	if after := scopeOf(t, h, p.ID, c["bob"]); after == bobTag {
 		t.Error("bob's scope tag did not move when his own access did")
 	}
-	// ...and bob can now see the folder's ops, which is the point of the move.
-	sizes, _ := storeList(t, h, p.ID, "journal/", c["bob"])
-	for key := range sizes {
+	if after := scopeOf(t, h, p.ID, c["carol"]); after != carolTag {
+		t.Error("carol's tag moved when only bob's access changed — her device would re-sync for nothing")
+	}
+
+	// ...and bob can now see the folder's ops, which is the point of the move
+	// and is what his re-pull is for.
+	for key := range storeList(t, h, p.ID, "journal/", c["bob"]) {
 		body := sec12agDo(t, h, "GET", "/api/p/"+p.ID+"/store/object?key="+key, nil, c["bob"], modern)
 		if !strings.Contains(body.Body.String(), "vault/secret.md") {
 			t.Errorf("after being granted the folder, bob still cannot see its ops: %s", body.Body)
@@ -386,7 +386,7 @@ func TestSec_Folder_ManifestIsGatedLikeTheBlobItStandsFor(t *testing.T) {
 	// is chunked and the correct answer is an empty list — the assertion that
 	// matters is that it does not error, since the path it takes now fetches
 	// manifests. chunks_test.go covers real chunked content.
-	sizes, _ := storeList(t, h, p.ID, "chunks/", c["bob"])
+	sizes := storeList(t, h, p.ID, "chunks/", c["bob"])
 	if len(sizes) != 0 {
 		t.Errorf("chunks were listed for content nothing chunked: %v", sizes)
 	}
@@ -405,10 +405,6 @@ func TestReadOnlyFoldersAloneDoNotMakeAMemberFiltered(t *testing.T) {
 	if rec := doAs(t, h, "GET", "/api/p/"+p.ID+"/store/list?prefix=journal/", nil, c["bob"]); rec.Code != 200 {
 		t.Fatalf("a read-only folder refused an older device: %d %s", rec.Code, rec.Body)
 	}
-	// And the listing carries no scope tag, because there is nothing to track.
-	if _, tag := storeList(t, h, p.ID, "journal/", c["bob"]); tag != "" {
-		t.Errorf("an unfiltered account was given a scope tag: %q", tag)
-	}
 	// Adding a genuinely hidden folder flips both.
 	hidden := map[string]any{"prefix": "vault", "default": PermNone}
 	if rec := doAs(t, h, "PUT", "/api/p/"+p.ID+"/folders", hidden, c["alice"]); rec.Code != 200 {
@@ -416,8 +412,5 @@ func TestReadOnlyFoldersAloneDoNotMakeAMemberFiltered(t *testing.T) {
 	}
 	if rec := doAs(t, h, "GET", "/api/p/"+p.ID+"/store/list?prefix=journal/", nil, c["bob"]); rec.Code != http.StatusForbidden {
 		t.Fatalf("an older device was served a filtered project: %d %s", rec.Code, rec.Body)
-	}
-	if _, tag := storeList(t, h, p.ID, "journal/", c["bob"]); tag == "" {
-		t.Error("a filtered account was given no scope tag")
 	}
 }

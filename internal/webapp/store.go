@@ -267,14 +267,12 @@ func (s *Server) handleStoreList(v *volume, w http.ResponseWriter, r *http.Reque
 		storageErr(w, http.StatusBadGateway, "storage is temporarily unavailable", err)
 		return
 	}
-	// The tag this listing was computed under. A device compares it to the one
-	// it holds and, on a change, discards its peer journals and re-pulls: the
-	// sizes below are only meaningful against the scope that produced them.
-	out := map[string]any{"objects": objs}
-	if tag := s.scopeTagFor(r); tag != "" {
-		out["scope"] = tag
-	}
-	writeStoreJSON(w, r, out)
+	// No scope tag here. It was added on the theory that a device should
+	// notice its view moved from the listing it already fetches — but the
+	// client learns its scope from /api/p/<id>/scope before every scan
+	// (loadScope), so it never read this one. A field nothing consumes, with a
+	// comment calling it load-bearing, is worse than no field.
+	writeStoreJSON(w, r, map[string]any{"objects": objs})
 }
 
 // writeStoreJSON is writeJSON that compresses when the caller accepts it. The

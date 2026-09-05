@@ -175,8 +175,14 @@ func (s *Server) requirePathPerm(w http.ResponseWriter, r *http.Request, p Proje
 // It is empty for a project with no rules — the overwhelming case, and the one
 // where there is nothing to invalidate.
 //
-// Phase 3 uses this as both the client's re-sync trigger and the cache key for
-// a filtered journal. Nothing reads it yet.
+// It is the client's re-sync trigger (handed over by /scope, which loadScope
+// calls before every scan) and the cache key for a filtered journal. Note the
+// two uses want subtly different things: the cache key must separate accounts
+// whose FILTERED BYTES differ, while the re-sync trigger only has to move when
+// they do. Hashing the caller's level per prefix satisfies both, at the cost of
+// one unnecessary re-pull when a folder changes between read and write for you
+// — which changes no journal byte. Rare, cheap, and strictly safe; two tag
+// definitions would not be.
 func scopeTag(p Project, email, base string) string {
 	if len(p.Folders) == 0 {
 		return ""
@@ -338,11 +344,6 @@ func (s *Server) visibilityFor(r *http.Request, p Project) pathFilter {
 		tag: scopeTag(p, email, base), on: true,
 	}
 }
-
-// scopeTagFor is the tag alone, for the store listing to hand a device so it
-// can notice its own view moved. Empty when nothing is filtered, which is what
-// tells a client there is nothing to track.
-func (s *Server) scopeTagFor(r *http.Request) string { return s.visibility(r).tag }
 
 // canRead reports whether this account may see a path at all.
 func (f pathFilter) canRead(path string) bool {
