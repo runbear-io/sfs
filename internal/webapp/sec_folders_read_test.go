@@ -281,3 +281,120 @@ func TestSec_Folder_OrgShareAuditHidesLinksIntoAHiddenFolder(t *testing.T) {
 		t.Fatalf("carol, who is granted the folder, lost her link: %s", body)
 	}
 }
+
+// TestSec_Folder_ResolveDoesNotLeakMovesInsideAHiddenFolder.
+//
+// /resolve is the "where did this file go?" door and it does NOT go through
+// lookup, so it needed the filter of its own. A LIVE path inside a hidden
+// folder 404s here by accident — the handler only answers about paths that
+// moved — which is exactly why the Phase 2 sweep passed over it. A MOVED one
+// answered with the new name.
+func TestSec_Folder_ResolveDoesNotLeakMovesInsideAHiddenFolder(t *testing.T) {
+	h, _, c, p, _ := hiddenHub(t)
+	base := "/api/p/" + p.ID + "/"
+
+	// Alice moves a file within the hidden folder: put(new) + delete(old).
+	if rec := doAs(t, h, "PUT", base+"upload/content?path=vault/renamed.md",
+		[]byte("# the secret\n"), c["alice"]); rec.Code != 200 {
+		t.Fatalf("seed the move target: %d %s", rec.Code, rec.Body)
+	}
+	if rec := doAs(t, h, "POST", base+"remove",
+		map[string]any{"path": "vault/secret.md"}, c["alice"]); rec.Code != 200 {
+		t.Fatalf("remove the move source: %d %s", rec.Code, rec.Body)
+	}
+
+	// Control: the move is resolvable for someone who may read the folder.
+	got := doAs(t, h, "GET", base+"resolve?path=vault/secret.md", nil, c["carol"])
+	if got.Code != 200 || !strings.Contains(got.Body.String(), "vault/renamed.md") {
+		t.Fatalf("control: carol cannot resolve a move she may see: %d %s", got.Code, got.Body)
+	}
+
+	got = doAs(t, h, "GET", base+"resolve?path=vault/secret.md", nil, c["bob"])
+	if got.Code != http.StatusNotFound {
+		t.Fatalf("resolve answered a denied member: %d %s", got.Code, got.Body)
+	}
+	if strings.Contains(got.Body.String(), "renamed") {
+		t.Fatalf("resolve leaked a file name from inside a hidden folder: %s", got.Body)
+	}
+}
+
+// TestSec_Folder_FolderHintDoesNotEnumerateHiddenFilenames.
+//
+// handleShareCreate answers "share links are per-file; X is a folder — try a
+// file inside it, e.g. Y" and Y came from the UNFILTERED snapshot.
+//
+// The sharp version is the hidden folder itself: a rule on "vault/" does not
+// match the bare path "vault", and correctly so — a FILE named "vault" is not
+// inside the folder — so the write gate lets the request through and the hint
+// names a file from inside. One POST per folder, and the names come out.
+func TestSec_Folder_FolderHintDoesNotEnumerateHiddenFilenames(t *testing.T) {
+	h, _, c, p, _ := hiddenHub(t)
+	rec := doAs(t, h, "POST", "/api/p/"+p.ID+"/shares",
+		map[string]any{"path": "vault"}, c["bob"])
+	if strings.Contains(rec.Body.String(), "secret.md") {
+		t.Fatalf("the folder hint enumerated a hidden filename: %d %s", rec.Code, rec.Body)
+	}
+	// The same hint still works for a folder the caller can actually read —
+	// otherwise this "fix" is just breaking the message.
+	rec = doAs(t, h, "POST", "/api/p/"+p.ID+"/shares",
+		map[string]any{"path": "notes"}, c["bob"])
+	if !strings.Contains(rec.Body.String(), "open.md") {
+		t.Fatalf("the folder hint stopped working for a visible folder: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// A file moved OUT of a hidden folder carries its hidden history with it, and
+// restore resolves a version through that move chain. Restoring one would
+// paste content the caller was never allowed to see onto a path they can.
+//
+// Defence in depth, not a live hole: it needs the version's sha, and history,
+// /blob and /render?sha= all filter it out — so there is no way to learn one,
+// only to already know it. Pinned anyway, because "unreachable today" is a
+// property of the other three doors, not of this one.
+func TestSec_Folder_RestoreRefusesAVersionFromItsHiddenPast(t *testing.T) {
+	h, _, c, p, v1SHA := hiddenHub(t)
+	base := "/api/p/" + p.ID + "/"
+
+	// A real move needs the SAME blob at both ends — put(new, B) then
+	// delete(old whose content was B) is what buildMoveIndex recognises. An
+	// upload of different content plus a remove is two unrelated ops, and a
+	// test built that way passes whatever this handler does.
+	//
+	// So: a second version inside the hidden folder, then that version moved
+	// out. v1SHA is now a version that exists ONLY in the hidden past.
+	if rec := doAs(t, h, "PUT", base+"upload/content?path=vault/secret.md",
+		[]byte("# v2\n"), c["alice"]); rec.Code != 200 {
+		t.Fatalf("seed v2: %d %s", rec.Code, rec.Body)
+	}
+	if rec := doAs(t, h, "PUT", base+"upload/content?path=notes/moved.md",
+		[]byte("# v2\n"), c["alice"]); rec.Code != 200 {
+		t.Fatalf("seed the move target: %d %s", rec.Code, rec.Body)
+	}
+	if rec := doAs(t, h, "POST", base+"remove",
+		map[string]any{"path": "vault/secret.md"}, c["alice"]); rec.Code != 200 {
+		t.Fatalf("remove the source: %d %s", rec.Code, rec.Body)
+	}
+	// Control: the move really is one, so restore CAN reach the hidden past.
+	// Carol may read the folder, so for her the version resolves and restores.
+	if rec := doAs(t, h, "POST", base+"restore",
+		map[string]any{"path": "notes/moved.md", "sha": v1SHA}, c["carol"]); rec.Code != 200 {
+		t.Fatalf("control: the move chain does not reach the hidden past, so this test "+
+			"would pass whatever the handler does: %d %s", rec.Code, rec.Body)
+	}
+
+	// bob may write notes/moved.md, and hiddenSHA is a version that only ever
+	// existed at vault/secret.md.
+	// Put it back to v2 so bob's attempt is the one that matters.
+	if rec := doAs(t, h, "PUT", base+"upload/content?path=notes/moved.md",
+		[]byte("# v2\n"), c["alice"]); rec.Code != 200 {
+		t.Fatalf("reset: %d %s", rec.Code, rec.Body)
+	}
+	rec := doAs(t, h, "POST", base+"restore",
+		map[string]any{"path": "notes/moved.md", "sha": v1SHA}, c["bob"])
+	if rec.Code == 200 {
+		t.Fatalf("bob restored a version that only ever existed inside a hidden folder: %s", rec.Body)
+	}
+	if body := doAs(t, h, "GET", base+"file?path=notes/moved.md", nil, c["bob"]).Body.String(); strings.Contains(body, "the secret") {
+		t.Fatalf("the hidden content landed on a visible path: %s", body)
+	}
+}

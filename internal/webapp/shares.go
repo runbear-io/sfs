@@ -246,11 +246,11 @@ func (db *ShareDB) List(project string) []Share {
 // is a prefix of "notes-archive/x.md", and that mistake turns a genuine
 // "not synced" into a wrong "that's a folder". Smallest, not whatever map
 // iteration hands back, so identical calls suggest the same file.
-func firstFileUnder(files map[string]FileInfo, p string) string {
+func firstFileUnder(files map[string]FileInfo, p string, vis pathFilter) string {
 	prefix := p + "/"
 	best := ""
 	for k := range files {
-		if strings.HasPrefix(k, prefix) && (best == "" || k < best) {
+		if strings.HasPrefix(k, prefix) && (best == "" || k < best) && vis.canRead(k) {
 			best = k
 		}
 	}
@@ -295,7 +295,14 @@ func (s *Server) handleShareCreate(v *volume, w http.ResponseWriter, r *http.Req
 		// snap.files maps FILES, so a fully synced folder misses here just like
 		// a path that does not exist. Tell those apart before answering, or the
 		// user goes off to fix a sync fault that isn't there.
-		if inside := firstFileUnder(snap.files, p); inside != "" {
+		//
+		// The hint NAMES a file, so it is filtered. Two ways it leaked: a
+		// visible folder containing a hidden subfolder, and — the sharper one
+		// — the hidden folder itself, because a rule on "vault/" does not
+		// match the bare path "vault" (correctly: a FILE named "vault" is not
+		// inside it), so writablePath above lets the request through and this
+		// line used to answer "try a file inside it, e.g. vault/secret.md".
+		if inside := firstFileUnder(snap.files, p, s.visibility(r)); inside != "" {
 			http.Error(w, fmt.Sprintf("share links are per-file; %s is a folder - try a file inside it, e.g. %s", p, inside), http.StatusBadRequest)
 			return
 		}
