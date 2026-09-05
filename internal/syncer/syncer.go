@@ -202,7 +202,13 @@ func (s *Session) forgetPeerJournals() {
 	own := s.Store.JournalPath(s.Device.ID)
 	for _, e := range ents {
 		p := filepath.Join(dir, e.Name())
-		if sameJournalFile(p, own) {
+		// Both guards, in the same order pull applies them: the NAME first,
+		// because sameJournalFile answers false when either stat fails — and
+		// the file this must never delete is the one object this device is the
+		// sole author of. A peer journal deleted by mistake is re-pulled; this
+		// device's own ops are not anywhere else.
+		dev := strings.TrimSuffix(e.Name(), ".jsonl")
+		if strings.EqualFold(dev, s.Device.ID) || sameJournalFile(p, own) {
 			continue
 		}
 		if err := os.Remove(p); err != nil {

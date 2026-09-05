@@ -556,3 +556,31 @@ func TestHiddenOpsDoNotBreakConvergenceOnVisiblePaths(t *testing.T) {
 		t.Errorf("A's hidden folder was disturbed: %q", got)
 	}
 }
+
+// A scope change drops this device's cached copies of its PEERS' journals. It
+// must never drop its own: a peer journal deleted by mistake is re-pulled on
+// the next cycle, and this device's own ops are not anywhere else.
+func TestScopeChangeNeverDropsOwnJournal(t *testing.T) {
+	be := sharedRemote(t)
+	b := newDevice(t, "devb", hidingRemote{Backend: be, tag: "t1"})
+	write(t, b.Folder, "notes/mine.md", "b's work")
+	cycle(t, b)
+
+	before, err := b.Store.DeviceOps(b.Device.ID)
+	if err != nil || len(before) == 0 {
+		t.Fatalf("control: B journaled nothing: %v %v", before, err)
+	}
+	b.Backend = hidingRemote{Backend: be, hide: []string{"vault/"}, tag: "t2"}
+	cycle(t, b)
+
+	after, err := b.Store.DeviceOps(b.Device.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) < len(before) {
+		t.Fatalf("a scope change dropped this device's own ops: %d → %d", len(before), len(after))
+	}
+	if got := read(t, b.Folder, "notes/mine.md"); got != "b's work" {
+		t.Errorf("B's own file did not survive: %q", got)
+	}
+}
