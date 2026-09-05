@@ -463,3 +463,96 @@ func TestLosingAccessRemovesTheFolderFromTheDevice(t *testing.T) {
 		}
 	}
 }
+
+// Moving a file ACROSS a hidden boundary, in both directions. Both outcomes
+// fall out of last-writer-wins per path rather than out of any move handling,
+// which is exactly why they need pinning: the asymmetry looks like a bug until
+// you follow the ops.
+func TestMoveAcrossAHiddenBoundary(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "deva", be)
+	b := newDevice(t, "devb", hidingRemote{Backend: be, hide: []string{"vault/"}, tag: "t1"})
+
+	write(t, a.Folder, "vault/secret.md", "the secret")
+	write(t, a.Folder, "notes/open.md", "public")
+	cycle(t, a)
+	cycle(t, b)
+	if _, err := os.Stat(filepath.Join(b.Folder, "vault", "secret.md")); err == nil {
+		t.Fatal("control: the folder was not hidden")
+	}
+
+	// OUT of the hidden folder: the new op names a path B may read, so B gets
+	// the content — including the blob it was refused a moment ago, because
+	// visibility is a property of the PATHS referencing content, not of the
+	// bytes.
+	if err := os.Rename(filepath.Join(a.Folder, "vault", "secret.md"),
+		filepath.Join(a.Folder, "notes", "secret.md")); err != nil {
+		t.Fatal(err)
+	}
+	cycle(t, a)
+	cycle(t, b)
+	if got := read(t, b.Folder, "notes/secret.md"); got != "the secret" {
+		t.Errorf("content moved out of a hidden folder did not reach B: %q", got)
+	}
+
+	// INTO the hidden folder: B sees the delete at the visible path and not
+	// the put at the hidden one, so the file leaves B's disk.
+	if err := os.Rename(filepath.Join(a.Folder, "notes", "secret.md"),
+		filepath.Join(a.Folder, "vault", "secret.md")); err != nil {
+		t.Fatal(err)
+	}
+	cycle(t, a)
+	cycle(t, b)
+	if _, err := os.Stat(filepath.Join(b.Folder, "notes", "secret.md")); err == nil {
+		t.Error("content moved into a hidden folder stayed on B's disk")
+	}
+	if _, err := os.Stat(filepath.Join(b.Folder, "vault", "secret.md")); err == nil {
+		t.Error("B materialized the hidden destination")
+	}
+	// A still has it, at the new address.
+	if got := read(t, a.Folder, "vault/secret.md"); got != "the secret" {
+		t.Errorf("A lost the file it moved: %q", got)
+	}
+}
+
+// A device that cannot see some ops never sees their lamport values, so its
+// clock lags behind the project's. That is harmless — conflict resolution is
+// last-writer-wins PER PATH, and the ops it cannot see touch no path it can —
+// but "harmless" is an argument, and arguments about ordering are exactly what
+// this repo pins with a test.
+func TestHiddenOpsDoNotBreakConvergenceOnVisiblePaths(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "deva", be)
+	b := newDevice(t, "devb", hidingRemote{Backend: be, hide: []string{"vault/"}, tag: "t1"})
+
+	// A runs up its lamport clock entirely inside the hidden folder.
+	for i := 0; i < 10; i++ {
+		write(t, a.Folder, "vault/secret.md", strings.Repeat("x", i+1))
+		cycle(t, a)
+	}
+	write(t, a.Folder, "shared.md", "from A")
+	cycle(t, a)
+	cycle(t, b)
+	if got := read(t, b.Folder, "shared.md"); got != "from A" {
+		t.Fatalf("B did not converge on the visible path: %q", got)
+	}
+
+	// B, whose clock never saw any of those ten ops, writes the same path
+	// last. Last-writer-wins per path must still make B's version the winner
+	// on both devices.
+	write(t, b.Folder, "shared.md", "from B")
+	cycle(t, b)
+	cycle(t, a)
+	cycle(t, b)
+
+	if got := read(t, a.Folder, "shared.md"); got != "from B" {
+		t.Errorf("A did not converge on B's later write: %q — a lagging clock changed the winner", got)
+	}
+	if got := read(t, b.Folder, "shared.md"); got != "from B" {
+		t.Errorf("B did not keep its own later write: %q", got)
+	}
+	// And the hidden folder is untouched on A.
+	if got := read(t, a.Folder, "vault/secret.md"); got != strings.Repeat("x", 10) {
+		t.Errorf("A's hidden folder was disturbed: %q", got)
+	}
+}
