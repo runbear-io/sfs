@@ -11,6 +11,7 @@ import { atLeast } from "../api/types";
 import { getJSON, postJSON } from "../api/http";
 import type { Project, ServerConfig, UndoPlan } from "../api/types";
 import { useHeat, useTree } from "../hooks/useBrowse";
+import { useProjectEvents } from "../hooks/useProjectEvents";
 import { fetchBlobText, fileURLFor } from "../hooks/useBlob";
 import { useShares } from "../hooks/useHub";
 import { urlForPath, urlForView, type Route } from "../router";
@@ -61,6 +62,10 @@ export default function Browser(props: {
   const qc = useQueryClient();
 
   const { tree, flatFiles, dirIndex, loaded } = useTree(apiBase, !hub || !!project);
+  // Live updates on top of the polls above: a teammate's change invalidates
+  // what it touched as it happens. Same gate as the tree — in hub mode there
+  // is nothing to stream until a project is chosen.
+  useProjectEvents(apiBase, !hub || !!project);
   const heatMap = useHeat(apiBase, hub && !!project && !!config.reads?.enabled);
   // Dashboard data: the per-device breakdown, plus a fresh heat fetch when
   // a dashboard surface opens (the ambient heat cache may be a minute old).

@@ -146,8 +146,37 @@ classDiagram
         <<interface>>
         +SignPut(ctx, key, size, ttl)
     }
+    class Watcher {
+        <<interface>>
+        +Watch(ctx) signal channel
+    }
+    note for Watcher "internal/remote — optional, in the PutSigner mold: only httpBackend implements it (GET /api/p/id/events). The channel carries NO payload — the daemon's only question is &quot;talk to the remote now?&quot;, and the answer to a burst is one cycle, so the impl coalesces on a buffer of one and can never make the hub's writer block. A closed channel means the path is gone (hub down, proxy timeout, an older hub with no route) and the caller falls back to its interval. Accelerator only: nothing may depend on a signal arriving, because for every object-store backend none ever will. Its stream gets a client WITHOUT httpBackend's 5-minute whole-request timeout (doWith), which would otherwise sever a healthy idle stream on the dot"
     note for Backend "internal/remote — impls: localBackend (file://), s3Backend, gcsBackend, httpBackend (https:// hub), Prefixed wrapper"
     note for Backend "Key handling is fallible now: Prefixed.key and localBackend.path RETURN AN ERROR (safeKey / store.UnderRoot) rather than concatenating, so a `..` key cannot walk out of a project's prefix or out of a file:// root — and Prefixed.List re-checks the STRIPPED key on the way out, since the prefix it removes is the only thing that was ever validated. The httpBackend client is origin-bound: the device token is keyed to settings.Server, SameOrigin is the one rule, refuseOffOriginRedirect is its CheckRedirect, a presign target must be https on a trusted origin (directTargetOK), and List drops keys failing journal.SafePath and clamps a negative Size. gcs SignPut now signs Content-Length too. Object carries Modified (S3 LastModified, GCS Updated, file mtime; zero where the backend has none) — RemoteSource.verify reads it to decide when a blob can no longer be rewritten by a presigned URL"
+
+    class eventHub {
+        <<internal/webapp, events.go>>
+        -subs per project id
+        -total int
+        +subscribe(project) sub, ok
+        +unsubscribe(project, sub)
+        +publish(project, changeEvent)
+    }
+    class subscriber {
+        -ch chan of frames
+        -lost atomic.Bool
+    }
+    class changeEvent {
+        +Type change or resync
+        +Paths list
+        +More bool
+        +Puts int
+        +Deletes int
+        +Source sync or browser
+        +Device string
+    }
+    note for eventHub "GET {prefix}events, proj(PermRead) — reading the stream names paths, so it sits behind the same permission the tree does, and proj() already walls it by org membership. publish() is called from the FIVE write handlers beside captureChange, never inside it: that one is the PostHog path, whose contract is that &quot;nothing here carries a path or a file name&quot;, and whose signature is counts-only. publish sits on the sync push path, so it never blocks and never errors — it copies the subscriber set under the lock and sends outside it, and a full buffer marks the subscriber lost rather than waiting. Bounded (subBuffer 32, 256/project, 4096/hub) in the ratelimit.go mold"
+    note for subscriber "A reader that falls behind is not waited for: the next frame it does receive is preceded by a single {type:resync}, because a client that missed one change and a client that missed fifty both need the same thing — to refetch. The frontend keeps its 15s tree poll underneath all of this, so a dropped frame self-heals regardless"
 
     class wireCodec {
         <<internal/remote, compress.go>>
@@ -479,6 +508,9 @@ classDiagram
     DirectUploader <|.. RemoteSource
     RemoteSource o-- Backend : Prefixed(Root, projectID)
     Backend <|-- PutSigner : optional capability
+    Backend <|-- Watcher : optional capability
+    Server *-- eventHub : live change fan-out
+    eventHub *-- subscriber
 
     AuthProvider <|.. BuiltinAuth
     AccountApprover <|.. BuiltinAuth

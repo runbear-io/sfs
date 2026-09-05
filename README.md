@@ -697,6 +697,11 @@ working folder  ←materialize/scan→  local volume store  ←push/pull→  obj
   size+mtime check) and exchanges with the remote every ~10s — or
   immediately after local edits. Tunable with --scan-interval and
   --remote-interval on the daemon (defaults 3s / 10s).
+- Against a hub, the daemon also holds a **live change stream** open, so a
+  teammate's push arrives in about a second instead of waiting out the
+  remote interval. It is an accelerator only: a hub that is down, too old to
+  serve the stream, or behind a proxy that buffers it simply falls back to
+  the intervals above, and object-store remotes never had it to begin with.
 
 ### What beardrive does not sync
 

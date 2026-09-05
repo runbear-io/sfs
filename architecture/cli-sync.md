@@ -184,6 +184,7 @@ classDiagram
         +Start / Stop / Running
     }
     note for daemon "per-mount detached loop; re-reads .bdrive/config.json each tick, exits without deletes if it vanishes"
+    note for daemon "The tick now selects on a THIRD arm: remote.Watcher's channel, when the backend is a hub that implements it. A peer's push clears lastRemote so the next cycle is a remote one, turning ~10s of latency into ~1s. The stream is torn down wherever the backend is dropped (token change, offline) since its connection carries the old credential to the old host, and a failed or ended dial backs off watchRetry (1m) rather than retrying per tick — an older hub 404s here forever and must not become a log line every few seconds. Strictly an accelerator: the scan and remote intervals still run underneath, so a hub with no stream syncs exactly as it always did"
 
     Session --> Store : volume state
     Session --> Backend : pull and push

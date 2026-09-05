@@ -1,0 +1,68 @@
+import { useEffect } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+
+/* Live change notification.
+   The hub streams "these paths changed" over server-sent events, so a
+   teammate's edit lands in about a second instead of on the tree's 15s poll —
+   and an OPEN file updates at all, which it previously never did: file
+   content has no refetch interval (see useBlob), so a body fetched once
+   stayed on screen until the reader navigated away.
+
+   The poll stays exactly where it is. This is an accelerator on top of it:
+   EventSource reconnects on its own, but a proxy that buffers the stream, or
+   a hub too old to serve the route, simply leaves the poll doing what it
+   always did. Nothing here is load-bearing. */
+
+type ChangeEvent = {
+  type: "change" | "resync";
+  paths?: string[];
+  more?: boolean;
+};
+
+export function useProjectEvents(apiBase: string, enabled = true) {
+  const qc = useQueryClient();
+  useEffect(() => {
+    if (!enabled || typeof EventSource === "undefined") return;
+    const es = new EventSource(apiBase + "events");
+
+    // The tree gains and loses entries on any change; heat and history are
+    // derived from the same journal, so they go stale at the same moment.
+    const invalidateProject = () => {
+      qc.invalidateQueries({ queryKey: ["tree", apiBase] });
+      qc.invalidateQueries({ queryKey: ["history", apiBase] });
+      qc.invalidateQueries({ queryKey: ["heat", apiBase] });
+    };
+
+    es.onmessage = (e) => {
+      let ev: ChangeEvent;
+      try {
+        ev = JSON.parse(e.data);
+      } catch {
+        return; // a frame we can't read is not a reason to tear the stream down
+      }
+      invalidateProject();
+      // "resync" means frames were dropped and what was missed is unknowable,
+      // and "more" means the frame was truncated. Either way the only honest
+      // move is to drop every cached body rather than guess at a path list.
+      if (ev.type === "resync" || ev.more || !ev.paths?.length) {
+        qc.invalidateQueries({ queryKey: ["render", apiBase] });
+        qc.invalidateQueries({ queryKey: ["text"] });
+        return;
+      }
+      for (const p of ev.paths) {
+        qc.invalidateQueries({ queryKey: ["render", apiBase, p] });
+      }
+      // Blob queries are keyed by content hash when the caller pinned one
+      // (those can never go stale) and by path otherwise — the live ones are
+      // exactly what a peer's write invalidates.
+      qc.invalidateQueries({ queryKey: ["text"] });
+    };
+
+    // Errors are expected and self-healing: EventSource retries on its own,
+    // and the poll covers the gap. Logging here would mean a line per hub
+    // restart, per sleeping laptop, forever.
+    es.onerror = () => {};
+
+    return () => es.close();
+  }, [apiBase, enabled, qc]);
+}
