@@ -301,9 +301,19 @@ func (s *sqlMetaStore) migrate() error {
 	// restricted" — every confidential subtree re-opened to the whole
 	// organization, with no error anywhere. Same failure mode as a missing
 	// guarded COLUMN, one level up, so it fails closed the same way.
-	if err := s.requireTables(map[string]string{
-		"project_folders": "every restricted folder would re-open to the whole organization",
-	}, 2); err != nil {
+	//
+	// The probe is spelled out here, with the table name as a LITERAL, rather
+	// than built inside the helper: TestSec_DB_QueryRewriteOnlyEverSeesStaticSQL
+	// sweeps this file for SQL text assembled from runtime values, and it is
+	// right to — a table name concatenated into a query is the shape that
+	// desynchronizes q()'s ?→$N rewrite, even in a statement that happens to
+	// carry no placeholders today.
+	folders, err := s.db.Query(`SELECT * FROM project_folders LIMIT 0`)
+	if err == nil {
+		folders.Close()
+	}
+	if err := s.guardedTable(err, "project_folders",
+		"every restricted folder would re-open to the whole organization", 2); err != nil {
 		return err
 	}
 	for _, st := range stmts {
@@ -367,31 +377,23 @@ func (s *sqlMetaStore) readSchemaVersion() (int, error) {
 	return n, nil
 }
 
-// requireTables refuses to run when a table this store has already recorded a
-// version for has gone missing and its absence would widen access. introduced
-// is the schema version that first created them: a store older than that has
-// simply never had the table, which is the ordinary upgrade path.
+// guardedTable turns "this table did not answer a probe" into a refusal, when
+// the store has already recorded the schema version that created it and the
+// table's absence would widen access. introduced is that version: a store
+// older than it has simply never had the table, which is the ordinary upgrade
+// path and the one case where creating it empty is correct.
 //
-// Existence is probed the same way addColumns probes columns — an empty result
-// set — so there is no engine-specific catalog query and it is safe on every
-// start.
-func (s *sqlMetaStore) requireTables(guarded map[string]string, introduced int) error {
-	if s.ver < introduced {
-		return nil // never had them; the CREATEs below are a first migration
+// It takes the probe's ERROR rather than running the probe, so the query stays
+// a literal at the call site — see the comment in migrate.
+func (s *sqlMetaStore) guardedTable(probe error, table, why string, introduced int) error {
+	if probe == nil || s.ver < introduced {
+		return nil
 	}
-	for table, why := range guarded {
-		rows, err := s.db.Query(`SELECT * FROM ` + table + ` LIMIT 0`)
-		if err == nil {
-			rows.Close()
-			continue
-		}
-		return fmt.Errorf("this database records schema version %d but table %s is missing: "+
-			"that is a rollback, an older dump, or a half-applied migration, and recreating it "+
-			"empty would mean %s. Restore a dump taken at schema version %d or later, or "+
-			"recreate the table by hand with the rows it should hold",
-			s.ver, table, why, introduced)
-	}
-	return nil
+	return fmt.Errorf("this database records schema version %d but table %s is missing: "+
+		"that is a rollback, an older dump, or a half-applied migration, and recreating it "+
+		"empty would mean %s. Restore a dump taken at schema version %d or later, or "+
+		"recreate the table by hand with the rows it should hold",
+		s.ver, table, why, introduced)
 }
 
 // addColumns adds any of cols that the table doesn't already have. The live

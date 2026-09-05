@@ -423,6 +423,19 @@ its first admin, and **org owners are implicitly admin on every project in
 their org**, so nobody can lock them out. Grants are org members only, and
 a project always keeps at least one admin.
 
+A **folder rule** (Project settings → Folders) gives one folder inside a
+project different access from the rest of it — "everyone can write this
+project, except `designs/`, which most people may only read". A rule names a
+folder prefix, the level everyone else gets there, and optional per-person
+exceptions; the longest matching rule wins, rules never merge, and org owners
+are unaffected because they are admin everywhere. Editing a read-only folder
+locally is not lost and does not wedge sync: the project's version is put back
+on the next cycle and your version is kept beside it as `name (local, not
+synced).ext`, which `bdrive sync` names. **A folder rule controls who can
+change a folder, not who can see it** — every project member still syncs every
+byte. Hiding contents is being built; until then, put secrets in their own
+project.
+
 Two things follow on the **device** side, because a refusal is not the same
 as being offline (see `bdrive status`):
 

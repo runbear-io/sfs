@@ -114,6 +114,20 @@ func (p Project) ruleFor(filePath string) (FolderRule, bool) {
 // already resolved to an email and a base level, so it can be tested and
 // reused (scopeTag) without an http.Request.
 func folderLevel(p Project, email, filePath, base string) string {
+	// The project gate is the OUTER wall and a folder rule may never breach
+	// it: someone who cannot see the project cannot see any folder in it. A
+	// rule may otherwise raise as well as lower — a read-only project with one
+	// writable drop-box folder is a real shape, and only a project admin can
+	// create it, who could raise the project level outright anyway.
+	//
+	// Today proj() answers on the project level before any handler runs, so
+	// this arm is unreachable over HTTP. It is here because Phase 2 and 3 add
+	// callers that are NOT behind that gate (the per-reader fold filter, the
+	// blob visibility set), and a resolver that is only safe because of where
+	// it happens to be called from is one refactor away from a hole.
+	if base == PermNone || base == "" {
+		return PermNone
+	}
 	rule, ok := p.ruleFor(filePath)
 	if !ok {
 		return base

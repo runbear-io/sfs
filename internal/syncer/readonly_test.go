@@ -197,3 +197,43 @@ func TestNoScopeSupportClearsTheRestriction(t *testing.T) {
 		t.Fatalf("the edit did not reach A: %q", got)
 	}
 }
+
+// The remote may be a hostile hub — the premise pull already applies to its
+// journal listing. This list decides what the device will never journal again,
+// so an empty prefix would match every path and stop the device syncing its
+// own work at all, silently. One bad prefix must not disarm the good ones
+// either.
+func TestHostileScopeAnswerIsNotObeyed(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "deva", be)
+	b := newDevice(t, "devb", scopedRemote{Backend: be, readOnly: []string{
+		"",         // matches everything
+		"/",        // ditto
+		"no-slash", // would match "no-slashed.md" too
+		"../etc/",  // not a path this mount can hold
+		"locked/",  // the only real one
+	}})
+
+	write(t, a.Folder, "locked/policy.md", "v1")
+	cycle(t, a)
+	cycle(t, b)
+
+	// The good prefix still applies...
+	write(t, b.Folder, "locked/policy.md", "hacked")
+	// ...and everything else still syncs, which the empty prefix would have
+	// stopped without a single error anywhere.
+	write(t, b.Folder, "notes/mine.md", "b was here")
+	write(t, b.Folder, "no-slashed.md", "not under a rule")
+	cycle(t, b)
+
+	if got := read(t, b.Folder, "locked/policy.md"); got != "v1" {
+		t.Errorf("the real rule stopped applying: %q", got)
+	}
+	cycle(t, a)
+	if got := read(t, a.Folder, "notes/mine.md"); got != "b was here" {
+		t.Errorf("an empty prefix silently stopped B syncing: %q", got)
+	}
+	if got := read(t, a.Folder, "no-slashed.md"); got != "not under a rule" {
+		t.Errorf("a non-slash-terminated prefix swallowed a sibling path: %q", got)
+	}
+}

@@ -1,6 +1,6 @@
 ---
 title: Project permissions
-description: Four levels per project — none, read, write, admin — plus invite-only projects and what a read-only or revoked device actually does.
+description: Four levels per project — none, read, write, admin — plus per-folder rules, invite-only projects, and what a read-only or revoked device actually does.
 ---
 
 Organizations decide who is in your workspace. **Project permissions** decide
@@ -50,6 +50,52 @@ Set the **default** to `No access` and the project becomes invite-only: only
 the people listed as exceptions (and workspace owners) can see it. Everyone
 else is treated exactly like a non-member — the project does not appear in
 their project list at all.
+
+## Folder rules
+
+Project permissions apply to the whole project. A **folder rule** gives one
+folder inside it different access — "everyone on the team can write this
+project, except `designs/`, which most people may only read".
+
+Edit them in **Project settings → Folders**. Only project admins (and workspace
+owners) can add or change one.
+
+- A rule names a **folder prefix** and the level everyone else gets there, plus
+  optional per-person exceptions — the same shape as project permissions, one
+  level down.
+- **The longest matching rule wins.** A rule on `a/b/` governs `a/b/` even if
+  another rule covers `a/`. Rules do not merge: someone granted on `a/` but
+  denied on `a/b/` loses `a/b/`.
+- **Workspace owners are never affected.** They are admin everywhere, so a
+  folder rule can never lock out the people responsible for the workspace.
+- A rule may not grant `admin` — that is a project-wide capability (rename,
+  delete, edit permissions), so it has no meaning over one folder.
+
+### What a read-only folder does on your machine
+
+It syncs down like any other folder, so it is always current. What changes is
+what happens when you edit it:
+
+- Your device never sends the change. Nobody else sees it, and your sync does
+  **not** get stuck.
+- On the next sync the project's version is put back, and your version is kept
+  beside the file as `name (local, not synced).ext`. Nothing you wrote is
+  thrown away.
+- Deleting a read-only file locally has the same shape: the file comes back on
+  the next sync.
+- `bdrive sync` names every file it put back, so this never happens silently.
+
+The same applies in the web UI: uploading to, removing from, restoring into, or
+creating a share link for a read-only folder is refused.
+
+### What folder rules do not do yet
+
+**A folder rule controls who can change a folder, not who can see it.** Every
+member of the project still syncs and reads every file, including in folders
+they cannot write. Hiding a folder's contents from people who are not on its
+list is being built; until it ships, do not use a folder rule to separate
+secrets from teammates — put those in their own project, where `No access` on
+the project default already hides them completely.
 
 ## What a device does when it is refused
 

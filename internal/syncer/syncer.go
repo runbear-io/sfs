@@ -155,8 +155,31 @@ func (s *Session) loadScope(ctx context.Context, st *store.SyncState) {
 	case err != nil:
 		return // unreachable: keep the last answer
 	default:
-		s.readOnly, st.ReadOnly, st.ScopeTag = got.ReadOnly, got.ReadOnly, got.Tag
+		ro := sanePrefixes(got.ReadOnly)
+		s.readOnly, st.ReadOnly, st.ScopeTag = ro, ro, got.Tag
 	}
+}
+
+// sanePrefixes drops read-only prefixes this device will not act on. The
+// remote may be a hostile hub — the same premise pull applies to its journal
+// listing — and this list decides what this device will never journal again:
+// an empty prefix matches every path, so one would stop the device syncing its
+// own work at all, silently and with no error anywhere. A prefix that is not
+// slash-terminated is the subtler version, matching "logs.md" for a rule about
+// "log/".
+//
+// Refusing the entry rather than the whole answer is deliberate: a hub that
+// sends one bad prefix among good ones should still restrict the good ones.
+func sanePrefixes(in []string) []string {
+	var out []string
+	for _, p := range in {
+		if p == "" || p == "/" || !strings.HasSuffix(p, "/") || !journal.SafePath(strings.TrimSuffix(p, "/")) {
+			log.Printf("beardrive: ignoring an unusable read-only folder %q from the hub", p)
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 func (s *Session) mountID() string {

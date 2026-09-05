@@ -327,3 +327,59 @@ func TestProjectListDoesNotLeakFolderRules(t *testing.T) {
 		}
 	}
 }
+
+// A folder rule is resolved against the caller's PROJECT level, so it narrows
+// or widens a project they can already reach — it never grants entry to one
+// they cannot. proj() answers first, and it answers on the project level.
+//
+// Worth pinning because it is the surprising half: an admin who sets a project
+// to invite-only and then grants someone a folder inside it has granted them
+// nothing, and should be told rather than left wondering.
+func TestFolderGrantDoesNotOpenAProjectYouCannotSee(t *testing.T) {
+	h, srv, cookies, p := permHub(t)
+	if rec := doAs(t, h, "PUT", "/api/p/"+p.ID+"/permissions",
+		map[string]any{"default": PermNone}, cookies["alice"]); rec.Code != 200 {
+		t.Fatalf("make invite-only: %d %s", rec.Code, rec.Body)
+	}
+	rule := map[string]any{"prefix": "shared", "default": PermNone,
+		"perms": map[string]string{"bob@x.io": PermWrite}}
+	if rec := doAs(t, h, "PUT", "/api/p/"+p.ID+"/folders", rule, cookies["alice"]); rec.Code != 200 {
+		t.Fatalf("set rule: %d %s", rec.Code, rec.Body)
+	}
+	// bob is denied the project, so the folder grant is unreachable.
+	if rec := doAs(t, h, "GET", "/api/p/"+p.ID+"/tree", nil, cookies["bob"]); rec.Code != 403 {
+		t.Fatalf("a folder grant let bob into an invite-only project: %d %s", rec.Code, rec.Body)
+	}
+	fresh, _ := srv.Projects.Get(p.ID)
+	r, _ := http.NewRequest("GET", "/", nil)
+	r.AddCookie(cookies["bob"])
+	if got := srv.pathPermOf(r, fresh, "shared/x.md"); got != PermNone {
+		t.Fatalf("pathPermOf = %q inside a project bob may not see, want none", got)
+	}
+}
+
+// The mirror image, and the reason folderLevel starts from the caller's base
+// rather than from the project default: a rule may RAISE the level on its
+// subtree. A read-only project with one writable drop-box folder is a real
+// shape, and only a project admin can create it — the same person who could
+// raise the project level outright.
+func TestFolderRuleCanWidenWithinAProjectYouCanSee(t *testing.T) {
+	h, srv, cookies, p := permHub(t)
+	if rec := doAs(t, h, "PUT", "/api/p/"+p.ID+"/permissions",
+		map[string]any{"default": PermRead}, cookies["alice"]); rec.Code != 200 {
+		t.Fatalf("make read-only: %d %s", rec.Code, rec.Body)
+	}
+	rule := map[string]any{"prefix": "dropbox", "perms": map[string]string{"bob@x.io": PermWrite}}
+	if rec := doAs(t, h, "PUT", "/api/p/"+p.ID+"/folders", rule, cookies["alice"]); rec.Code != 200 {
+		t.Fatalf("set rule: %d %s", rec.Code, rec.Body)
+	}
+	fresh, _ := srv.Projects.Get(p.ID)
+	r, _ := http.NewRequest("GET", "/", nil)
+	r.AddCookie(cookies["bob"])
+	if got := srv.pathPermOf(r, fresh, "dropbox/x.md"); got != PermWrite {
+		t.Errorf("pathPermOf in the drop-box = %q, want write", got)
+	}
+	if got := srv.pathPermOf(r, fresh, "notes/x.md"); got != PermRead {
+		t.Errorf("pathPermOf outside it = %q, want the project level (read)", got)
+	}
+}

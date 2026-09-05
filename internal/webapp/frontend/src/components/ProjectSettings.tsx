@@ -7,7 +7,7 @@ import { api, postJSON } from "../api/http";
 import { modalConfirm, modalPrompt } from "../modal";
 import { copyText } from "../util";
 import { toast } from "../toast";
-import { useHubRefresh, usePermissions, useShares } from "../hooks/useHub";
+import { useFolders, useHubRefresh, usePermissions, useShares } from "../hooks/useHub";
 import { PROJECT_ICONS, ProjectIcon } from "./shell";
 import { OPENS_NOTE, SharesTable } from "./SharesTable";
 import { projColor } from "./ProjectNav";
@@ -24,7 +24,7 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import { atLeast } from "../api/types";
-import type { Org, PermLevel, Project, ProjectPerms } from "../api/types";
+import type { FolderRule, Org, PermLevel, Project, ProjectPerms } from "../api/types";
 
 // Settings for the open project (sidebar menu): General edits the name,
 // description and icon; Public links answers "is anything of ours public right
@@ -224,6 +224,8 @@ export function ProjectSettings({
       <PublicLinks project={project} />
 
       <People project={project} org={org} />
+
+      <Folders project={project} />
 
       <Card>
         <CardHeader>
@@ -536,6 +538,152 @@ function People({ project, org }: { project: Project; org: Org | null }) {
             })}
           </div>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// Folder rules narrow the People levels above over one subtree — "everyone can
+// write this project, except designs/, which most people may only read".
+//
+// The list the server sends is already filtered to what this account may know
+// about: a rule that hides a folder from you is absent from your copy, not
+// greyed out in it. So this component never has to decide what to conceal.
+// The levels a FOLDER rule may carry in the UI. "none" is deliberately absent:
+// the model supports it and the write doors already enforce it, but nothing
+// hides a folder's contents yet — so offering "No access" here would promise
+// confidentiality the hub does not deliver, which is worse than not offering
+// it. It comes back when reads are filtered. See docs/folder-permissions-prd.md.
+const FOLDER_LEVELS = LEVELS.filter((l) => l.value === "write" || l.value === "read");
+
+function Folders({ project }: { project: Project }) {
+  const qc = useQueryClient();
+  const { data, error } = useFolders(project.id);
+  const isAdmin = atLeast(project.perm, "admin");
+  const base = `/api/p/${project.id}/folders`;
+  const reload = () => {
+    qc.invalidateQueries({ queryKey: ["folders", project.id] });
+  };
+  const run = async (fn: () => Promise<unknown>, ok: string) => {
+    try {
+      await fn();
+      toast(ok);
+    } catch (e) {
+      toast((e as Error).message, true);
+    }
+    reload();
+  };
+
+  if (error) return null; // single-volume mode: no projects, no folder rules
+  if (!data) return null;
+  const rules = data.folders || [];
+  // Nothing to show and nothing to add: don't put an empty card in front of a
+  // member who could not act on it anyway.
+  if (!isAdmin && rules.length === 0) return null;
+
+  // The API replaces a whole rule, so every edit sends the rule it knows.
+  const save = (rule: FolderRule, patch: Partial<FolderRule>) => {
+    const next = { ...rule, ...patch };
+    return api("PUT", base, {
+      prefix: next.prefix,
+      default: next.default,
+      perms: Object.fromEntries(next.grants.map((g) => [g.email, g.level])),
+    });
+  };
+
+  const addFolder = async () => {
+    const prefix = await modalPrompt(
+      "Restrict a folder",
+      "Folder path inside this project, e.g. designs or docs/internal. " +
+        "It starts out read-only for everyone; change that below.",
+      "",
+      "Restrict",
+    );
+    if (prefix === null || !prefix.trim()) return;
+    await run(
+      () => api("PUT", base, { prefix: prefix.trim(), default: "read", perms: {} }),
+      "Folder restricted.",
+    );
+  };
+
+  return (
+    <Card className="ps-people">
+      <CardHeader>
+        <CardTitle>Folders</CardTitle>
+        <CardDescription>
+          Give one folder different access from the rest of the project.
+        </CardDescription>
+      </CardHeader>
+      <Separator />
+      <CardContent>
+        <div className="ps-people-head">
+          <h4>Restricted folders</h4>
+          {isAdmin && (
+            <Button type="button" variant="subtle" onClick={addFolder}>
+              + Add
+            </Button>
+          )}
+        </div>
+        {rules.length === 0 ? (
+          <p className="ps-note">
+            No folder rules — every folder uses the project access above.
+          </p>
+        ) : (
+          <div className="admin-list">
+            {rules.map((rule) => (
+              <div className="admin-item" key={rule.prefix}>
+                <span className="ai-main" title={rule.prefix}>
+                  {rule.prefix}
+                  {rule.grants.length > 0 && (
+                    <span className="ai-tag">
+                      {" "}
+                      ({rule.grants.length} exception{rule.grants.length === 1 ? "" : "s"})
+                    </span>
+                  )}
+                </span>
+                <span className="role-cell">
+                  <select
+                    aria-label={`Access to ${rule.prefix} for everyone else`}
+                    disabled={!isAdmin}
+                    value={rule.default}
+                    onChange={(e) =>
+                      run(
+                        () => save(rule, { default: e.target.value as PermLevel }),
+                        `${rule.prefix} is now ${LABEL[e.target.value] || e.target.value} for everyone else.`,
+                      )
+                    }
+                  >
+                    {FOLDER_LEVELS.map((l) => (
+                      <option key={l.value} value={l.value}>
+                        {l.label}
+                      </option>
+                    ))}
+                  </select>
+                  {isAdmin && (
+                    <button
+                      className="ai-del"
+                      aria-label={`Remove the rule for ${rule.prefix}`}
+                      onClick={() =>
+                        run(
+                          () =>
+                            api("DELETE", `${base}?prefix=${encodeURIComponent(rule.prefix)}`),
+                          "Folder rule removed.",
+                        )
+                      }
+                    >
+                      Remove
+                    </button>
+                  )}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+        <p className="ps-note">
+          A read-only folder still syncs to everyone — they just cannot change it. Edits made
+          to it locally are put back on the next sync, with the person's own version kept
+          beside the file.
+        </p>
       </CardContent>
     </Card>
   );
