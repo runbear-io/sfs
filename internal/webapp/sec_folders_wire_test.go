@@ -342,3 +342,40 @@ func TestSec_Folder_ARewrittenSeqCannotSmuggleAHiddenPath(t *testing.T) {
 		t.Fatalf("re-sending stored history was refused: %d %s", rec.Code, rec.Body)
 	}
 }
+
+// TestSec_Folder_ManifestIsGatedLikeTheBlobItStandsFor.
+//
+// Delta sync stores a large file as chunks plus a manifest, and the manifest's
+// key is the FILE's sha — the same key space as blobs/. Gating blobs/ and not
+// manifests/ was a full disclosure of any hidden file over the chunking
+// threshold: the manifest names its chunks and the chunks are the content.
+//
+// chunks/ is deliberately NOT gated — a chunk's key is its own hash, never an
+// Op.Blob, so it is in no visible-sha set and gating it would make every large
+// file unfetchable for a filtered account. It is safe because a chunk sha is
+// reachable only through a manifest, which is gated, and chunks are kept out
+// of the listing.
+func TestSec_Folder_ManifestIsGatedLikeTheBlobItStandsFor(t *testing.T) {
+	h, _, c, p, sha := hiddenHub(t)
+	for _, key := range []string{"blobs/" + sha, "manifests/" + sha} {
+		rec := sec12agDo(t, h, "GET", "/api/p/"+p.ID+"/store/object?key="+key, nil, c["bob"], modern)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s answered a denied member: %d %s", key, rec.Code, rec.Body)
+		}
+		ex := sec12agDo(t, h, "GET", "/api/p/"+p.ID+"/store/exists?key="+key, nil, c["bob"], modern)
+		if strings.Contains(ex.Body.String(), "true") {
+			t.Errorf("store/exists confirmed %s to a denied member: %s", key, ex.Body)
+		}
+	}
+	// Carol may read the folder, so the same doors answer for her — a manifest
+	// that does not exist yet is a 404 about absence, not about permission,
+	// which is why only the blob is asserted to succeed here.
+	if rec := sec12agDo(t, h, "GET", "/api/p/"+p.ID+"/store/object?key=blobs/"+sha, nil, c["carol"], modern); rec.Code != 200 {
+		t.Errorf("carol was refused content she may read: %d %s", rec.Code, rec.Body)
+	}
+	// Chunks are not listed to a filtered account at all.
+	sizes, _ := storeList(t, h, p.ID, "chunks/", c["bob"])
+	if len(sizes) != 0 {
+		t.Errorf("chunks were listed to a filtered account: %v", sizes)
+	}
+}

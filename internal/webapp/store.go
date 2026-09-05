@@ -41,6 +41,19 @@ var (
 	manifestKeyRe = regexp.MustCompile(`^manifests/[0-9a-f]{64}$`)
 )
 
+// fileShaKey reports whether a store key is addressed by the FILE's sha256 —
+// blobs/ and manifests/ both are, and both must therefore answer the same
+// question about the same content. chunks/ is not: its key is the chunk's own
+// hash, which no op ever names.
+func fileShaKey(key string) (string, bool) {
+	for _, p := range []string{"blobs/", "manifests/"} {
+		if sha, ok := strings.CutPrefix(key, p); ok {
+			return sha, true
+		}
+	}
+	return "", false
+}
+
 func validStoreKey(key string) bool {
 	return blobKeyRe.MatchString(key) || journalKeyRe.MatchString(key) ||
 		chunkKeyRe.MatchString(key) || manifestKeyRe.MatchString(key)
@@ -314,15 +327,19 @@ func (s *Server) visibleObjects(r *http.Request, rs *RemoteSource, objs []remote
 			}
 			o.Size = int64(len(data))
 			out = append(out, o)
-		case strings.HasPrefix(o.Key, "blobs/"), strings.HasPrefix(o.Key, "chunks/"),
-			strings.HasPrefix(o.Key, "manifests/"):
+		case strings.HasPrefix(o.Key, "chunks/"):
+			// Never listed to a filtered account: a chunk's key is its own
+			// hash, so it is in no visible-sha set and the count alone would
+			// hint at how much content is hidden. Nothing needs it listed —
+			// the client reaches chunks through a manifest, never a listing.
+		case strings.HasPrefix(o.Key, "blobs/"), strings.HasPrefix(o.Key, "manifests/"):
 			if shas == nil {
 				var err error
 				if shas, err = f.visibleSHAs(r.Context(), rs); err != nil {
 					return nil, err
 				}
 			}
-			if i := strings.IndexByte(o.Key, '/'); i >= 0 && shas[o.Key[i+1:]] {
+			if sha, keyed := fileShaKey(o.Key); keyed && shas[sha] {
 				out = append(out, o)
 			}
 		default:
@@ -384,14 +401,25 @@ func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Reques
 		}
 		rc, err = io.NopCloser(bytes.NewReader(data)), nil
 	default:
+		// blobs/ AND manifests/ are both keyed by the FILE's sha, so both are
+		// gated on the same set. Missing the manifest was a full disclosure of
+		// any hidden file over the chunking threshold: the manifest names its
+		// chunks, and the chunks are the content.
+		//
+		// chunks/ is NOT gated, and cannot be: a chunk's key is its own hash,
+		// never an Op.Blob, so it is not in any visible-sha set and gating it
+		// would make every large file unfetchable for a filtered account. It
+		// is safe because a chunk sha is reachable only through a manifest —
+		// which is gated — and chunks are kept out of the listing above, so
+		// there is nothing to enumerate.
+		if sha, keyed := fileShaKey(key); keyed && !f.visibleSHA(r.Context(), rs, sha) {
+			// Defence in depth: a filtered journal means an honest client
+			// never asks for this. Answering it anyway would make content
+			// addressing the way around a folder rule.
+			http.Error(w, "no such object", http.StatusNotFound)
+			return
+		}
 		if blob, isBlob := strings.CutPrefix(key, "blobs/"); isBlob {
-			if !f.visibleSHA(r.Context(), rs, blob) {
-				// Defence in depth: a filtered journal means an honest client
-				// never asks for this. Answering it anyway would make content
-				// addressing the way around a folder rule.
-				http.Error(w, "no such object", http.StatusNotFound)
-				return
-			}
 			rc, err = rs.OpenBlob(r.Context(), blob)
 		} else {
 			rc, err = rs.Backend.Get(r.Context(), key)
@@ -456,8 +484,8 @@ func (s *Server) handleStoreExists(v *volume, w http.ResponseWriter, r *http.Req
 	// "Does this content exist?" is a read of the fact, so it answers no for
 	// content this account may not fetch — otherwise a member confirms what is
 	// in a hidden folder one sha at a time.
-	if blob, isBlob := strings.CutPrefix(key, "blobs/"); isBlob {
-		if f := s.visibility(r); !f.visibleSHA(r.Context(), rs, blob) {
+	if sha, keyed := fileShaKey(key); keyed {
+		if f := s.visibility(r); !f.visibleSHA(r.Context(), rs, sha) {
 			writeJSON(w, map[string]any{"exists": false})
 			return
 		}
