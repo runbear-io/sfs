@@ -24,6 +24,10 @@ classDiagram
         +OnProgress func
         +Cycle(ctx) Result
         -cycleLocked(ctx) Result
+        -loadScope(ctx, st) scopeMoved
+        -readOnlyPath / deniedPath
+        -forgetPeerJournals()
+        -keepLocalCopy(abs)
         -firePostSync(res)
         -logInbound(rel, deleted)
         +Restore(ctx, path, sha) error
@@ -43,6 +47,7 @@ classDiagram
     class Result {
         +LocalOps +PulledOps
         +Conflicts +Adopted +Pruned +Materialized
+        +Reverted []string
         +Inbound []store.InboundEvent
         +Pushed +Offline +OfflineErr
         +ReadOnly +NoAccess +AccessErr
@@ -50,6 +55,7 @@ classDiagram
     }
     note for Result "Adopted counts the paths a JOINING device gave to the project (Cycle step 1b). A first cycle is a join, not an edit: a local file at a path the project already holds is demoted to lamport 0 (adoptNote), so the project's version wins on every device and no conflict copy is made — the local content stays journaled and pushed, which is what bdrive restore reads"
     note for Result "Inbound names the paths this cycle applied on a peer's behalf — what firePostSync hands the post_sync command as JSON on stdin. Empty on a scan-and-push cycle, which is why a local-edit-only cycle fires nothing"
+    note for Result "Reverted names paths under a READ-ONLY FOLDER whose local edit this cycle put back from the hub, with the user's own version kept beside the file. Not a conflict: no op was written and no peer will ever see it, so it is a refusal, and bdrive sync names the files rather than counting them"
     note for Result "Offline / ReadOnly / NoAccess are three different answers: unreachable (retry all), push refused (pull-only), pull refused (pause, touch nothing)"
     note for Result "Reason() is accessReason(AccessErr): the hub's own sentence for a refusal, minus the wrapper chain, dropped unless it passes journal.SafeText. 'read-only' summarizes the STATUS CODE — the sentence is the only thing that tells a device-registration 403 from a project the user really is a reader on"
 
@@ -60,6 +66,7 @@ classDiagram
         +AcceptRules(text) scope floor
     }
     note for Filter "ignore.go — .bdriveignore rules (incl. the managed `# bdrive scope` negation block written by init --only / bdrive scope) + a legacy .bdrive include list; Negated() is what makes sync --prune refuse on a scoped project. NOT the whole predicate: walkFolder adds reserved-dir pruning, non-regular and reserved-name skips, and nested-mount handoff"
+    note for Filter "Folder permissions are NOT part of Filter and deliberately so: they are the hub's answer about this account, not the project's shared rules, and they are asymmetric in the other direction — a read-only folder is materialized normally and never journaled. scan returns early for such a path (marking it seen, so the delete pass mints nothing) and materializeFile reverts it, which is the one place a dirty file is clobbered"
     note for Filter "The rules are NO LONGER symmetric. Skip governs materialize (download); SkipUp governs scan (upload) and adds the accepted-rules floor from AcceptRules: a pulled rule that NARROWS applies in both directions, a pulled `!` that WIDENS applies only downward — so a teammate editing .bdriveignore can never start uploading a file this device had excluded. .bdriveignore itself is always exempt. underMountOnDisk asks config.IsMount about each ancestor, so the project boundary no longer depends on what this walk happened to discover"
     note for Filter "EscapeIgnore is compile's inverse (escapes the glob metacharacters, the negation and comment markers, and trailing whitespace) so bdrive forget writes a rule matching exactly that path and nothing else"
 
@@ -67,8 +74,20 @@ classDiagram
         +Lamport +PushedOps +Access
         +AccessReason
         +IgnoreAccepted +IgnorePulled
+        +ReadOnly +Denied +ScopeTag
+    }
+    class Scoper {
+        <<remote — optional capability>>
+        +Scope(ctx) Scope
+    }
+    class Scope {
+        +Tag string
+        +ReadOnly slash-terminated prefixes
+        +Deny slash-terminated prefixes
     }
     note for SyncState "Access/AccessReason are written ONLY by the leg that asked the hub — pull clears no-access, push records read-only or clears it. A cycle with no remote leg leaves the last answer standing, so the daemon's local-only ticks stop alternating 'read-only' / 'access restored' and bdrive status stops reporting healthy sync moments after a refused push"
+    note for SyncState "ReadOnly/Denied/ScopeTag are the hub's folder-permission answer, PERSISTED so an unreachable hub keeps the last scope instead of widening to &quot;everything is writable&quot; and building a journal the hub refuses whole when it returns. A ScopeTag that moved means this account's view changed, so forgetPeerJournals drops every peer copy: the hub serves each peer journal filtered, and pull skips a journal that did not grow and otherwise resumes at a BYTE OFFSET — so a revocation would silently stop that peer being read forever"
+    note for Scoper "In the PutSigner mold: a hub knows about folder permissions, a raw object store has no account to answer for and does not implement it. ErrNoScope (a hub too old to have them) means &quot;nothing is restricted&quot; and clears a stale list; a transport error means keep the last answer. sanePrefixes drops what the hub sends that this device will not act on — an empty prefix matches every path and would stop the device syncing its own work, silently"
     note for SyncState "store — IgnoreAccepted is the .bdriveignore scope THIS device consented to; IgnorePulled is the text a peer's version last wrote here. The pair is what tells a locally authored rule change from one that arrived over the wire. vouchedFloor seeds it once on upgrade: keep every exclusion, drop each `!` that no already-materialized path vouches for"
 
     class SafePath {
