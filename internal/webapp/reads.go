@@ -697,6 +697,21 @@ func (s *Server) handleHeat(v *volume, w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		paths := s.Reads.SessionPaths(projectID(r), session, device)
+		// Filtered like every other path list, and this one is not obvious:
+		// history publishes each op's Session, so a run that WROTE a visible
+		// file and READ a hidden one hands its session id to every project
+		// member — and this route would then answer with the hidden path. The
+		// ingest filter cannot prevent it either, since the reading device
+		// legitimately could see the file.
+		if vis := s.visibility(r); vis.hides() {
+			kept := paths[:0]
+			for _, p := range paths {
+				if vis.canRead(p) {
+					kept = append(kept, p)
+				}
+			}
+			paths = kept
+		}
 		if paths == nil {
 			paths = []string{} // an empty list, never a null the client must special-case
 		}

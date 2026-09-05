@@ -398,3 +398,52 @@ func TestSec_Folder_RestoreRefusesAVersionFromItsHiddenPast(t *testing.T) {
 		t.Fatalf("the hidden content landed on a visible path: %s", body)
 	}
 }
+
+// TestSec_Folder_RunCardDoesNotLeakHiddenPathsAnAgentRead.
+//
+// The run card joins a run's writes to its reads: /heat?session=&device=
+// answers with the paths that agent session read. History publishes each op's
+// session id, so a run that WROTE a visible file hands its session to every
+// project member — and this route then answered with every path it read,
+// including inside folders the asker cannot see.
+//
+// The ingest filter cannot prevent this: the reporting device legitimately
+// could read the file. Only the query side can.
+func TestSec_Folder_RunCardDoesNotLeakHiddenPathsAnAgentRead(t *testing.T) {
+	h, srv, c, p, _ := hiddenHub(t)
+	ledger, err := OpenReadLedger(filepath.Join(t.TempDir(), "reads.json"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Reads = ledger
+	ledger.WithSessions(OpenSessionReadRepo(filepath.Join(t.TempDir(), "sessions.json")), 0)
+
+	const dev = "carol-laptop"
+	const session = "claude-session-abc"
+	secRegisterDevice(t, h, p.ID, c["carol"], dev, dev, "darwin")
+
+	// Carol's agent reads one file in the hidden folder and one outside it.
+	rec := sec12agDo(t, h, "POST", "/api/p/"+p.ID+"/reads", map[string]any{
+		"reads": []map[string]any{
+			{"path": "vault/secret.md", "session": session},
+			{"path": "notes/open.md", "session": session},
+		},
+	}, c["carol"], map[string]string{"X-Bdrive-Device": dev})
+	if rec.Code != 200 {
+		t.Fatalf("report: %d %s", rec.Code, rec.Body)
+	}
+
+	// Control: carol's own run card names both, or this measures an empty map.
+	url := "/api/p/" + p.ID + "/heat?session=" + session + "&device=" + dev
+	if body := doAs(t, h, "GET", url, nil, c["carol"]).Body.String(); !strings.Contains(body, "vault/secret.md") {
+		t.Fatalf("control: the hidden read was never recorded: %s", body)
+	}
+
+	got := doAs(t, h, "GET", url, nil, c["bob"])
+	if strings.Contains(got.Body.String(), "vault") {
+		t.Fatalf("the run card leaked a path inside a hidden folder: %s", got.Body)
+	}
+	if !strings.Contains(got.Body.String(), "notes/open.md") {
+		t.Fatalf("the run card lost the path bob may see: %s", got.Body)
+	}
+}
