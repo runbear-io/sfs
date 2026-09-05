@@ -230,10 +230,17 @@ func TestFolderRuleNeverBlocksAnOrgOwner(t *testing.T) {
 
 // /scope is what stops an honest client wedging itself: a member who edits a
 // read-only folder should have the edit reverted next cycle, not have their
-// whole push refused forever. It reports read-only prefixes and deliberately
-// does NOT report denied ones — that would hand every member the name of every
-// hidden folder.
-func TestFolderScopeReportsReadOnlyButNotHidden(t *testing.T) {
+// whole push refused forever.
+//
+// Phase 1 of this feature reported read-only prefixes ONLY, on the reasoning
+// that naming a denied one leaks the folder's name to every member. Phase 3
+// reversed that deliberately, and this test was rewritten with it rather than
+// deleted: a device syncs a real filesystem, so it has to know which paths it
+// must never journal, or a member who creates a colliding local path has their
+// whole journal refused and their sync wedges permanently. The name leaks; the
+// contents, the file names inside, the history and the bytes do not. See
+// handleProjectScope and docs/folder-permissions-prd.md §Known gaps 5.
+func TestFolderScopeReportsWhatADeviceMustNotWrite(t *testing.T) {
 	h, _, c, p := folderHub(t)
 	hidden := map[string]any{"prefix": "vault", "default": PermNone}
 	if rec := doAs(t, h, "PUT", "/api/p/"+p.ID+"/folders", hidden, c["alice"]); rec.Code != 200 {
@@ -246,13 +253,18 @@ func TestFolderScopeReportsReadOnlyButNotHidden(t *testing.T) {
 	var out struct {
 		Scope    string   `json:"scope"`
 		ReadOnly []string `json:"readonly"`
+		Deny     []string `json:"deny"`
 	}
 	json.Unmarshal(rec.Body.Bytes(), &out)
 	if len(out.ReadOnly) != 1 || out.ReadOnly[0] != "locked/" {
 		t.Fatalf("readonly = %v, want [locked/]", out.ReadOnly)
 	}
-	if strings.Contains(rec.Body.String(), "vault") {
-		t.Fatalf("scope named a folder bob may not read: %s", rec.Body)
+	if len(out.Deny) != 1 || out.Deny[0] != "vault/" {
+		t.Fatalf("deny = %v, want [vault/] — a device that is not told cannot avoid wedging", out.Deny)
+	}
+	// The NAME is all that leaks. Nothing about what is inside it does.
+	if strings.Contains(rec.Body.String(), "secret") {
+		t.Fatalf("scope leaked a hidden folder's contents: %s", rec.Body)
 	}
 	if out.Scope == "" {
 		t.Error("scope tag is empty on a project that has rules")

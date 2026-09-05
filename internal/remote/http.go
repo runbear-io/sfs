@@ -173,10 +173,18 @@ func refuseOffOriginRedirect(req *http.Request, via []*http.Request) error {
 // compatible. Setting the header here turns that off silently: the hub would
 // still answer `Content-Encoding: gzip`, nothing would inflate it, and every
 // blob would fail its sha check while looking like a corrupt hub.
+// PermsCapability is what a client sends to say it understands a hub that
+// serves per-account filtered journals: it tracks the scope tag from the store
+// listing and re-pulls from zero when it changes. A hub with folder rules
+// refuses a client that does not send it, because such a client resumes from a
+// byte offset into a stream whose shape it cannot know has moved.
+const PermsCapability = "X-Bdrive-Perms"
+
 func (b *httpBackend) do(req *http.Request) (*http.Response, error) {
 	if b.token != "" {
 		req.Header.Set("Authorization", "Bearer "+b.token)
 	}
+	req.Header.Set(PermsCapability, "1")
 	if b.device.ID != "" {
 		// A journal request already named its device (nameJournalDevice); the
 		// name and OS describe this machine either way.

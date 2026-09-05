@@ -549,12 +549,10 @@ function People({ project, org }: { project: Project; org: Org | null }) {
 // The list the server sends is already filtered to what this account may know
 // about: a rule that hides a folder from you is absent from your copy, not
 // greyed out in it. So this component never has to decide what to conceal.
-// The levels a FOLDER rule may carry in the UI. "none" is deliberately absent:
-// the model supports it and the write doors already enforce it, but nothing
-// hides a folder's contents yet — so offering "No access" here would promise
-// confidentiality the hub does not deliver, which is worse than not offering
-// it. It comes back when reads are filtered. See docs/folder-permissions-prd.md.
-const FOLDER_LEVELS = LEVELS.filter((l) => l.value === "write" || l.value === "read");
+// The levels a FOLDER rule may carry. "admin" is project-wide (rename, delete,
+// edit permissions), so it has no meaning over one folder and the server
+// refuses it.
+const FOLDER_LEVELS = LEVELS.filter((l) => l.value !== "admin");
 
 function Folders({ project }: { project: Project }) {
   const qc = useQueryClient();
@@ -595,7 +593,8 @@ function Folders({ project }: { project: Project }) {
     const prefix = await modalPrompt(
       "Restrict a folder",
       "Folder path inside this project, e.g. designs or docs/internal. " +
-        "It starts out read-only for everyone; change that below.",
+        "It starts out read-only for everyone; change that below, and add " +
+        "exceptions for the people who need more.",
       "",
       "Restrict",
     );
@@ -680,10 +679,19 @@ function Folders({ project }: { project: Project }) {
           </div>
         )}
         <p className="ps-note">
-          A read-only folder still syncs to everyone — they just cannot change it. Edits made
-          to it locally are put back on the next sync, with the person's own version kept
-          beside the file.
+          A <strong>read-only</strong> folder still syncs to everyone — they just cannot change
+          it. Edits made to it locally are put back on the next sync, with the person's own
+          version kept beside the file.
         </p>
+        {rules.some((r) => r.default === "none") && (
+          <p className="ps-note">
+            A folder set to <strong>no access</strong> is not synced to anyone outside its
+            exception list, and disappears from their file tree, history and search. Older
+            share links into it stop working. Its <em>name</em> stays visible to project
+            members — their devices have to know not to write there. If the name has to be
+            secret too, use a separate project.
+          </p>
+        )}
       </CardContent>
     </Card>
   );

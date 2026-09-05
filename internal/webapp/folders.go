@@ -1,6 +1,7 @@
 package webapp
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -11,9 +12,11 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/runbear-io/beardrive/internal/config"
 	"github.com/runbear-io/beardrive/internal/journal"
+	"github.com/runbear-io/beardrive/internal/remote"
 )
 
 // Folder permissions narrow a project's level over one subtree. They are the
@@ -283,7 +286,8 @@ type pathFilter struct {
 	project Project
 	email   string
 	base    string
-	on      bool // false: nothing to filter, every test is a constant true
+	tag     string // scopeTag: identifies this account's view, for cache keys
+	on      bool   // false: nothing to filter, every test is a constant true
 }
 
 // visibility resolves the caller's read visibility for the project the proj()
@@ -299,8 +303,17 @@ func (s *Server) visibility(r *http.Request) pathFilter {
 	if base == PermAdmin {
 		return pathFilter{} // admin everywhere; nothing to hide
 	}
-	return pathFilter{project: p, email: normEmail(s.requestUser(r).Email), base: base, on: true}
+	email := normEmail(s.requestUser(r).Email)
+	return pathFilter{
+		project: p, email: email, base: base,
+		tag: scopeTag(p, email, base), on: true,
+	}
 }
+
+// scopeTagFor is the tag alone, for the store listing to hand a device so it
+// can notice its own view moved. Empty when nothing is filtered, which is what
+// tells a client there is nothing to track.
+func (s *Server) scopeTagFor(r *http.Request) string { return s.visibility(r).tag }
 
 // canRead reports whether this account may see a path at all.
 func (f pathFilter) canRead(path string) bool {
@@ -345,6 +358,117 @@ func (f pathFilter) visibleSHA(ctx context.Context, rs *RemoteSource, sha string
 	return false
 }
 
+// visibleSHAs is the set of content addresses this account may fetch: every
+// blob named by an op it may read. Built once, for the doors that answer about
+// many shas (the store listing) rather than one.
+func (f pathFilter) visibleSHAs(ctx context.Context, rs *RemoteSource) (map[string]bool, error) {
+	ops, err := rs.loadSourcedOps(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool, len(ops))
+	for _, so := range ops {
+		if f.canRead(so.Op.Path) {
+			out[so.Op.Blob] = true
+		}
+	}
+	return out, nil
+}
+
+// filterJournal drops the lines of a stored journal that name paths this
+// account may not read. It is the whole confidentiality claim on the sync
+// wire: a device converges from the ops it is given, so an op it never
+// receives is a file it never writes to disk.
+//
+// Line-drop on the STORED BYTES, never a re-serialization of the parsed ops.
+// Re-serializing would make every journal's bytes a function of this binary's
+// Marshal, so adding a field to journal.Op someday would silently rewrite the
+// byte offsets every client resumes from — see §The shape that works. Keeping
+// the retained lines verbatim means an upgrade cannot move them.
+//
+// Filtering is safe here, and only here, because of the invariant the whole
+// data model rests on: a device writes only its OWN journal and merely READS
+// its peers'. A filtered copy on one device's disk can therefore never
+// propagate back as the truth, and journalKeepsItsOps never sees one.
+//
+// A line that will not parse is DROPPED rather than passed through: the hub
+// cannot tell which path it names, so it cannot tell whether it may be shown.
+// The client's own Parse discards it too, so nothing converges differently.
+func filterJournal(data []byte, f pathFilter) []byte {
+	if !f.hides() {
+		return data
+	}
+	out := make([]byte, 0, len(data))
+	for _, line := range bytes.SplitAfter(data, []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		ops, err := journal.Parse(line)
+		if err != nil || len(ops) != 1 {
+			continue
+		}
+		if f.canRead(ops[0].Path) {
+			out = append(out, line...)
+		}
+	}
+	return out
+}
+
+// ---- filtered-journal cache ----
+
+// A filtered journal is fetched by the LIST (to size it) and again by the GET
+// (to serve it) within one sync cycle, per device, per peer. This keeps the
+// two from being two round trips to the object store, and — more importantly —
+// guarantees they are the SAME bytes: a size computed from one fetch and a
+// body from another would let a journal that grew in between desynchronize the
+// client's byte-offset resume.
+//
+// Keyed by the object's identity AND the scope that filtered it, so two
+// accounts with different views never read each other's entry.
+//
+// ponytail: one flat map with all-or-nothing eviction at a byte ceiling,
+// exactly like jcache above it, and for the same reason — a real budget shared
+// across scopes with LRU is a bigger change than this feature.
+type filteredJournal struct {
+	size int64
+	mod  time.Time
+	data []byte
+}
+
+const maxFilteredJournalBytes = 32 << 20
+
+func filterKey(key, tag string) string { return tag + "\x00" + key }
+
+func (r *RemoteSource) cachedFilter(o remote.Object, tag string) ([]byte, bool) {
+	r.fmu.Lock()
+	defer r.fmu.Unlock()
+	c, ok := r.fcache[filterKey(o.Key, tag)]
+	if !ok {
+		return nil, false
+	}
+	// A zero-valued Object (the GET path, which knows only the key) cannot
+	// prove freshness, so it takes whatever the LIST in the same cycle stored.
+	// That is the point: the two must agree, and the LIST is the one that saw
+	// the object.
+	if o.Size != 0 && (c.size != o.Size || !c.mod.Equal(o.Modified)) {
+		return nil, false
+	}
+	return c.data, true
+}
+
+func (r *RemoteSource) putFilter(o remote.Object, tag string, data []byte) {
+	r.fmu.Lock()
+	defer r.fmu.Unlock()
+	if r.fcache == nil {
+		r.fcache = map[string]filteredJournal{}
+	}
+	if r.fbytes+int64(len(data)) > maxFilteredJournalBytes {
+		r.fcache, r.fbytes = map[string]filteredJournal{}, 0
+	}
+	r.fcache[filterKey(o.Key, tag)] = filteredJournal{size: o.Size, mod: o.Modified, data: data}
+	r.fbytes += int64(len(data))
+}
+
 // ---- HTTP ----
 
 // handleProjectFolders lists the folder rules the caller may know about, plus
@@ -381,11 +505,21 @@ func (s *Server) handleProjectFolders(w http.ResponseWriter, r *http.Request) {
 // have their whole push refused forever, which is what happens to a client
 // that does not ask.
 //
-// It reports `readonly` only. A prefix the caller may not READ is deliberately
-// absent: naming it here would hand every member of the project the NAME of
-// every hidden folder, which is most of what "invisible" is supposed to mean,
-// and nothing in Phase 1 consumes it. How denial reaches a client without
-// publishing that list is Phase 3's problem — see the PRD.
+// It reports two lists, and the second one is a deliberate, documented
+// disclosure: `deny` names the prefixes this account may not read at all.
+//
+// That leaks folder NAMES to every member of the project, and there is no way
+// around it that leaves the client correct. A device syncs a real local
+// filesystem, so it has to know which paths it must never journal — otherwise
+// a member who happens to create "vault/notes.md" locally has their whole
+// journal PUT refused and their sync wedges permanently. The alternative
+// (teach the client on refusal) discloses the same name to the same person the
+// moment they trip it, needs new client machinery for a rare case, and leaves
+// them with a silently unsynced file until then.
+//
+// So: a restricted folder's NAME is visible to project members; its CONTENTS,
+// its file names, its history and its bytes are not. An admin who needs the
+// name secret too needs a separate project, and the docs say so.
 func (s *Server) handleProjectScope(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.project(w, r, r.PathValue("project"), PermRead)
 	if !ok {
@@ -393,19 +527,21 @@ func (s *Server) handleProjectScope(w http.ResponseWriter, r *http.Request) {
 	}
 	base := s.projectPermOf(r, p)
 	email := normEmail(s.requestUser(r).Email)
-	readonly := []string{}
+	readonly, deny := []string{}, []string{}
 	for _, rule := range p.Folders {
-		l := folderLevel(p, email, rule.Prefix, base)
-		// Exactly read: visible, so naming it leaks nothing the caller cannot
-		// already list, and writable-by-nobody is what the client must know.
-		if l == PermRead && atLeast(base, PermWrite) {
+		switch l := folderLevel(p, email, rule.Prefix, base); {
+		case !atLeast(l, PermRead):
+			deny = append(deny, rule.Prefix)
+		case l == PermRead && atLeast(base, PermWrite):
 			readonly = append(readonly, rule.Prefix)
 		}
 	}
 	sort.Strings(readonly)
+	sort.Strings(deny)
 	writeJSON(w, map[string]any{
 		"scope":    scopeTag(p, email, base),
 		"readonly": readonly,
+		"deny":     deny,
 	})
 }
 

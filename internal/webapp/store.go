@@ -77,6 +77,34 @@ func storeSource(v *volume, w http.ResponseWriter) *RemoteSource {
 	return rs
 }
 
+// understandsFilteredJournals refuses a device too old to sync a project whose
+// journals are filtered per account.
+//
+// Confidentiality does not depend on this — filtering happens here, so an old
+// client is served the same filtered bytes as a new one. Correctness does: a
+// filtered journal changes LENGTH when a rule changes, in both directions, and
+// syncer.pull skips a journal that did not grow and otherwise resumes from a
+// byte offset. An old client therefore stops reading a peer entirely after a
+// revocation, silently and forever, or resumes mid-stream after a grant.
+//
+// Refusing is the only honest answer: serving it anyway trades a loud failure
+// the user can act on ("upgrade bdrive") for a quiet one nobody can see. Only
+// projects that actually have rules are affected, so no existing deployment
+// changes until someone restricts a folder.
+func (s *Server) understandsFilteredJournals(w http.ResponseWriter, r *http.Request) bool {
+	// Gated on whether THIS caller is actually filtered, not on whether the
+	// project has rules: an org owner (and any project admin) sees every op
+	// either way, so there is no offset for them to get wrong and refusing
+	// them would break an administrator's device over somebody else's folder.
+	if !s.visibility(r).hides() || r.Header.Get(remote.PermsCapability) != "" {
+		return true
+	}
+	// A browser never reaches /store/*; this is always a device.
+	http.Error(w, "this project uses folder permissions, which this version of bdrive "+
+		"cannot sync correctly — upgrade bdrive and run `bdrive sync`", http.StatusForbidden)
+	return false
+}
+
 func (s *Server) storeKey(w http.ResponseWriter, r *http.Request) (string, bool) {
 	key := r.URL.Query().Get("key")
 	if !validStoreKey(key) {
@@ -202,6 +230,9 @@ func (s *Server) handleStoreList(v *volume, w http.ResponseWriter, r *http.Reque
 	if rs == nil {
 		return
 	}
+	if !s.understandsFilteredJournals(w, r) {
+		return
+	}
 	s.refreshDevice(r)
 	prefix := r.URL.Query().Get("prefix")
 	if prefix != "" &&
@@ -218,7 +249,19 @@ func (s *Server) handleStoreList(v *volume, w http.ResponseWriter, r *http.Reque
 		storageErr(w, http.StatusBadGateway, "storage is temporarily unavailable", err)
 		return
 	}
-	writeStoreJSON(w, r, map[string]any{"objects": objs})
+	objs, err = s.visibleObjects(r, rs, objs)
+	if err != nil {
+		storageErr(w, http.StatusBadGateway, "storage is temporarily unavailable", err)
+		return
+	}
+	// The tag this listing was computed under. A device compares it to the one
+	// it holds and, on a change, discards its peer journals and re-pulls: the
+	// sizes below are only meaningful against the scope that produced them.
+	out := map[string]any{"objects": objs}
+	if tag := s.scopeTagFor(r); tag != "" {
+		out["scope"] = tag
+	}
+	writeStoreJSON(w, r, out)
 }
 
 // writeStoreJSON is writeJSON that compresses when the caller accepts it. The
@@ -239,9 +282,84 @@ func writeStoreJSON(w http.ResponseWriter, r *http.Request, v any) {
 	json.NewEncoder(gz).Encode(v)
 }
 
+// visibleObjects rewrites a store listing for one account: journals are
+// reported at their FILTERED length, and blobs the account may not read are
+// dropped entirely.
+//
+// The size is the load-bearing part. syncer.pull skips a journal whose listed
+// size did not grow and then resumes parsing at a BYTE OFFSET into what it
+// already holds — so a filtered body served against the stored size makes
+// every device re-download every journal forever, and a stored size against a
+// filtered body makes it resume mid-stream. The two must be computed from the
+// same bytes, which is why this calls the same filter the GET does.
+func (s *Server) visibleObjects(r *http.Request, rs *RemoteSource, objs []remote.Object) ([]remote.Object, error) {
+	f := s.visibility(r)
+	if !f.hides() {
+		return objs, nil
+	}
+	var shas map[string]bool
+	out := make([]remote.Object, 0, len(objs))
+	for _, o := range objs {
+		switch {
+		case strings.HasPrefix(o.Key, "journal/"):
+			data, err := s.filteredJournal(r.Context(), rs, o, f)
+			if err != nil {
+				return nil, err
+			}
+			// A journal with nothing left in it is not listed at all: an
+			// entry of size zero is a peer this device would create a local
+			// file for and re-fetch on every cycle forever.
+			if len(data) == 0 {
+				continue
+			}
+			o.Size = int64(len(data))
+			out = append(out, o)
+		case strings.HasPrefix(o.Key, "blobs/"), strings.HasPrefix(o.Key, "chunks/"),
+			strings.HasPrefix(o.Key, "manifests/"):
+			if shas == nil {
+				var err error
+				if shas, err = f.visibleSHAs(r.Context(), rs); err != nil {
+					return nil, err
+				}
+			}
+			if i := strings.IndexByte(o.Key, '/'); i >= 0 && shas[o.Key[i+1:]] {
+				out = append(out, o)
+			}
+		default:
+			out = append(out, o)
+		}
+	}
+	return out, nil
+}
+
+// filteredJournal fetches one journal and drops what this account may not
+// read. Cached on the RemoteSource keyed by the object's identity AND the
+// scope that filtered it, so the LIST and the GET of one sync cycle do not
+// fetch and re-filter the same object twice.
+func (s *Server) filteredJournal(ctx context.Context, rs *RemoteSource, o remote.Object, f pathFilter) ([]byte, error) {
+	if data, ok := rs.cachedFilter(o, f.tag); ok {
+		return data, nil
+	}
+	rc, err := rs.Backend.Get(ctx, o.Key)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		return nil, err
+	}
+	data := filterJournal(raw, f)
+	rs.putFilter(o, f.tag, data)
+	return data, nil
+}
+
 func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Request) {
 	rs := storeSource(v, w)
 	if rs == nil {
+		return
+	}
+	if !s.understandsFilteredJournals(w, r) {
 		return
 	}
 	s.refreshDevice(r)
@@ -253,10 +371,31 @@ func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Reques
 	// serve content that does not hash to the key it is stored under.
 	var rc io.ReadCloser
 	var err error
-	if blob, isBlob := strings.CutPrefix(key, "blobs/"); isBlob {
-		rc, err = rs.OpenBlob(r.Context(), blob)
-	} else {
-		rc, err = rs.Backend.Get(r.Context(), key)
+	switch f := s.visibility(r); {
+	case strings.HasPrefix(key, "journal/") && f.hides():
+		// The whole confidentiality claim on the sync wire: a device converges
+		// from the ops it is given, so the ops it may not see never leave here.
+		// Served from the same filter the listing sized, or the client resumes
+		// at an offset that means nothing.
+		data, ferr := s.filteredJournal(r.Context(), rs, remote.Object{Key: key}, f)
+		if ferr != nil {
+			storageErr(w, http.StatusNotFound, "no such object", ferr)
+			return
+		}
+		rc, err = io.NopCloser(bytes.NewReader(data)), nil
+	default:
+		if blob, isBlob := strings.CutPrefix(key, "blobs/"); isBlob {
+			if !f.visibleSHA(r.Context(), rs, blob) {
+				// Defence in depth: a filtered journal means an honest client
+				// never asks for this. Answering it anyway would make content
+				// addressing the way around a folder rule.
+				http.Error(w, "no such object", http.StatusNotFound)
+				return
+			}
+			rc, err = rs.OpenBlob(r.Context(), blob)
+		} else {
+			rc, err = rs.Backend.Get(r.Context(), key)
+		}
 	}
 	if err != nil {
 		// Fixed message: os.Open's error names the hub's absolute storage
@@ -306,10 +445,22 @@ func (s *Server) handleStoreExists(v *volume, w http.ResponseWriter, r *http.Req
 	if rs == nil {
 		return
 	}
+	if !s.understandsFilteredJournals(w, r) {
+		return
+	}
 	s.refreshDevice(r)
 	key, ok := s.storeKey(w, r)
 	if !ok {
 		return
+	}
+	// "Does this content exist?" is a read of the fact, so it answers no for
+	// content this account may not fetch — otherwise a member confirms what is
+	// in a hidden folder one sha at a time.
+	if blob, isBlob := strings.CutPrefix(key, "blobs/"); isBlob {
+		if f := s.visibility(r); !f.visibleSHA(r.Context(), rs, blob) {
+			writeJSON(w, map[string]any{"exists": false})
+			return
+		}
 	}
 	exists, err := rs.Backend.Exists(r.Context(), key)
 	if err != nil {

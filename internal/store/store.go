@@ -272,6 +272,10 @@ type SyncState struct {
 	// answer instead of falling back to "everything is writable" and building
 	// up a journal the hub will refuse the moment the network returns.
 	ReadOnly []string `json:"read_only,omitempty"`
+	// Denied are prefixes this account may not read at all. Persisted for the
+	// same reason ReadOnly is: an unreachable hub must not widen what this
+	// device is willing to journal.
+	Denied []string `json:"denied,omitempty"`
 	// ScopeTag identifies the answer ReadOnly came from. It changes only when
 	// what THIS account can see changes.
 	ScopeTag string `json:"scope_tag,omitempty"`

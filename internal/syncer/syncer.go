@@ -100,6 +100,11 @@ type Session struct {
 	// keeps honouring the last answer. Empty for a raw object-store remote,
 	// for a hub with no folder rules, and for a hub too old to have them.
 	readOnly []string
+	// denied are prefixes this account may not read at all. Nothing
+	// materializes there (the hub sends no ops), so this exists only to stop
+	// the SCAN journaling a local file that happens to sit at such a path —
+	// which the hub refuses, wedging this device's whole journal.
+	denied []string
 	// reverted names the read-only paths this cycle put back, for Result.
 	reverted []string
 
@@ -123,7 +128,16 @@ func (s *Session) logInbound(rel string, deleted bool) {
 // but not write. The prefixes are slash-terminated, so "locked/" governs
 // "locked/x.md" and never a sibling named "lockedout.md".
 func (s *Session) readOnlyPath(rel string) bool {
-	for _, pre := range s.readOnly {
+	return underAny(rel, s.readOnly) || underAny(rel, s.denied)
+}
+
+// deniedPath reports whether rel sits under a folder this account cannot read.
+// Such a path is never materialized (no ops arrive for it) and never
+// journaled; a local file there is this machine's own and stays that way.
+func (s *Session) deniedPath(rel string) bool { return underAny(rel, s.denied) }
+
+func underAny(rel string, prefixes []string) bool {
+	for _, pre := range prefixes {
 		if strings.HasPrefix(rel, pre) {
 			return true
 		}
@@ -140,23 +154,60 @@ func (s *Session) readOnlyPath(rel string) bool {
 // op the hub would refuse — the refusal is a 403 on the whole journal PUT, and
 // a journal is append-only, so one such op wedges this device's sync until
 // somebody edits its journal by hand.
-func (s *Session) loadScope(ctx context.Context, st *store.SyncState) {
-	s.readOnly, s.reverted = st.ReadOnly, nil
+func (s *Session) loadScope(ctx context.Context, st *store.SyncState) (scopeMoved bool) {
+	s.readOnly, s.denied, s.reverted = st.ReadOnly, st.Denied, nil
 	sc, ok := s.Backend.(remote.Scoper)
 	if !ok {
-		return
+		return false
 	}
 	got, err := sc.Scope(ctx)
 	switch {
 	case errors.Is(err, remote.ErrNoScope):
 		// The hub has no opinion: it predates folder permissions, so nothing
 		// is restricted and any stale list on disk is from another hub.
-		s.readOnly, st.ReadOnly, st.ScopeTag = nil, nil, ""
+		s.readOnly, s.denied = nil, nil
+		moved := st.ScopeTag != ""
+		st.ReadOnly, st.Denied, st.ScopeTag = nil, nil, ""
+		return moved
 	case err != nil:
-		return // unreachable: keep the last answer
-	default:
-		ro := sanePrefixes(got.ReadOnly)
-		s.readOnly, st.ReadOnly, st.ScopeTag = ro, ro, got.Tag
+		return false // unreachable: keep the last answer
+	}
+	ro, dn := sanePrefixes(got.ReadOnly), sanePrefixes(got.Deny)
+	moved := st.ScopeTag != got.Tag
+	s.readOnly, s.denied = ro, dn
+	st.ReadOnly, st.Denied, st.ScopeTag = ro, dn, got.Tag
+	return moved
+}
+
+// forgetPeerJournals drops this device's cached copies of every peer's journal
+// so the next pull re-fetches them from zero.
+//
+// It is what a scope change requires and why the hub sends a tag at all. The
+// hub serves each peer journal FILTERED to what this account may read, and the
+// client resumes from a byte offset into the copy it already holds. Both
+// directions of a rule change break that: a revocation makes the filtered
+// journal shorter, and pull skips any journal whose listed size did not grow —
+// so that peer's ops would never be read again, silently and forever. A new
+// grant interleaves previously-hidden ops into the middle of a prefix the
+// client already trusts, so the offset lands mid-stream.
+//
+// Rule changes are rare and a re-pull is cheap next to reasoning about a moved
+// byte offset. Own journal is never touched: this device is its only writer.
+func (s *Session) forgetPeerJournals() {
+	dir := filepath.Join(s.Store.Dir(), "journal")
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return // nothing cached yet, or unreadable: the next pull rebuilds it
+	}
+	own := s.Store.JournalPath(s.Device.ID)
+	for _, e := range ents {
+		p := filepath.Join(dir, e.Name())
+		if sameJournalFile(p, own) {
+			continue
+		}
+		if err := os.Remove(p); err != nil {
+			log.Printf("beardrive: could not drop a stale peer journal: %v", err)
+		}
 	}
 }
 
@@ -396,7 +447,12 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	// a refusal is a 403 on the whole journal PUT, and a journal is
 	// append-only, so one such op wedges this device until somebody edits its
 	// journal by hand.
-	s.loadScope(ctx, &st)
+	if s.loadScope(ctx, &st) {
+		// What this account may see has changed. Every peer journal on disk
+		// was filtered under the OLD scope, so it is neither a prefix of nor
+		// the same length as what the hub will serve now.
+		s.forgetPeerJournals()
+	}
 
 	// 1. Scan the working folder and journal any local changes.
 	localOps, err := s.scan(cache, &st, int64(len(myOps)), filter, sec)
@@ -765,6 +821,11 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 		// minting a delete for it. The local edit is not lost and not
 		// silently kept either: materialize puts the project's version back
 		// and leaves the user's own copy beside it.
+		//
+		// A DENIED folder takes the same branch for a different reason: the
+		// hub sends no ops for it, so nothing here is the project's — it is
+		// this machine's own file at a path the project happens to use, and
+		// journaling it would have the hub refuse this device's whole journal.
 		if s.readOnlyPath(rel) {
 			return nil
 		}
@@ -1359,7 +1420,10 @@ func (s *Session) conflictCopies(myOps []journal.Op, pushed int64, pulled []jour
 // consulted for read-only paths, so it costs one Stat on exactly the files
 // whose local changes can never be journaled.
 func (s *Session) readOnlyDrifted(rel, abs string, c store.CachedFile) bool {
-	if !s.readOnlyPath(rel) {
+	// A denied path has no project version to put back — the hub sends no ops
+	// for it — so there is nothing to revert to and the local file is simply
+	// this machine's own.
+	if !s.readOnlyPath(rel) || s.deniedPath(rel) {
 		return false
 	}
 	fi, err := os.Stat(abs)

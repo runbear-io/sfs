@@ -339,6 +339,10 @@ type RemoteSource struct {
 	jmu    sync.Mutex               // guards jcache and jbytes
 	jcache map[string]cachedJournal // "journal/<dev>.jsonl" → parsed ops
 	jbytes int64                    // raw journal bytes currently cached
+
+	fmu    sync.Mutex                 // guards fcache and fbytes
+	fcache map[string]filteredJournal // scopeTag+key → journal as one account may read it
+	fbytes int64
 }
 
 // cachedJournal is one journal's parsed ops plus the (size, modified) that

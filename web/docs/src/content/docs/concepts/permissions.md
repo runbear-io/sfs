@@ -73,8 +73,8 @@ owners) can add or change one.
 
 ### What a read-only folder does on your machine
 
-It syncs down like any other folder, so it is always current. What changes is
-what happens when you edit it:
+A read-only folder syncs down like any other, so it is always current. What
+changes is what happens when you edit it:
 
 - Your device never sends the change. Nobody else sees it, and your sync does
   **not** get stuck.
@@ -88,14 +88,36 @@ what happens when you edit it:
 The same applies in the web UI: uploading to, removing from, restoring into, or
 creating a share link for a read-only folder is refused.
 
-### What folder rules do not do yet
+### Hidden folders
 
-**A folder rule controls who can change a folder, not who can see it.** Every
-member of the project still syncs and reads every file, including in folders
-they cannot write. Hiding a folder's contents from people who are not on its
-list is being built; until it ships, do not use a folder rule to separate
-secrets from teammates — put those in their own project, where `No access` on
-the project default already hides them completely.
+Set a folder's access to **No access** and it stops existing for everyone
+outside its exception list:
+
+- It is absent from the file tree, and every viewer URL into it answers *not
+  found* — the same answer as a path that was never there, so nobody can tell
+  the difference.
+- Its history, its read heat, and any share links into it disappear too. A
+  public link minted before the folder was restricted **stops working**.
+- Nothing in it is synced to their devices. The hub filters each device's
+  download to the changes that device is allowed to know about, so the files
+  are never written to that machine's disk at all.
+
+**What is still visible: the folder's name.** Your device syncs a real folder
+on a real disk, so it has to know which paths it must not write to — otherwise
+creating a file that happens to collide with a restricted path would break your
+sync. So project members can see that a restricted folder exists; they cannot
+see what is in it, what the files are called, who changed them, or when.
+
+If the *name* has to be secret too, put it in its own project and set the
+project's default access to `No access`.
+
+### Older devices
+
+A device running a version of `bdrive` from before folder permissions cannot
+sync a project that has a hidden folder — the hub refuses it and tells the
+person to upgrade. This is deliberate: an older device would silently stop
+receiving some of the project rather than fail visibly. Nothing is exposed to
+it either way, and projects with no folder rules are unaffected.
 
 ## What a device does when it is refused
 

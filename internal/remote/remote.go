@@ -85,6 +85,13 @@ type Scope struct {
 	// ReadOnly are slash-terminated prefixes this device may sync down but
 	// must never journal a change to.
 	ReadOnly []string `json:"readonly"`
+	// Deny are slash-terminated prefixes this account may not read at all.
+	// The hub sends no ops for them, so nothing materializes there; this list
+	// exists so the device also never JOURNALS anything a local file at such a
+	// path would otherwise produce — which the hub would refuse, wedging the
+	// device's whole journal. See the note on handleProjectScope for the
+	// disclosure this represents and why there is no alternative.
+	Deny []string `json:"deny"`
 }
 
 // Scoper is the optional "what may I write here?" capability, in the PutSigner

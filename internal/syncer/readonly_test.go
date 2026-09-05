@@ -1,12 +1,15 @@
 package syncer
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/remote"
 )
 
@@ -235,5 +238,228 @@ func TestHostileScopeAnswerIsNotObeyed(t *testing.T) {
 	}
 	if got := read(t, a.Folder, "no-slashed.md"); got != "not under a rule" {
 		t.Errorf("a non-slash-terminated prefix swallowed a sibling path: %q", got)
+	}
+}
+
+// hidingRemote is a hub that hides a folder: it filters the journals it serves
+// exactly as internal/webapp does (drop the lines naming a hidden path) and
+// reports the FILTERED length in its listing, which is the contract pull
+// depends on. Without both halves this fixture would measure nothing: a device
+// that is served short bodies against full sizes re-pulls forever.
+type hidingRemote struct {
+	remote.Backend
+	hide []string // slash-terminated prefixes
+	tag  string
+}
+
+func (h hidingRemote) hidden(p string) bool {
+	for _, pre := range h.hide {
+		if strings.HasPrefix(p, pre) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h hidingRemote) filter(data []byte) []byte {
+	out := make([]byte, 0, len(data))
+	for _, line := range bytes.SplitAfter(data, []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		ops, err := journal.Parse(line)
+		if err != nil || len(ops) != 1 || h.hidden(ops[0].Path) {
+			continue
+		}
+		out = append(out, line...)
+	}
+	return out
+}
+
+func (h hidingRemote) Scope(context.Context) (remote.Scope, error) {
+	return remote.Scope{Tag: h.tag, Deny: h.hide}, nil
+}
+
+func (h hidingRemote) List(ctx context.Context, prefix string) ([]remote.Object, error) {
+	objs, err := h.Backend.List(ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	out := objs[:0]
+	for _, o := range objs {
+		if !strings.HasPrefix(o.Key, "journal/") {
+			out = append(out, o)
+			continue
+		}
+		data, err := h.raw(ctx, o.Key)
+		if err != nil {
+			return nil, err
+		}
+		if f := h.filter(data); len(f) > 0 {
+			o.Size = int64(len(f))
+			out = append(out, o)
+		}
+	}
+	return out, nil
+}
+
+func (h hidingRemote) raw(ctx context.Context, key string) ([]byte, error) {
+	rc, err := h.Backend.Get(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return io.ReadAll(rc)
+}
+
+func (h hidingRemote) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	if !strings.HasPrefix(key, "journal/") {
+		return h.Backend.Get(ctx, key)
+	}
+	data, err := h.raw(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	return io.NopCloser(bytes.NewReader(h.filter(data))), nil
+}
+
+// TestHiddenFolderNeverReachesTheDevice is Phase 3 at the level that matters:
+// a device converges from the ops it is given, so an op it never receives is a
+// file that never exists on that disk.
+func TestHiddenFolderNeverReachesTheDevice(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "deva", be)
+	b := newDevice(t, "devb", hidingRemote{Backend: be, hide: []string{"vault/"}, tag: "t1"})
+
+	write(t, a.Folder, "vault/secret.md", "the secret")
+	write(t, a.Folder, "notes/open.md", "hello")
+	cycle(t, a)
+	cycle(t, b)
+
+	if _, err := os.Stat(filepath.Join(b.Folder, "vault", "secret.md")); err == nil {
+		t.Fatal("a hidden folder was written to B's disk")
+	}
+	if got := read(t, b.Folder, "notes/open.md"); got != "hello" {
+		t.Fatalf("B lost the folder it is entitled to: %q", got)
+	}
+
+	// B has its own file at a path the project happens to use. It is B's, it
+	// stays B's, and — the part that matters — journaling it would have the
+	// hub refuse B's whole journal, so it is never journaled.
+	write(t, b.Folder, "vault/mine.md", "b's own notes")
+	write(t, b.Folder, "notes/mine.md", "b was here")
+	cycle(t, b)
+
+	if got := read(t, b.Folder, "vault/mine.md"); got != "b's own notes" {
+		t.Errorf("B's own file under a hidden path was disturbed: %q", got)
+	}
+	ops, err := b.Store.DeviceOps(b.Device.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range ops {
+		if strings.HasPrefix(op.Path, "vault/") {
+			t.Errorf("B journaled %q under a folder it cannot see", op.Path)
+		}
+	}
+
+	// B's sync is not wedged, and A never learns any of it.
+	cycle(t, a)
+	if got := read(t, a.Folder, "notes/mine.md"); got != "b was here" {
+		t.Errorf("B's ordinary work did not reach A: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(a.Folder, "vault", "mine.md")); err == nil {
+		t.Error("B's own file under a hidden path was pushed to the project")
+	}
+	if got := read(t, a.Folder, "vault/secret.md"); got != "the secret" {
+		t.Errorf("A's own hidden folder was disturbed: %q", got)
+	}
+}
+
+// A scope change is the one thing that breaks pull's byte-offset resume in
+// BOTH directions: a revocation makes the filtered journal shorter (and pull
+// skips a journal that did not grow, so that peer would go unread forever) and
+// a new grant interleaves previously-hidden ops into the middle of a prefix
+// the client already trusts. The tag is what makes the device throw its cached
+// peer journals away and start again.
+func TestScopeChangeReSyncsFromZero(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "deva", be)
+	b := newDevice(t, "devb", hidingRemote{Backend: be, hide: []string{"vault/"}, tag: "t1"})
+
+	write(t, a.Folder, "vault/secret.md", "the secret")
+	write(t, a.Folder, "notes/open.md", "hello")
+	cycle(t, a)
+	cycle(t, b)
+	if _, err := os.Stat(filepath.Join(b.Folder, "vault", "secret.md")); err == nil {
+		t.Fatal("control: the folder was not hidden to begin with")
+	}
+
+	// B is granted the folder. The hub's answer changes and so does the tag.
+	b.Backend = hidingRemote{Backend: be, tag: "t2"}
+	cycle(t, b)
+
+	if got := read(t, b.Folder, "vault/secret.md"); got != "the secret" {
+		t.Fatalf("B did not receive a folder it was just granted: %q", got)
+	}
+	// The reverse direction: revoked again, and B keeps syncing rather than
+	// silently never reading that peer's journal again.
+	b.Backend = hidingRemote{Backend: be, hide: []string{"vault/"}, tag: "t3"}
+	write(t, a.Folder, "notes/second.md", "later")
+	cycle(t, a)
+	cycle(t, b)
+	if got := read(t, b.Folder, "notes/second.md"); got != "later" {
+		t.Fatalf("after a revocation B stopped receiving that peer's ops: %q", got)
+	}
+}
+
+// Losing access to a folder removes it from this device, without a delete op
+// and without anyone journaling anything.
+//
+// It falls out of machinery that already existed rather than new code: the hub
+// stops serving those ops, forgetPeerJournals drops the copies filtered under
+// the old scope, so the replayed target no longer holds the path — and
+// materialize's second pass removes every cached path the target lost. Worth
+// pinning precisely because nothing here is aimed at it: a change to that pass
+// would quietly turn revocation into "the files stay forever".
+//
+// What this does NOT claim: a hostile client can simply not do it. The hub's
+// guarantee is that no NEW bytes arrive and nothing can be fetched again.
+func TestLosingAccessRemovesTheFolderFromTheDevice(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "deva", be)
+	b := newDevice(t, "devb", hidingRemote{Backend: be, tag: "t1"}) // nothing hidden yet
+
+	write(t, a.Folder, "vault/secret.md", "the secret")
+	write(t, a.Folder, "notes/open.md", "hello")
+	cycle(t, a)
+	cycle(t, b)
+	if got := read(t, b.Folder, "vault/secret.md"); got != "the secret" {
+		t.Fatalf("control: B never had the folder: %q", got)
+	}
+
+	// Access is revoked.
+	b.Backend = hidingRemote{Backend: be, hide: []string{"vault/"}, tag: "t2"}
+	cycle(t, b)
+
+	if _, err := os.Stat(filepath.Join(b.Folder, "vault", "secret.md")); err == nil {
+		t.Error("the file stayed on B's disk after access was revoked")
+	}
+	if got := read(t, b.Folder, "notes/open.md"); got != "hello" {
+		t.Errorf("revoking one folder took another with it: %q", got)
+	}
+	// A revocation is not a delete: nobody else loses the file.
+	cycle(t, a)
+	if got := read(t, a.Folder, "vault/secret.md"); got != "the secret" {
+		t.Fatalf("B's revocation deleted the file for A: %q", got)
+	}
+	ops, err := b.Store.DeviceOps(b.Device.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range ops {
+		if strings.HasPrefix(op.Path, "vault/") {
+			t.Errorf("B journaled %q while losing access to it", op.Path)
+		}
 	}
 }
