@@ -310,7 +310,7 @@ func (s *Server) visibleObjects(r *http.Request, rs *RemoteSource, objs []remote
 	if !f.hides() {
 		return objs, nil
 	}
-	var shas map[string]bool
+	var shas, chunks map[string]bool
 	out := make([]remote.Object, 0, len(objs))
 	for _, o := range objs {
 		switch {
@@ -328,10 +328,28 @@ func (s *Server) visibleObjects(r *http.Request, rs *RemoteSource, objs []remote
 			o.Size = int64(len(data))
 			out = append(out, o)
 		case strings.HasPrefix(o.Key, "chunks/"):
-			// Never listed to a filtered account: a chunk's key is its own
-			// hash, so it is in no visible-sha set and the count alone would
-			// hint at how much content is hidden. Nothing needs it listed —
-			// the client reaches chunks through a manifest, never a listing.
+			// A chunk's key is its own hash, so it is in no visible-sha set.
+			// Dropping them all was safe but wrong: `bdrive export` enumerates
+			// chunks/, so a filtered member's archive kept the manifest of
+			// every large file and none of its content — an archive that
+			// silently cannot reconstruct what it claims to hold.
+			//
+			// So the set is built the only way that is both complete and
+			// leak-free: read the manifests of the shas this account may see
+			// and take the chunks they name. Listing all of them instead would
+			// have leaked roughly how much hidden content exists, and listing
+			// none breaks export. This costs one manifest fetch per visible
+			// large file, on a listing only `export` ever asks for — the
+			// syncer reaches chunks through a manifest, never a listing.
+			if chunks == nil {
+				var err error
+				if chunks, err = f.visibleChunks(r.Context(), rs); err != nil {
+					return nil, err
+				}
+			}
+			if sha, ok := strings.CutPrefix(o.Key, "chunks/"); ok && chunks[sha] {
+				out = append(out, o)
+			}
 		case strings.HasPrefix(o.Key, "blobs/"), strings.HasPrefix(o.Key, "manifests/"):
 			if shas == nil {
 				var err error

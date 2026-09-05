@@ -386,6 +386,46 @@ func (f pathFilter) visibleSHAs(ctx context.Context, rs *RemoteSource) (map[stri
 	return out, nil
 }
 
+// visibleChunks is every chunk named by a manifest this account may read.
+//
+// Chunks cannot be judged directly — a chunk's key is its own hash, never an
+// Op.Blob — so the only complete-and-leak-free answer is to expand the
+// manifests of the shas that ARE visible. Deliberately not folded into
+// visibleSHAs, which runs on every blob request: this fetches one object per
+// visible large file, and only the store LISTING (i.e. `bdrive export`) ever
+// needs it.
+//
+// A manifest that will not fetch or parse contributes nothing rather than
+// failing the listing: its file is already unreadable by other means, and an
+// export that omits one file beats an export that errors.
+func (f pathFilter) visibleChunks(ctx context.Context, rs *RemoteSource) (map[string]bool, error) {
+	shas, err := f.visibleSHAs(ctx, rs)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]bool{}
+	for sha := range shas {
+		rc, err := rs.Backend.Get(ctx, "manifests/"+sha)
+		if err != nil {
+			continue // not a chunked file, or gone
+		}
+		var man struct {
+			Chunks []struct {
+				H string `json:"h"`
+			} `json:"chunks"`
+		}
+		derr := json.NewDecoder(io.LimitReader(rc, 8<<20)).Decode(&man)
+		rc.Close()
+		if derr != nil {
+			continue
+		}
+		for _, c := range man.Chunks {
+			out[c.H] = true
+		}
+	}
+	return out, nil
+}
+
 // filterJournal drops the lines of a stored journal that name paths this
 // account may not read. It is the whole confidentiality claim on the sync
 // wire: a device converges from the ops it is given, so an op it never

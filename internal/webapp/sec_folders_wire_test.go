@@ -373,9 +373,13 @@ func TestSec_Folder_ManifestIsGatedLikeTheBlobItStandsFor(t *testing.T) {
 	if rec := sec12agDo(t, h, "GET", "/api/p/"+p.ID+"/store/object?key=blobs/"+sha, nil, c["carol"], modern); rec.Code != 200 {
 		t.Errorf("carol was refused content she may read: %d %s", rec.Code, rec.Body)
 	}
-	// Chunks are not listed to a filtered account at all.
+	// Chunks are listed only when a manifest this account may read names them.
+	// These fixtures are all far under the chunking threshold, so nothing here
+	// is chunked and the correct answer is an empty list — the assertion that
+	// matters is that it does not error, since the path it takes now fetches
+	// manifests. chunks_test.go covers real chunked content.
 	sizes, _ := storeList(t, h, p.ID, "chunks/", c["bob"])
 	if len(sizes) != 0 {
-		t.Errorf("chunks were listed to a filtered account: %v", sizes)
+		t.Errorf("chunks were listed for content nothing chunked: %v", sizes)
 	}
 }
