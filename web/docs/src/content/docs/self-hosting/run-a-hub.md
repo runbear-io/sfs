@@ -65,6 +65,32 @@ bdrive serve -c config.json
 Put TLS in front — Caddy, nginx, or your platform's load balancer. Device tokens
 travel as bearer tokens.
 
+:::caution[Don't let your proxy buffer the change stream]
+The hub pushes "these paths changed" to browsers and devices over server-sent
+events (`GET /api/p/<id>/events`), which is what makes a teammate's edit land in
+about a second instead of on the next poll. A proxy that buffers responses holds
+those frames until the connection closes, which turns the feature off without
+any error appearing anywhere — sync still works, just at its old pace.
+
+Caddy needs nothing. For nginx, turn buffering off and let the connection idle:
+
+```nginx
+location /api/ {
+    proxy_pass http://127.0.0.1:4173;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 1h;
+    proxy_set_header Connection "";
+    proxy_http_version 1.1;
+}
+```
+
+The hub already sends `X-Accel-Buffering: no`, which nginx honours on its own,
+so the block above is belt-and-braces for setups that override it. Cloudflare
+does not buffer SSE. If you cannot control the proxy, nothing breaks: clients
+fall back to polling on their normal intervals.
+:::
+
 For containers, the repository ships a `Dockerfile` (distroless, CGO-free) with
 a Cloud Run recipe in
 [`deploy/`](https://github.com/runbear-io/beardrive/tree/main/deploy). Any
