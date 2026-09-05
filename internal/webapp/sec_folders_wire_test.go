@@ -1,10 +1,15 @@
 package webapp
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/runbear-io/beardrive/internal/journal"
 )
 
 // Phase 3 of docs/folder-permissions-prd.md: a hidden folder never reaches the
@@ -217,5 +222,123 @@ func TestOldClientKeepsWorkingWithoutFolderRules(t *testing.T) {
 		if rec := doAs(t, h, "GET", url, nil, c["bob"]); rec.Code == http.StatusForbidden {
 			t.Errorf("%s refused a client on a project with no rules: %d %s", url, rec.Code, rec.Body)
 		}
+	}
+}
+
+// TestRevokingAFolderDoesNotBrickTheDevicesJournal.
+//
+// push sends the WHOLE local journal file every cycle — it is one append-only
+// object — so the body repeats every op the device has ever written. Judging
+// that history against today's folder rules means a member who had access to a
+// folder, wrote there, and then lost it has every later push refused over ops
+// the hub itself already holds: their sync is dead for the entire project,
+// permanently, with no recovery but editing their journal by hand.
+//
+// The rule is that only what a push ADDS is judged. Everything the hub already
+// stored was authorized when it was written and is already being served
+// (filtered) to everyone.
+func TestRevokingAFolderDoesNotBrickTheDevicesJournal(t *testing.T) {
+	h, _, c, p := permHub(t)
+	const dev = "bob-laptop"
+	secRegisterDevice(t, h, p.ID, c["bob"], dev, dev, "darwin")
+
+	push := func(ops []journal.Op) *httptest.ResponseRecorder {
+		t.Helper()
+		body, err := journal.Marshal(ops)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest("PUT",
+			"/api/p/"+p.ID+"/store/object?key=journal/"+dev+".jsonl", bytes.NewReader(body))
+		req.AddCookie(c["bob"])
+		req.Header.Set("X-Bdrive-Device", dev)
+		req.Header.Set("X-Bdrive-Perms", "1")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	op := func(seq int64, path string) journal.Op {
+		return journal.Op{
+			Seq: seq, Lamport: seq, Time: time.Now().UTC(), Device: dev, User: "bob@x.io",
+			Kind: journal.KindPut, Path: path,
+			Blob: strings.Repeat(string(rune('a'+seq)), 64), Size: 1,
+		}
+	}
+
+	// While bob may write it, he journals a file inside what will become a
+	// restricted folder — plus ordinary work outside it.
+	history := []journal.Op{op(1, "notes/a.md"), op(2, "vault/mine.md")}
+	if rec := push(history); rec.Code != 200 {
+		t.Fatalf("control: bob's original push failed: %d %s", rec.Code, rec.Body)
+	}
+
+	// Alice restricts the folder away from him.
+	rule := map[string]any{"prefix": "vault", "default": PermNone}
+	if rec := doAs(t, h, "PUT", "/api/p/"+p.ID+"/folders", rule, c["alice"]); rec.Code != 200 {
+		t.Fatalf("restrict: %d %s", rec.Code, rec.Body)
+	}
+
+	// Bob's next cycle sends the whole journal again — the two old ops plus one
+	// new one, entirely outside the restricted folder.
+	next := append(append([]journal.Op{}, history...), op(3, "notes/b.md"))
+	if rec := push(next); rec.Code != 200 {
+		t.Fatalf("a revocation bricked bob's journal: %d %s — every later push is refused "+
+			"over ops the hub already holds", rec.Code, rec.Body)
+	}
+
+	// The rule still bites on anything NEW inside the folder.
+	bad := append(append([]journal.Op{}, next...), op(4, "vault/after.md"))
+	if rec := push(bad); rec.Code != http.StatusForbidden {
+		t.Fatalf("a new op inside the restricted folder was accepted: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// TestSec_Folder_ARewrittenSeqCannotSmuggleAHiddenPath.
+//
+// "Already stored, do not re-judge" has to mean the same OP, not the same
+// number. journalKeepsItsOps deliberately refuses truncation but not
+// rewriting-in-place, so a device may replace what Seq 1 says — and if the
+// folder gate skipped every Seq the hub already holds, re-pointing an old Seq
+// at a restricted path would walk straight past it.
+//
+// This is the hole the first version of the brick fix opened, caught by the
+// phase-1 test it broke.
+func TestSec_Folder_ARewrittenSeqCannotSmuggleAHiddenPath(t *testing.T) {
+	h, _, c, p := folderHub(t) // "locked/" is read-only for bob
+	const dev = "bob-rewriter"
+	secRegisterDevice(t, h, p.ID, c["bob"], dev, dev, "darwin")
+
+	push := func(ops []journal.Op) *httptest.ResponseRecorder {
+		t.Helper()
+		body, err := journal.Marshal(ops)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest("PUT",
+			"/api/p/"+p.ID+"/store/object?key=journal/"+dev+".jsonl", bytes.NewReader(body))
+		req.AddCookie(c["bob"])
+		req.Header.Set("X-Bdrive-Device", dev)
+		req.Header.Set("X-Bdrive-Perms", "1")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	at := func(seq int64, path string) journal.Op {
+		return journal.Op{
+			Seq: seq, Lamport: seq, Time: time.Now().UTC(), Device: dev, User: "bob@x.io",
+			Kind: journal.KindPut, Path: path, Blob: strings.Repeat("f", 64), Size: 1,
+		}
+	}
+
+	if rec := push([]journal.Op{at(1, "notes/ok.md")}); rec.Code != 200 {
+		t.Fatalf("control: the first push failed: %d %s", rec.Code, rec.Body)
+	}
+	// Same Seq, different path — into the folder bob may only read.
+	if rec := push([]journal.Op{at(1, "locked/smuggled.md")}); rec.Code != http.StatusForbidden {
+		t.Fatalf("re-pointing Seq 1 at a read-only folder was accepted: %d %s", rec.Code, rec.Body)
+	}
+	// And re-sending the genuine op is still fine — that is the protocol.
+	if rec := push([]journal.Op{at(1, "notes/ok.md"), at(2, "notes/two.md")}); rec.Code != 200 {
+		t.Fatalf("re-sending stored history was refused: %d %s", rec.Code, rec.Body)
 	}
 }

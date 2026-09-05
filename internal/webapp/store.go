@@ -669,7 +669,7 @@ func (s *Server) opsNameTheirAuthor(w http.ResponseWriter, r *http.Request, ops 
 // opsWithinScope refuses a journal whose ops name a folder this account may
 // not write. Folder rules narrow the project level over a subtree (folders.go);
 // proj() has already established the caller may write the PROJECT.
-func (s *Server) opsWithinScope(w http.ResponseWriter, r *http.Request, ops []journal.Op) bool {
+func (s *Server) opsWithinScope(w http.ResponseWriter, r *http.Request, ops []journal.Op, held map[int64]string) bool {
 	p, ok := projectFromCtx(r)
 	if !ok || len(p.Folders) == 0 {
 		return true
@@ -680,6 +680,20 @@ func (s *Server) opsWithinScope(w http.ResponseWriter, r *http.Request, ops []jo
 	}
 	email := normEmail(s.requestUser(r).Email)
 	for _, op := range ops {
+		// Only what this push ADDS. See the call site: the body repeats the
+		// device's whole history every cycle, and judging that history against
+		// today's rules bricks a member whose access was narrowed after they
+		// wrote something.
+		//
+		// Keyed on the PATH the hub already holds under that Seq, not on the
+		// Seq alone: journalKeepsItsOps refuses truncation but not
+		// rewriting-in-place, so "Seq 1 is already stored" does not mean "this
+		// op is already stored" — and a device could otherwise re-point an old
+		// Seq at a restricted path and walk past this gate. Same Seq AND same
+		// path is the same claim about the same file; anything else is new.
+		if was, ok := held[op.Seq]; ok && was == op.Path {
+			continue
+		}
 		if atLeast(folderLevel(p, email, op.Path, base), PermWrite) {
 			continue
 		}
@@ -733,40 +747,48 @@ func (s *Server) opsWithinScope(w http.ResponseWriter, r *http.Request, ops []jo
 // is 0 for a first push and for a stored journal that would not parse — the
 // latter over-counts one push, which is the right price for not reading the
 // object twice.
-func journalKeepsItsOps(ctx context.Context, be remote.Backend, key string, ops []journal.Op) (ok bool, storedMax int64, err error) {
+func journalKeepsItsOps(ctx context.Context, be remote.Backend, key string, ops []journal.Op) (ok bool, storedMax int64, held map[int64]string, err error) {
 	switch have, err := be.Exists(ctx, key); {
 	case err != nil:
-		return false, 0, err
+		return false, 0, nil, err
 	case !have:
-		return true, 0, nil
+		return true, 0, nil, nil
 	}
 	rc, err := be.Get(ctx, key)
 	if err != nil {
-		return false, 0, err
+		return false, 0, nil, err
 	}
 	defer rc.Close()
 	data, err := io.ReadAll(rc)
 	if err != nil {
-		return false, 0, err
+		return false, 0, nil, err
 	}
 	stored, err := journal.Parse(data)
 	if err != nil {
 		log.Printf("beardrive: %s is not parseable, its ops cannot be protected from a rewrite: %v", key, err)
-		return true, 0, nil
+		return true, 0, nil, nil
 	}
 	seen := make(map[int64]bool, len(ops))
 	for _, op := range ops {
 		seen[op.Seq] = true
 	}
+	held = make(map[int64]string, len(stored))
 	for _, op := range stored {
 		if !seen[op.Seq] {
-			return false, 0, nil
+			return false, 0, nil, nil
 		}
 		if op.Seq > storedMax {
 			storedMax = op.Seq
 		}
+		// Seq → the path the hub already holds under it. This function
+		// deliberately refuses TRUNCATION and not rewriting-in-place (see
+		// above), so a Seq alone says nothing about WHICH op it is — and
+		// "already stored, do not re-judge" has to mean the same op, not the
+		// same number, or re-pointing an old Seq at a restricted path walks
+		// straight past the folder gate.
+		held[op.Seq] = op.Path
 	}
-	return true, storedMax, nil
+	return true, storedMax, held, nil
 }
 
 // storePutBody hands back the plaintext of a PUT body, inflating it when the
@@ -865,21 +887,6 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 	if !s.opsNameTheirAuthor(w, r, ops) {
 		return
 	}
-	// The folder gate for the sync wire, and the only write door a device has:
-	// a blob is content-addressed and inert until an op names it, and
-	// handleStoreSign has no path in its request to gate on. So "may this
-	// account write this folder?" is answered exactly here, over the ops the
-	// handler has already parsed for two other checks.
-	//
-	// The whole PUT is refused, not the offending ops: a journal is
-	// append-only and its writer's own record, so the hub may not edit one.
-	// An up-to-date client never reaches this — it learns its scope from
-	// /api/p/<id>/scope and never journals a path it cannot write — which is
-	// what keeps a member who edits a read-only folder from wedging their own
-	// sync forever. This is the check for the stale client and the hostile one.
-	if !s.opsWithinScope(w, r, ops) {
-		return
-	}
 	// Observed only after the write is authorized, and only into a row the
 	// account ALREADY owns (refreshDevice checks OwnerOf first). Nothing here
 	// claims: that happens once, when the hub mints this machine's token
@@ -903,16 +910,38 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var storedMax int64
+	var heldPaths map[int64]string
 	if strings.HasPrefix(key, "journal/") {
 		var ok bool
 		var err error
-		switch ok, storedMax, err = journalKeepsItsOps(r.Context(), rs.Backend, key, ops); {
+		switch ok, storedMax, heldPaths, err = journalKeepsItsOps(r.Context(), rs.Backend, key, ops); {
 		case err != nil:
 			storageErr(w, http.StatusBadGateway, "could not read the stored journal", err)
 			return
 		case !ok:
 			http.Error(w, "a journal is append-only; this body drops ops the hub already holds",
 				http.StatusConflict)
+			return
+		}
+		// The folder gate for the sync wire, and the only write door a device
+		// has: a blob is content-addressed and inert until an op names it, and
+		// handleStoreSign has no path in its request to gate on. So "may this
+		// account write this folder?" is answered exactly here.
+		//
+		// It runs HERE, after storedMax, because it must judge only the ops
+		// this push ADDS. push sends the whole journal file every cycle — it
+		// is one append-only object — so a member who had access to a folder,
+		// wrote there, and then lost it would have every later push refused
+		// over ops the hub itself already holds. Their sync would be dead for
+		// the entire project, permanently, with no recovery but editing their
+		// journal by hand. Ops the hub already stored were authorized when they
+		// were written and are already served (filtered) to everyone; re-sending
+		// them is the protocol, not a new write.
+		//
+		// That is also what distinguishes this from opsNameTheirAuthor above,
+		// which may safely re-check everything: authorship does not change over
+		// time. Scope does.
+		if !s.opsWithinScope(w, r, ops, heldPaths) {
 			return
 		}
 	}
