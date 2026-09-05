@@ -268,6 +268,83 @@ func (s *Server) writablePaths(w http.ResponseWriter, r *http.Request, paths []s
 	return true
 }
 
+// pathFilter is one account's read visibility inside one project, resolved
+// once per request. Resolving it per path would re-read the org role for every
+// file in a listing; resolving it once makes the per-path test a string
+// compare against a usually-empty rule list.
+//
+// The deliberate NON-design here is a per-reader filtered fold cached on
+// RemoteSource, which the PRD first proposed. A predicate at the use sites
+// needs no cache, no scope-keyed eviction and no memory per distinct scope:
+// the single-path routes pay one comparison, and the listing routes already
+// iterate every entry. (Phase 3's filtered JOURNAL is a different problem — a
+// byte stream, not a folded map — and does need that cache.)
+type pathFilter struct {
+	project Project
+	email   string
+	base    string
+	on      bool // false: nothing to filter, every test is a constant true
+}
+
+// visibility resolves the caller's read visibility for the project the proj()
+// resolver already resolved. Off — allowing everything — in single-volume mode
+// and on any project with no folder rules, which is every project on a hub
+// that has not used the feature.
+func (s *Server) visibility(r *http.Request) pathFilter {
+	p, ok := projectFromCtx(r)
+	if !ok || len(p.Folders) == 0 {
+		return pathFilter{}
+	}
+	base := s.projectPermOf(r, p)
+	if base == PermAdmin {
+		return pathFilter{} // admin everywhere; nothing to hide
+	}
+	return pathFilter{project: p, email: normEmail(s.requestUser(r).Email), base: base, on: true}
+}
+
+// canRead reports whether this account may see a path at all.
+func (f pathFilter) canRead(path string) bool {
+	if !f.on {
+		return true
+	}
+	return atLeast(folderLevel(f.project, f.email, path, f.base), PermRead)
+}
+
+// hides reports whether the filter conceals anything, so a caller can skip
+// building a visibility set it would never consult.
+func (f pathFilter) hides() bool { return f.on }
+
+// visibleSHA reports whether this account may read the content stored under
+// sha, by asking whether ANY op it can read names it.
+//
+// The union is the point, and it is not a weakness: content that also lives at
+// a path the caller may read is content they can already fetch by that path.
+// Restricting one copy of bytes that exist elsewhere unrestricted hides
+// nothing, and pretending otherwise would be the lie. An admin restricting a
+// folder whose contents are duplicated outside it needs to be told, in the UI
+// — not have this door answer a different question from the tree.
+//
+// Costs one pass over the project's already-parsed ops, and only when the
+// filter hides something at all.
+func (f pathFilter) visibleSHA(ctx context.Context, rs *RemoteSource, sha string) bool {
+	if !f.hides() {
+		return true
+	}
+	ops, err := rs.loadSourcedOps(ctx)
+	if err != nil {
+		// The hub cannot tell whether this is visible. Refusing is the only
+		// safe answer: serving it would make a storage hiccup the way past a
+		// permission.
+		return false
+	}
+	for _, so := range ops {
+		if so.Op.Blob == sha && f.canRead(so.Op.Path) {
+			return true
+		}
+	}
+	return false
+}
+
 // ---- HTTP ----
 
 // handleProjectFolders lists the folder rules the caller may know about, plus

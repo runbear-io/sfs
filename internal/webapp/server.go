@@ -1272,7 +1272,24 @@ func (s *Server) handleTree(v *volume, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	writeJSON(w, buildTree(snap.files))
+	writeJSON(w, buildTree(visibleFiles(snap.files, s.visibility(r))))
+}
+
+// visibleFiles drops the entries this account may not read. It returns the
+// original map untouched when the filter hides nothing, which is every project
+// on a hub that has never used a folder rule — so the tree of a project with
+// no rules costs exactly what it did before.
+func visibleFiles(files map[string]FileInfo, f pathFilter) map[string]FileInfo {
+	if !f.hides() {
+		return files
+	}
+	out := make(map[string]FileInfo, len(files))
+	for p, fi := range files {
+		if f.canRead(p) {
+			out[p] = fi
+		}
+	}
+	return out
 }
 
 func buildTree(files map[string]FileInfo) *Node {
@@ -1318,7 +1335,7 @@ func sortTree(n *Node) {
 }
 
 // lookup resolves ?path= against the volume's current snapshot.
-func lookup(v *volume, r *http.Request) (string, FileInfo, int, error) {
+func (s *Server) lookup(v *volume, r *http.Request) (string, FileInfo, int, error) {
 	p := r.URL.Query().Get("path")
 	if p == "" {
 		return "", FileInfo{}, http.StatusBadRequest, fmt.Errorf("missing ?path=")
@@ -1343,11 +1360,18 @@ func lookup(v *volume, r *http.Request) (string, FileInfo, int, error) {
 		// payload names it.
 		p, fi = to, snap.files[to]
 	}
+	// A path inside a folder this account may not read answers exactly as a
+	// path that does not exist — 404, same words. 403 would confirm the file
+	// is there, which is most of what a hidden folder is hiding. Same rule the
+	// project level already applies (perms.go's project()).
+	if !s.visibility(r).canRead(p) {
+		return "", FileInfo{}, http.StatusNotFound, fmt.Errorf("no such file: %s", p)
+	}
 	return p, fi, 0, nil
 }
 
 func (s *Server) serveBlob(v *volume, w http.ResponseWriter, r *http.Request, attach bool) {
-	p, fi, code, err := lookup(v, r)
+	p, fi, code, err := s.lookup(v, r)
 	if err != nil {
 		http.Error(w, err.Error(), code)
 		return
@@ -1415,7 +1439,7 @@ func (s *Server) handleRender(v *volume, w http.ResponseWriter, r *http.Request)
 		s.renderVersion(v, w, r, sha)
 		return
 	}
-	p, fi, code, err := lookup(v, r)
+	p, fi, code, err := s.lookup(v, r)
 	if err != nil {
 		http.Error(w, err.Error(), code)
 		return
@@ -1495,6 +1519,12 @@ func (s *Server) renderVersion(v *volume, w http.ResponseWriter, r *http.Request
 	}
 	rs := storeSource(v, w)
 	if rs == nil {
+		return
+	}
+	// Same gate as /blob: this door serves a past version by content address,
+	// so it must answer the same question about the same bytes.
+	if !s.visibility(r).visibleSHA(r.Context(), rs, sha) {
+		http.Error(w, "no such version", http.StatusNotFound)
 		return
 	}
 	rc, err := rs.OpenBlob(r.Context(), sha)
