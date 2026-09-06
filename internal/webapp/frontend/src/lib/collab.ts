@@ -36,6 +36,10 @@ export class CollabDoc {
   private pending: Uint8Array[] = [];
   private timer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
+  // Whether a `hello` has ever arrived. Distinguishes a dropped connection
+  // (retry, keep the document) from a relay that does not exist (give up on
+  // co-editing and let the editor open solo).
+  private everConnected = false;
   // Updates that came FROM the relay must not be echoed back to it.
   private applying = false;
 
@@ -44,6 +48,9 @@ export class CollabDoc {
     private readonly seedText: string,
     private readonly onStatus: (s: CollabStatus) => void,
     private readonly onSeeded: () => void,
+    // Called when the relay turns out not to be reachable at all, so the
+    // caller can fall back to plain single-writer editing.
+    private readonly onUnavailable: () => void,
     private readonly me?: { name: string; colour: string },
   ) {
     this.text = this.doc.getText("body");
@@ -107,6 +114,7 @@ export class CollabDoc {
         return;
       }
       if (f.type === "hello") {
+        this.everConnected = true;
         this.applying = true;
         try {
           for (const u of f.log ?? []) Y.applyUpdate(this.doc, b64ToBytes(u));
@@ -143,7 +151,11 @@ export class CollabDoc {
     };
     es.onerror = () => {
       this.onStatus("offline");
-      // EventSource retries on its own; nothing to do but say so.
+      // EventSource retries on its own. But if it has never once connected,
+      // the relay is not there at all — an older hub with no such route, or a
+      // 403 — and something has to let the editor open anyway, or the caller
+      // waits forever for a `hello` that is not coming.
+      if (!this.everConnected) this.onUnavailable();
     };
   }
 

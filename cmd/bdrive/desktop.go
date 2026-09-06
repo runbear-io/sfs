@@ -101,6 +101,13 @@ func desktopHandler() http.Handler {
 	// own editor, which are hub writes via upload/content.
 	mux.HandleFunc("GET /api/p/{project}/events", proxyProject)
 	mux.HandleFunc("POST /api/p/{project}/presence", originGuard(proxyProject))
+	// Co-editing is hub state for the same reason: the document lives in the
+	// hub's relay, and the snapshot that ends up in the journal is a hub
+	// write. Without these the app's editor opens on a document that never
+	// arrives — it mounts on the relay's first frame — so this is what makes
+	// the Mac app's Edit button work at all, not just work together.
+	mux.HandleFunc("GET /api/p/{project}/collab", proxyProject)
+	mux.HandleFunc("POST /api/p/{project}/collab", originGuard(proxyProject))
 	mux.HandleFunc("GET /api/p/{project}/heat", proxyProject)
 	mux.HandleFunc("GET /api/p/{project}/shares", proxyProject)
 	mux.HandleFunc("POST /api/p/{project}/shares", originGuard(proxyProject))
@@ -685,6 +692,7 @@ func proxyHub(w http.ResponseWriter, r *http.Request, server string) {
 // answer — the client has to be chosen before the answer exists.
 func streaming(r *http.Request) bool {
 	return strings.HasSuffix(r.URL.Path, "/events") ||
+		(r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/collab")) ||
 		strings.Contains(r.Header.Get("Accept"), "text/event-stream")
 }
 
