@@ -38,3 +38,55 @@ export function fuzzyStemmed(query: string, label: string) {
   else if (q.length > 2 && q.endsWith("s")) stem = q.slice(0, -1);
   return stem ? fuzzy(stem, label) : null;
 }
+
+/* Flat, per-errored-token. Large enough that no run/word-start bonus can
+   climb over it, which makes "exact always beats approximate" a property
+   rather than a tuning accident. */
+const ERROR_PENALTY = 1000;
+/* Paid per token whose match starts in the file name rather than an
+   ancestor directory, so docs/install-guide.md beats a path whose letters
+   merely scatter across directory names. */
+const BASENAME_BONUS = 12;
+/* Below this, a one-character error matches nearly everything. */
+const MIN_ERROR_LEN = 4;
+
+/* Score a whole query against one candidate label.
+
+   The query is split on whitespace and every token must match (AND) — file
+   paths use "/", "-" and "_", never spaces, so before this a query with a
+   space in it matched nothing at all. Token order is irrelevant; scores are
+   summed. With `allowError`, a token of 4+ characters that missed is retried
+   with each of its single-character deletions: subsequence matching already
+   tolerates a character missing from the TARGET, so that one rule covers a
+   transposition, a substitution and an insertion (fileveiw → fileviw). Hits
+   come back sorted and de-duplicated — Highlight slices forward and would
+   silently duplicate letters otherwise. */
+export function scoreLabel(
+  query: string,
+  label: string,
+  opts?: { allowError?: boolean },
+): { score: number; hits: number[] } | null {
+  // Empty query: score 0 for everything, no hits. The palette's sort is
+  // stable, so this is what keeps the project's own destinations on top of
+  // an empty palette (BEA-52, BEA-105). Must return before splitting.
+  if (!query.trim()) return { score: 0, hits: [] };
+  const base = label.lastIndexOf("/") + 1;
+  let score = 0;
+  const hits: number[] = [];
+  for (const token of query.trim().split(/\s+/)) {
+    let m = fuzzyStemmed(token, label);
+    let errored = false;
+    if (!m && opts?.allowError && token.length >= MIN_ERROR_LEN) {
+      for (let i = 0; i < token.length && !m; i++) {
+        m = fuzzyStemmed(token.slice(0, i) + token.slice(i + 1), label);
+        errored = !!m;
+      }
+    }
+    if (!m) return null;
+    score += m.score;
+    if (errored) score -= ERROR_PENALTY;
+    if (m.hits.length > 0 && m.hits[0] >= base) score += BASENAME_BONUS;
+    hits.push(...m.hits);
+  }
+  return { score, hits: [...new Set(hits)].sort((a, b) => a - b) };
+}

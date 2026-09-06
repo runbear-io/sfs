@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Icon } from "./shell";
 import { Command, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
-import { fuzzyStemmed } from "@/lib/fuzzy";
+import { scoreLabel } from "@/lib/fuzzy";
 
 /* ---- command palette (⌘K / Ctrl+K) ----
    One box for everything: fuzzy-jump to any file, switch projects, and run
@@ -41,9 +41,22 @@ export function Palette({
   const items = useMemo(() => {
     if (!open) return [];
     const scored: Array<PaletteItem & { score: number; hits: number[] }> = [];
+    const missed: PaletteItem[] = [];
     for (const c of candidates()) {
-      const m = fuzzyStemmed(query, c.label);
+      const m = scoreLabel(query, c.label);
       if (m) scored.push({ ...c, score: m.score, hits: m.hits });
+      else missed.push(c);
+    }
+    // Typo tolerance is a retry over what the strict pass rejected, and only
+    // when the strict pass came back short of the cap: the whole candidate
+    // list is rescored on every keystroke, so a query that already matches
+    // must never pay for edit distance. Errored matches carry a penalty no
+    // bonus can beat, so the sort — not this guard — is what ranks them.
+    if (query.trim() && scored.length < 40) {
+      for (const c of missed) {
+        const m = scoreLabel(query, c.label, { allowError: true });
+        if (m) scored.push({ ...c, score: m.score, hits: m.hits });
+      }
     }
     scored.sort((a, b) => b.score - a.score);
     return scored.slice(0, 40);
