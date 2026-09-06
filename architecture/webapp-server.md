@@ -169,6 +169,22 @@ classDiagram
         -ch chan of frames
         -lost atomic.Bool
     }
+    class collabHub {
+        <<internal/webapp, collab.go>>
+        -rooms per project and path
+        +room(key) collabRoom
+    }
+    class collabRoom {
+        -updates opaque Yjs updates
+        -seeded claimed at join
+        +join(sub) log, first
+        +post(update, from) ok
+        +relay(frame) not logged
+        +reset()
+    }
+    note for collabHub "GET and POST {prefix}collab?path=, proj(PermWrite) — the editing channel, so a read-only member has nothing to send on it. The hub is a RELAY and an append-only log: it never parses a Yjs update, holds no document, and links no CRDT library, which is what keeps the build pure Go (a cgo y-crdt would break the cross-compiled release the way a cgo sqlite would). Nothing here touches the journal — the DOCUMENT is a CRDT between browsers, the FILE is still an ordinary blob written by an ordinary upload/content call from whichever client stopped typing last, so journal.Less and Replay are untouched and every desktop device, agent and older client converges as before. The log is deliberately NOT durable; the file is"
+    note for collabRoom "`seeded` is CLAIMED at join under the room lock, never inferred from an empty log: the log only fills once the seeding client has POSTED, so every joiner arriving inside that window was told to seed too — 32 of 32 in the test that found it — and two clients seeding the same text build two DIFFERENT Yjs documents whose merge duplicates every character. The claim is released when the last editor leaves without having posted, or a tab opened and closed would leave the room claimed but empty and the next joiner would snapshot that emptiness over a real file. relay() is the awareness path: broadcast, never recorded, because a caret position replayed to a joiner paints cursors for people who have left"
+
     class presenceHub {
         <<internal/webapp, presence.go>>
         -at per project, per actor entry
@@ -529,6 +545,9 @@ classDiagram
     Backend <|-- Watcher : optional capability
     Server *-- eventHub : live change fan-out
     Server *-- presenceHub : who is looking at what
+    Server *-- collabHub : per-document editing relay
+    collabHub *-- collabRoom
+    collabRoom o-- subscriber : reuses the event fan-out
     eventHub *-- subscriber
     presenceHub ..> eventHub : publishes roster on the SAME stream
     presenceHub ..> person : rosterOf

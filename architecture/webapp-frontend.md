@@ -100,6 +100,7 @@ classDiagram
         +fetchBlobText(url) BlobText
         +fileURLFor(apiBase, path, version) string
     }
+    note for lib "collab.ts is the Yjs provider: SSE down, POST up, over the same pair /events already uses — no websocket dependency, no upgrade handshake, nothing special asked of a proxy that already carries the change stream. Only the client the hub calls `seed` builds the document from the file text; everyone else rebuilds from the relay log, because two independent seeds of the same text are two DIFFERENT Yjs documents and merging them duplicates every character. Awareness is posted separately and never logged. peerCount() is what tells a co-editor's snapshot (already in my buffer) from an outside write (a CLI, another device), which is the only case the peer-wrote banner should fire for"
     note for hooks "usePresence beats every 10s with the path you are on and renders the roster the hub pushes back — the roster ARRIVES on useProjectEvents' stream (onPresence), not on the POST, which is used only for first paint so a tab opening into a quiet project still sees who is there. One EventSource carries both frame types: presence invalidates nothing. The path is read through a ref so navigating does not tear the timer down, and the unmount beat sends leave:true as courtesy — the 15s TTL is the real guarantee. Every failure is swallowed: presence is decoration and must never surface an error"
     note for hooks "useProjectEvents is the one non-polling source: an EventSource on {apiBase}events whose frames invalidate exactly what a peer's write touched (tree/history/heat always; render per named path; text wholesale). It is what makes an OPEN file update at all — useTextAt has no refetchInterval, so before this a body fetched once stayed on screen until the reader navigated away. A resync frame, a truncated path list, or an unparseable frame all fall back to invalidating every body rather than guessing. Errors are deliberately silent: EventSource retries itself and the 15s tree poll is still underneath, so a hub restart or a sleeping laptop must not write a log line"
     note for hooks "TanStack Query wrappers over the viewer APIs. useTextAt fetches any URL and sniffs it — the Content-Length cheap-out lives here (HTTP), the byte decision in lib/sniff.ts (pure). A live path must not be cached immutable; a sha can be. fileURLFor is the one definition of a file page's byte URL, so Copy and FileView cannot drift; fetchBlobText is exported for Copy, which must NOT read the shared text cache — TextView stores a string there and SniffView a BlobText"
@@ -107,7 +108,7 @@ classDiagram
     class components {
         FileView FolderListing FileTree
         HistoryView HistoryRow HistoryFilters DiffView VersionBanner ConflictBanner
-        PresenceBar
+        PresenceBar Editor
         Insights ShareDialog NewProjectDialog
         ShareBanner SharesTable AdminTable
         OrgAdmin HubSettings ProjectSettings
@@ -130,6 +131,7 @@ classDiagram
         +heat.ts placeLabels LABEL_MAX (scatter danger-dot labels)
         +heat.ts HOT_READS STALE_DAYS isDanger daysSince agoLabel staleNote
         +conflict.ts parseConflict Conflict
+        +collab.ts CollabDoc peerCount (Yjs over SSE + POST)
         +sniff.ts sniffBytes BlobText MAX_BYTES
         +scroll.ts Goal armGoal applyGoal noteScroll MAX_APPLY
         +csv.ts parseDelimited Csv CSV_ROWS
