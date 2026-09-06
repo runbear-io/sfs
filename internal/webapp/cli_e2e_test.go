@@ -1113,3 +1113,86 @@ func TestCLIStatusReportsUnscannedWork(t *testing.T) {
 		t.Fatalf("drift did not clear after a sync:\n%s", out)
 	}
 }
+
+// TestCLIVerifyE2E drives `bdrive verify` against a real hub through the real
+// binary: a clean project passes, an edit made behind the daemon's back is
+// reported as drifted with a status-1 exit, --remote passes against the live
+// hub, and --remote against a hub that has gone away still returns the local
+// verdict rather than failing.
+func TestCLIVerifyE2E(t *testing.T) {
+	e := newCLIEnv(t)
+	run := e.run
+
+	work := t.TempDir()
+	if err := os.WriteFile(filepath.Join(work, "index.md"), []byte("# Index\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run(work, "init", "--name", "verify-e2e", "--yes"); err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+	defer run(work, "stop", work)
+	if out, err := run(work, "sync"); err != nil {
+		t.Fatalf("sync: %v\n%s", err, out)
+	}
+	// Stop the daemon, or it scans the edit below out from under the test.
+	if out, err := run(work, "stop", work); err != nil {
+		t.Fatalf("stop: %v\n%s", err, out)
+	}
+
+	// --- Clean: exit 0, and it says so.
+	out, err := run(work, "verify")
+	if err != nil {
+		t.Fatalf("verify on a clean project should exit 0: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "OK - the folder matches the journal") {
+		t.Fatalf("clean verify did not report OK:\n%s", out)
+	}
+	// index.md plus the .bdriveignore init seeds — the point is that the cost
+	// is reported at all, not the exact count.
+	if !strings.Contains(out, "checked:  2 files, ") {
+		t.Fatalf("verify did not report what it hashed:\n%s", out)
+	}
+
+	// --- The hub still holds it: --remote is clean too.
+	out, err = run(work, "verify", "--remote")
+	if err != nil {
+		t.Fatalf("verify --remote on a synced project should exit 0: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "missing-on-hub") {
+		t.Fatalf("verify --remote reported content missing from the hub:\n%s", out)
+	}
+
+	// --- Edited behind the daemon's back: drifted, exit 1.
+	if err := os.WriteFile(filepath.Join(work, "index.md"), []byte("# Index\n\nappended by hand\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err = run(work, "verify")
+	if err == nil {
+		t.Fatalf("verify should exit 1 when something drifted:\n%s", out)
+	}
+	if !strings.Contains(out, "drifted (1)") || !strings.Contains(out, "index.md") {
+		t.Fatalf("verify did not name the drifted file:\n%s", out)
+	}
+	// A status is not a stack trace: cobra's usage block must stay silenced.
+	if strings.Contains(out, "Usage:") {
+		t.Fatalf("verify printed a usage block for a findings exit:\n%s", out)
+	}
+
+	// --- Hub gone: the remote leg degrades to a warning, the local verdict
+	// still decides. Put the file back first so "local is clean" is the
+	// thing being asserted.
+	if err := os.WriteFile(filepath.Join(work, "index.md"), []byte("# Index\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e.hub.Close()
+	out, err = run(work, "verify", "--remote")
+	if err != nil {
+		t.Fatalf("verify --remote against an unreachable hub must not hard-fail: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "warning:") {
+		t.Fatalf("verify --remote said nothing about the unreachable hub:\n%s", out)
+	}
+	if !strings.Contains(out, "OK - the folder matches the journal") {
+		t.Fatalf("verify --remote dropped the local verdict when the hub went away:\n%s", out)
+	}
+}

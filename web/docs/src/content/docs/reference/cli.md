@@ -19,6 +19,7 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 | `bdrive scope --explain` | List every path in the folder, split into what syncs and what does not, with counts — the verifiable answer to "what leaves this machine". Pure read: no daemon, no lock, no network |
 | `bdrive grep <pattern> [folder]` | Search the text **inside** the files a project syncs. `pattern` is a Go RE2 regexp, or a literal string with `-F`. `-i` ignores case, `-l` prints matching paths only, `-n` caps the lines printed (default 200, `0` = all). Pure read: no daemon, no lock, no network |
 | `bdrive stale [folder]` | Find synced markdown that links to a file written **after** the doc itself — staleness by what moved, not by the calendar. `-l` prints outgrown paths only, `-n` caps the docs printed (default 50, `0` = all). Pure read: no daemon, no lock, no network. Exit status is 0 whether or not anything is stale |
+| `bdrive verify [folder]` | Prove this folder matches the content the journal records — sha256 every synced file and compare. Reports `drifted`, `never-pushed`, `missing-locally`, `not-yet-scanned`, and with `--remote` also `missing-on-hub`. Pure read: no daemon, no lock, no ops, and without `--remote` no network. Exit status is 0 when every category is empty, 1 otherwise |
 | `bdrive forget <path>...` | Stop syncing a path and remove it from the hub. Adds the rule to `.bdriveignore` (which syncs) and prunes in one step. Local files are never touched, here or on teammates' devices |
 | `bdrive url [path]` | Internal hub link for a file or folder — sign-in and membership required. `--sync` pushes first, and warns on stderr if the hub refused that push; no argument gives the project home. Computed locally |
 | `bdrive share <file>` | Public URL for a synced file — links are per-file, so a folder is refused with a file inside it named instead. `--list`, `--revoke`, `--expires` (the hub's Share dialog can also set an expiry on an existing link). Refuses a file whose first 1 MiB holds credential-shaped strings — `--force` shares it anyway |
@@ -203,6 +204,67 @@ this is advisory output, not a gate — grep's "1 means nothing found" conventio
 would invert here and fail on a clean project. Read heat, a badge on the hub's
 file view, and injecting the flag into an agent's session context are not built
 yet; this ships the signal.
+
+### `bdrive verify` — prove this folder matches the hub
+
+"Your folder is the same everywhere" is the claim. `bdrive verify` is the
+receipt. It hashes every file the project syncs and compares each one against
+the content the journal records for it.
+
+This is what `bdrive status` cannot do. `status` counts pending ops and
+unscanned changes, but it never reads a byte of content — so a file whose bytes
+changed while its size and mtime stayed put is invisible to it. `verify`
+hashes, which is the whole point: there is deliberately no size/mtime fast
+path, and on a large project it is noticeably slower than `status`. It reports
+what it hashed and how long it took for exactly that reason.
+
+```sh
+bdrive verify
+#   project:  team-wiki (m-a3f9c1d2)
+#   checked:  184 files, 41.2 MB hashed in 912ms
+#   OK - the folder matches the journal
+#   (this compares against what this device last pulled — run `bdrive sync` first for the hub's latest)
+
+bdrive verify --remote   # also ask the hub whether it still holds the content
+bdrive verify ~/wiki     # a project other than the current folder
+```
+
+It reports five things:
+
+| Category | Meaning |
+| --- | --- |
+| `drifted` | on disk, but not the content the journal records |
+| `never-pushed` | committed here, never reached the hub |
+| `missing-locally` | the journal has it, this folder does not |
+| `not-yet-scanned` | on disk, with no op anywhere yet |
+| `missing-on-hub` | synced here, absent from the hub — `--remote` only |
+
+A path the local `.bdriveignore` excludes is **not** reported as missing. The
+rules are applied symmetrically in scan and materialize, so its absence from
+disk is correct — a project narrowed with `bdrive scope --only` stays quiet.
+And when `missing-locally` is really just "not downloaded yet", the output says
+so and points at `bdrive sync`.
+
+`--remote` adds one existence check per **distinct blob**, and asks for both
+`blobs/<sha>` and `manifests/<sha>`. Files over 4 MiB move as content-defined
+chunks plus a manifest keyed by the file's own sha256, so a check that asked
+only `blobs/` would call every large file missing from the hub. A manifest
+existing implies its chunks do — the hub enforces that at ingest — so there is
+no chunk-by-chunk walk. If the hub is unreachable, the remote half degrades to
+a printed warning and the local verdict still stands.
+
+**`verify` never repairs anything.** It is a pure read: no daemon, no lock, no
+ops, no journal writes. Run `bdrive sync` to reconcile what it found, or
+`bdrive log <path>` for a file's history.
+
+**Exit status is 0 when every category is empty and 1 when any is not,** so it
+composes as a pre-flight check in a script or a CI job.
+
+One caveat the command prints for itself: the journals it replays are this
+device's **local copies**. Without a pull it proves "this folder matches what I
+last pulled" — and with `--remote`, "and the hub still holds all of it". A
+teammate's newer op is invisible until the next cycle, so sync first if you
+want the hub's latest.
 
 ### `bdrive forget` and `bdrive sync --prune` — cleaning up the hub
 
