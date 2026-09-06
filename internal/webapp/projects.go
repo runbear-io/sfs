@@ -38,6 +38,14 @@ type Project struct {
 	Default string `json:"default,omitempty"`
 	// Perms are the explicit grants, lowercase email → level.
 	Perms map[string]string `json:"perms,omitempty"`
+	// Deleted marks a tombstone: the project was deleted (storage purged,
+	// shares revoked) but the row stays — who deleted what, when, remains
+	// queryable, and that row IS the audit record of the deletion. Zero for
+	// live projects. Every live-project read path skips tombstones, so the
+	// name is immediately reusable; a new project by the old name gets a
+	// fresh id and a fresh storage prefix.
+	Deleted   time.Time `json:"deleted,omitzero"`
+	DeletedBy string    `json:"deleted_by,omitempty"` // account email
 }
 
 // level is the project's effective default level for org members.
@@ -227,13 +235,30 @@ func (db *ProjectDB) refresh() {
 	db.byID = next
 }
 
-// list returns projects sorted by name. Callers hold mu.
+// list returns live projects sorted by name. Callers hold mu.
 func (db *ProjectDB) list() []Project {
 	out := make([]Project, 0, len(db.byID))
 	for _, p := range db.byID {
-		out = append(out, p.clone())
+		if p.Deleted.IsZero() {
+			out = append(out, p.clone())
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// ListDeleted returns the tombstones, most recently deleted first.
+func (db *ProjectDB) ListDeleted() []Project {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	db.refresh()
+	var out []Project
+	for _, p := range db.byID {
+		if !p.Deleted.IsZero() {
+			out = append(out, p.clone())
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Deleted.After(out[j].Deleted) })
 	return out
 }
 
@@ -249,7 +274,19 @@ func (db *ProjectDB) Get(id string) (Project, bool) {
 	defer db.mu.Unlock()
 	db.refresh()
 	p, ok := db.byID[id]
-	if !ok {
+	if !ok || !p.Deleted.IsZero() {
+		return Project{}, false
+	}
+	return p.clone(), true
+}
+
+// GetDeleted returns a tombstone by id.
+func (db *ProjectDB) GetDeleted(id string) (Project, bool) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	db.refresh()
+	p, ok := db.byID[id]
+	if !ok || p.Deleted.IsZero() {
 		return Project{}, false
 	}
 	return p.clone(), true
@@ -267,7 +304,7 @@ func (db *ProjectDB) GetOrCreate(name, org string) (Project, bool, error) {
 	defer db.mu.Unlock()
 	db.refresh()
 	for _, p := range db.byID {
-		if p.Name == name && p.Org == org {
+		if p.Name == name && p.Org == org && p.Deleted.IsZero() {
 			return p.clone(), false, nil
 		}
 	}
@@ -312,13 +349,13 @@ func (db *ProjectDB) Update(id string, name, description, icon *string) error {
 	defer db.mu.Unlock()
 	db.refresh()
 	p, ok := db.byID[id]
-	if !ok {
+	if !ok || !p.Deleted.IsZero() {
 		return fmt.Errorf("no such project %q", id)
 	}
 	next := p
 	if name != nil {
 		for _, other := range db.byID {
-			if other.ID != id && other.Name == newName && other.Org == p.Org {
+			if other.ID != id && other.Name == newName && other.Org == p.Org && other.Deleted.IsZero() {
 				return fmt.Errorf("a project named %q already exists in this organization", newName)
 			}
 		}
@@ -338,18 +375,27 @@ func (db *ProjectDB) Rename(id, name string) error {
 	return db.Update(id, &name, nil, nil)
 }
 
-// Delete removes a project from the registry. Its storage prefix (blobs,
-// journals) is left in the object store — the id is retired, not scrubbed —
-// so the caller decides whether to reclaim that space out of band.
-func (db *ProjectDB) Delete(id string) error {
+// Delete tombstones a project: the row stays in the registry with Deleted
+// and DeletedBy set — the durable audit record of who deleted what, when —
+// and every live-project read path stops answering for it. `by` is the
+// deleting account's email. The grant set stays on the tombstone: no content
+// route can reach it (Get filters tombstones), and the deleted LISTING runs
+// the same permission resolver, so a tombstone is visible to exactly whoever
+// could see the project alive — never wider. ProjectRepo.Delete (the hard
+// remove) is no longer called from here; a purge of old tombstones would be
+// its caller.
+func (db *ProjectDB) Delete(id, by string) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	db.refresh()
-	if _, ok := db.byID[id]; !ok {
+	p, ok := db.byID[id]
+	if !ok || !p.Deleted.IsZero() {
 		return fmt.Errorf("no such project %q", id)
 	}
-	delete(db.byID, id)
-	return db.repo.Delete(id)
+	next := p
+	next.Deleted = time.Now().UTC()
+	next.DeletedBy = normEmail(by)
+	return db.put(p, next)
 }
 
 // SetCreator records who created a project (and is its first admin).

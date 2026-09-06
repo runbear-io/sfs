@@ -344,6 +344,7 @@ func TestReadOnlyDirectoryRefusesWrites(t *testing.T) {
 		body        any
 	}{
 		{"PATCH", "/api/orgs/" + pa.Org, map[string]string{"name": "nope"}},
+		{"DELETE", "/api/orgs/" + pa.Org, nil},
 		{"PATCH", "/api/orgs/" + pa.Org + "/members/bob@x.io", map[string]string{"role": "owner"}},
 		{"DELETE", "/api/orgs/" + pa.Org + "/members/bob@x.io", nil},
 		{"POST", "/api/orgs/" + pa.Org + "/invites", nil},

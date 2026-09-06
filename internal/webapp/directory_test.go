@@ -23,6 +23,7 @@ type readOnlyDir struct{ Directory }
 
 func (readOnlyDir) Create(string, string) (Org, error)     { return Org{}, ErrManagedElsewhere }
 func (readOnlyDir) Rename(string, string) error            { return ErrManagedElsewhere }
+func (readOnlyDir) Delete(string) error                    { return ErrManagedElsewhere }
 func (readOnlyDir) AddMember(string, string, string) error { return ErrManagedElsewhere }
 func (readOnlyDir) SetRole(string, string, string) error   { return ErrManagedElsewhere }
 func (readOnlyDir) RemoveMember(string, string) error      { return ErrManagedElsewhere }

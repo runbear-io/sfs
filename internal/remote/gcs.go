@@ -112,4 +112,12 @@ func (b *gcsBackend) Exists(ctx context.Context, key string) (bool, error) {
 	return false, err
 }
 
+func (b *gcsBackend) Delete(ctx context.Context, key string) error {
+	err := b.bucket.Object(b.key(key)).Delete(ctx)
+	if errors.Is(err, gcs.ErrObjectNotExist) {
+		return nil
+	}
+	return err
+}
+
 func (b *gcsBackend) Close() error { return b.client.Close() }

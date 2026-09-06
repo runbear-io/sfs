@@ -122,4 +122,22 @@ func (b *localBackend) Exists(_ context.Context, key string) (bool, error) {
 	return false, err
 }
 
+func (b *localBackend) Delete(_ context.Context, key string) error {
+	p, err := b.path(key)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	// Prune now-empty parent directories so purging a prefix leaves no husk;
+	// os.Remove refuses a non-empty directory, which is the stop condition.
+	for dir := filepath.Dir(p); dir != b.root; dir = filepath.Dir(dir) {
+		if os.Remove(dir) != nil {
+			break
+		}
+	}
+	return nil
+}
+
 func (b *localBackend) Close() error { return nil }

@@ -295,8 +295,11 @@ func (s *sqlMetaStore) migrate() error {
 		"creator":       `TEXT NOT NULL DEFAULT ''`,
 		"default_level": `TEXT NOT NULL DEFAULT ''`,
 		"template":      `TEXT NOT NULL DEFAULT ''`,
+		"deleted":       `TEXT NOT NULL DEFAULT ''`,
+		"deleted_by":    `TEXT NOT NULL DEFAULT ''`,
 	}, map[string]string{
 		"default_level": "it silently re-opens every restricted project to its whole organization",
+		"deleted":       "it resurrects every deleted project as live, with its storage already purged",
 	}); err != nil {
 		return err
 	}
@@ -507,7 +510,7 @@ func (r *sqlProjectRepo) Version() (string, error) { return r.s.version(regProje
 
 func (r *sqlProjectRepo) Load() ([]Project, error) {
 	rows, err := r.s.db.Query(
-		`SELECT id, name, org, created, description, icon, creator, default_level, template FROM projects`)
+		`SELECT id, name, org, created, description, icon, creator, default_level, template, deleted, deleted_by FROM projects`)
 	if err != nil {
 		return nil, err
 	}
@@ -515,13 +518,13 @@ func (r *sqlProjectRepo) Load() ([]Project, error) {
 	var order []string
 	for rows.Next() {
 		var p Project
-		var created string
+		var created, deleted string
 		if err := rows.Scan(&p.ID, &p.Name, &p.Org, &created,
-			&p.Description, &p.Icon, &p.Creator, &p.Default, &p.Template); err != nil {
+			&p.Description, &p.Icon, &p.Creator, &p.Default, &p.Template, &deleted, &p.DeletedBy); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		p.Created = tdec(created)
+		p.Created, p.Deleted = tdec(created), tdec(deleted)
 		byID[p.ID] = &p
 		order = append(order, p.ID)
 	}
@@ -567,12 +570,14 @@ func (r *sqlProjectRepo) Put(p Project) error {
 	}
 	return r.s.inTx(regProjects, func(tx *sql.Tx) error {
 		if _, err := tx.Exec(r.s.q(
-			`INSERT INTO projects (id,name,org,created,description,icon,creator,default_level,template)
-			VALUES (?,?,?,?,?,?,?,?,?)
+			`INSERT INTO projects (id,name,org,created,description,icon,creator,default_level,template,deleted,deleted_by)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(id) DO UPDATE SET name=excluded.name, org=excluded.org, created=excluded.created,
 			description=excluded.description, icon=excluded.icon,
-			creator=excluded.creator, default_level=excluded.default_level, template=excluded.template`),
-			p.ID, p.Name, p.Org, tenc(p.Created), p.Description, p.Icon, p.Creator, p.Default, p.Template); err != nil {
+			creator=excluded.creator, default_level=excluded.default_level, template=excluded.template,
+			deleted=excluded.deleted, deleted_by=excluded.deleted_by`),
+			p.ID, p.Name, p.Org, tenc(p.Created), p.Description, p.Icon, p.Creator, p.Default, p.Template,
+			tenc(p.Deleted), p.DeletedBy); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(r.s.q(`DELETE FROM project_perms WHERE project = ?`), p.ID); err != nil {
@@ -594,12 +599,14 @@ func (r *sqlProjectRepo) PutMeta(p Project) error {
 	if err := checkProject(p); err != nil {
 		return err
 	}
-	return r.w.exec(`INSERT INTO projects (id,name,org,created,description,icon,creator,default_level,template)
-		VALUES (?,?,?,?,?,?,?,?,?)
+	return r.w.exec(`INSERT INTO projects (id,name,org,created,description,icon,creator,default_level,template,deleted,deleted_by)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET name=excluded.name, org=excluded.org, created=excluded.created,
 		description=excluded.description, icon=excluded.icon,
-		creator=excluded.creator, default_level=excluded.default_level, template=excluded.template`,
-		p.ID, p.Name, p.Org, tenc(p.Created), p.Description, p.Icon, p.Creator, p.Default, p.Template)
+		creator=excluded.creator, default_level=excluded.default_level, template=excluded.template,
+		deleted=excluded.deleted, deleted_by=excluded.deleted_by`,
+		p.ID, p.Name, p.Org, tenc(p.Created), p.Description, p.Icon, p.Creator, p.Default, p.Template,
+		tenc(p.Deleted), p.DeletedBy)
 }
 
 // PutPerm writes one grant row. An empty level removes it.

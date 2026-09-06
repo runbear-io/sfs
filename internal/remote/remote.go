@@ -55,6 +55,14 @@ type PutSigner interface {
 	SignPut(ctx context.Context, key string, size int64, ttl time.Duration) (*SignedPut, error)
 }
 
+// Deleter is the optional delete capability, in the PutSigner mold: the hub
+// uses it to purge a deleted project's objects from storage. Deleting a key
+// that does not exist is not an error. Sync clients never delete remote
+// objects — blobs and journals are append-only from a device's point of view.
+type Deleter interface {
+	Delete(ctx context.Context, key string) error
+}
+
 type Backend interface {
 	Put(ctx context.Context, key string, r io.Reader, size int64) error
 	Get(ctx context.Context, key string) (io.ReadCloser, error)

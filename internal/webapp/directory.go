@@ -39,6 +39,10 @@ type Directory interface {
 	// ---- writes (ErrManagedElsewhere when the directory is read-only) ----
 	Create(name, ownerEmail string) (Org, error)
 	Rename(orgID, name string) error
+	// Delete removes the org and its invites. Its projects are the hub's to
+	// cascade (registry rows and storage) — the directory knows nothing of
+	// project storage.
+	Delete(orgID string) error
 	AddMember(orgID, email, role string) error
 	SetRole(orgID, email, role string) error
 	RemoveMember(orgID, email string) error

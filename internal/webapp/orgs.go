@@ -508,6 +508,29 @@ func (db *OrgDB) Rename(orgID, name string) error {
 	return db.putOrg(o, next)
 }
 
+// Delete removes the org and its invites. The org row goes first — an org
+// the store refuses to drop stays whole, invites and all; an invite the
+// store then refuses to drop is already dead, because every membership check
+// walks through the (gone) org row.
+func (db *OrgDB) Delete(orgID string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	db.refresh()
+	if _, ok := db.byID[orgID]; !ok {
+		return fmt.Errorf("no such organization")
+	}
+	if err := db.repo.DeleteOrg(orgID); err != nil {
+		return err
+	}
+	delete(db.byID, orgID)
+	for token, inv := range db.invites {
+		if inv.Org == orgID {
+			db.retireLocked(token)
+		}
+	}
+	return nil
+}
+
 // ownerCount counts owners in an org. Callers hold mu.
 func (db *OrgDB) ownerCount(o Org) int {
 	n := 0

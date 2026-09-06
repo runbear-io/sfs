@@ -100,7 +100,7 @@ func TestSec_Perms_ASecondHubProcessCannotResurrectADeletedProject(t *testing.T)
 
 	// The operator deletes the project on process A. This is the whole
 	// operation: "this project, and everything it published, is gone."
-	if err := a.Delete(p.ID); err != nil {
+	if err := a.Delete(p.ID, "op@x.io"); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := a.Get(p.ID); ok {

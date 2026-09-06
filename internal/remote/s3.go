@@ -127,4 +127,14 @@ func (b *s3Backend) Exists(ctx context.Context, key string) (bool, error) {
 	return false, err
 }
 
+// Delete removes one object. S3's DeleteObject is idempotent — deleting a
+// missing key succeeds — which matches the Deleter contract.
+func (b *s3Backend) Delete(ctx context.Context, key string) error {
+	_, err := b.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(b.bucket),
+		Key:    aws.String(b.key(key)),
+	})
+	return err
+}
+
 func (b *s3Backend) Close() error { return nil }

@@ -3,6 +3,7 @@ package webapp
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -111,11 +112,31 @@ func TestProjectLifecycle(t *testing.T) {
 		t.Fatalf("rejected updates mutated the project: %+v", got)
 	}
 
-	if err := db.Delete(p.ID); err != nil {
+	if err := db.Delete(p.ID, "boss@x.io"); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := db.Get(p.ID); ok {
 		t.Fatal("deleted project still present")
+	}
+	// The tombstone is queryable and says who deleted it, when.
+	ts, ok := db.GetDeleted(p.ID)
+	if !ok || ts.DeletedBy != "boss@x.io" || ts.Deleted.IsZero() {
+		t.Fatalf("tombstone: %+v (ok=%v)", ts, ok)
+	}
+	if got := db.ListDeleted(); len(got) != 1 || got[0].ID != p.ID {
+		t.Fatalf("ListDeleted = %+v", got)
+	}
+	// Deleting twice is refused; mutating a tombstone is refused.
+	if err := db.Delete(p.ID, "boss@x.io"); err == nil {
+		t.Fatal("double delete must be refused")
+	}
+	if err := db.Rename(p.ID, "revived"); err == nil {
+		t.Fatal("renaming a tombstone must be refused")
+	}
+	// The name is free again: a new project by the old name gets a fresh id.
+	again, created, err := db.GetOrCreate("handbook", "o-1")
+	if err != nil || !created || again.ID == p.ID {
+		t.Fatalf("name reuse after delete: %+v created=%v err=%v", again, created, err)
 	}
 }
 
@@ -143,6 +164,117 @@ func TestAdminEndpointsOwnerOnly(t *testing.T) {
 	// alice can delete it
 	if rec := doAs(t, h, "DELETE", "/api/projects/"+pa.ID, nil, alice); rec.Code != 200 {
 		t.Fatalf("owner project delete: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// Deleting a project purges its storage prefix from the root; deleting an
+// org cascades to its projects (registry and storage) and then the org row.
+// Sibling projects and other orgs are untouched.
+func TestDeletePurgesStorage(t *testing.T) {
+	srv, _, root := newHub(t, true, nil)
+	auth, err := OpenBuiltinAuth(filepath.Join(t.TempDir(), "auth.json"), true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Auth = auth
+	orgs, err := OpenOrgDB(filepath.Join(t.TempDir(), "orgs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Dir = LocalDirectory{OrgDB: orgs}
+	h := srv.Handler()
+	alice := signupAndSession(t, h, "alice@x.io", "Alice", "password1")
+	bob := signupAndSession(t, h, "bob@x.io", "Bob", "password1")
+
+	create := func(name string, c *http.Cookie) Project {
+		t.Helper()
+		rec := doAs(t, h, "POST", "/api/projects", map[string]string{"name": name}, c)
+		if rec.Code != 200 {
+			t.Fatalf("create %s: %d %s", name, rec.Code, rec.Body)
+		}
+		var out struct {
+			Project Project `json:"project"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.Project
+	}
+	seed := func(id string) string {
+		t.Helper()
+		blob := filepath.Join(root, id, "blobs", "aa")
+		if err := os.MkdirAll(filepath.Dir(blob), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(blob, []byte("content"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return filepath.Join(root, id)
+	}
+
+	wiki, docs, bobs := create("wiki", alice), create("docs", alice), create("bobs", bob)
+	wikiDir, docsDir, bobsDir := seed(wiki.ID), seed(docs.ID), seed(bobs.ID)
+
+	// Project delete purges exactly that project's prefix.
+	if rec := doAs(t, h, "DELETE", "/api/projects/"+wiki.ID, nil, alice); rec.Code != 200 {
+		t.Fatalf("project delete: %d %s", rec.Code, rec.Body)
+	}
+	if _, err := os.Stat(wikiDir); !os.IsNotExist(err) {
+		t.Fatalf("deleted project's storage still on disk: %v", err)
+	}
+
+	// The tombstone is queryable: gone from the live list, present in
+	// ?deleted=1 for a member of its org, invisible to an outsider.
+	deletedList := func(c *http.Cookie) []Project {
+		t.Helper()
+		rec := doAs(t, h, "GET", "/api/projects?deleted=1", nil, c)
+		if rec.Code != 200 {
+			t.Fatalf("deleted list: %d %s", rec.Code, rec.Body)
+		}
+		var out struct {
+			Projects []Project `json:"projects"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.Projects
+	}
+	rec := doAs(t, h, "GET", "/api/projects", nil, alice)
+	if strings.Contains(rec.Body.String(), wiki.ID) {
+		t.Fatalf("deleted project still in the live list: %s", rec.Body)
+	}
+	got := deletedList(alice)
+	if len(got) != 1 || got[0].ID != wiki.ID || got[0].DeletedBy != "alice@x.io" || got[0].Deleted.IsZero() {
+		t.Fatalf("alice's deleted list = %+v", got)
+	}
+	if got := deletedList(bob); len(got) != 0 {
+		t.Fatalf("bob sees another org's tombstones: %+v", got)
+	}
+	for _, dir := range []string{docsDir, bobsDir} {
+		if _, err := os.Stat(dir); err != nil {
+			t.Fatalf("sibling storage touched: %v", err)
+		}
+	}
+
+	// Org delete: not for non-owners; for the owner it takes projects,
+	// storage, and the org row with it.
+	if rec := doAs(t, h, "DELETE", "/api/orgs/"+docs.Org, nil, bob); rec.Code != http.StatusForbidden {
+		t.Fatalf("non-owner org delete: %d", rec.Code)
+	}
+	if rec := doAs(t, h, "DELETE", "/api/orgs/"+docs.Org, nil, alice); rec.Code != 200 {
+		t.Fatalf("org delete: %d %s", rec.Code, rec.Body)
+	}
+	if _, err := os.Stat(docsDir); !os.IsNotExist(err) {
+		t.Fatalf("deleted org's project storage still on disk: %v", err)
+	}
+	if _, ok := srv.Projects.Get(docs.ID); ok {
+		t.Fatal("deleted org's project still registered")
+	}
+	if _, ok := orgs.Get(docs.Org); ok {
+		t.Fatal("deleted org still present")
+	}
+	if _, err := os.Stat(bobsDir); err != nil {
+		t.Fatalf("another org's storage touched: %v", err)
 	}
 }
 

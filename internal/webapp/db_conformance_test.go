@@ -147,7 +147,7 @@ func TestMetaStoreConformance(t *testing.T) {
 			if err := projects.SetPerm(p2.ID, "doomed@x.io", PermAdmin); err != nil {
 				t.Fatal(err)
 			}
-			if err := projects.Delete(p2.ID); err != nil {
+			if err := projects.Delete(p2.ID, "boss@x.io"); err != nil {
 				t.Fatal(err)
 			}
 			// per-project permissions ride along with the project record
@@ -291,6 +291,12 @@ func TestMetaStoreConformance(t *testing.T) {
 			}
 			if _, ok := projects2.Get(p2.ID); ok {
 				t.Fatal("deleted project (and its grants) came back after reload")
+			}
+			// The tombstone itself survives the reload: the audit record of
+			// who deleted what, when.
+			ts, ok := projects2.GetDeleted(p2.ID)
+			if !ok || ts.DeletedBy != "boss@x.io" || ts.Deleted.IsZero() {
+				t.Fatalf("tombstone lost across reload: %+v (ok=%v)", ts, ok)
 			}
 
 			orgs2, _ := NewOrgDB(st2.Orgs())

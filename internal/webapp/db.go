@@ -197,7 +197,7 @@ func checkToken(t authToken) error { return storable(t.Hash, t.User, t.Device) }
 
 func checkProject(p Project) error {
 	if err := storable(p.ID, p.Name, p.Org, p.Description, p.Icon,
-		p.Creator, p.Template, p.Default); err != nil {
+		p.Creator, p.Template, p.Default, p.DeletedBy); err != nil {
 		return err
 	}
 	return storableMap(p.Perms)
