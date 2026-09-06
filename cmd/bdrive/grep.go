@@ -100,7 +100,7 @@ func runGrep(cmd *cobra.Command, pattern string, folderArg []string, ignoreCase,
 		return err
 	}
 	if !found {
-		return fmt.Errorf("%s is not a beardrive project (run `bdrive init` there first)", folder)
+		return notAProject(folder)
 	}
 
 	// The rules this device has ACCEPTED, so results match what the cycle

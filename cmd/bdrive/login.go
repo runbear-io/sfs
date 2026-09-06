@@ -308,11 +308,21 @@ func postAsDevice(url string, body []byte) (*http.Response, error) {
 	return initClient.Do(req)
 }
 
+// appLabel names the program a sign-in is for, when it is not the CLI. The
+// desktop sidecar sets it, so the hub's device registry — and History's
+// device column, and the approval page's device line — say which app on this
+// Mac asked, not just which Mac.
+var appLabel string
+
 func deviceName() string {
-	if h, err := os.Hostname(); err == nil && h != "" {
-		return h
+	h, err := os.Hostname()
+	if err != nil || h == "" {
+		h = "cli"
 	}
-	return "cli"
+	if appLabel != "" {
+		return h + " (" + appLabel + ")"
+	}
+	return h
 }
 
 // errNoBrowser signals that the loopback flow can't proceed because no local
@@ -496,7 +506,9 @@ func sameOriginLink(server, link string) string {
 	return link
 }
 
-func openBrowser(url string) error {
+// openBrowser opens url in the user's default browser. A var so the desktop
+// login test can stand in for the user completing the sign-in.
+var openBrowser = func(url string) error {
 	switch runtime.GOOS {
 	case "darwin":
 		return exec.Command("open", url).Start()

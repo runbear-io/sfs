@@ -91,6 +91,68 @@ func syncTargets(folder string) []string {
 	return mountsUnder(folder)
 }
 
+// workspaceRootUnder reports a workspace root strictly below folder, if this
+// device syncs a project inside one. A root's projects are its immediate
+// children and the registry knows where every mount is, so this is one stat
+// per registered mount under folder — no walk down the user's disk.
+//
+// Registry only, and deliberately: it asks about paths this device already
+// syncs, a small known set. Scanning the folder's children instead — tried,
+// and it made `bdrive init` hang forever on one FIFO or one wedged network
+// child, which is the same hazard that had to be removed from startSync.
+// A guard that can hang the command it guards is worse than the gap it closes.
+//
+// The gap: a root whose projects this device never enrolled (a tree copied
+// from another machine) is invisible here, so `bdrive init` above it is not
+// refused. Stated in DESIGN.md.
+func workspaceRootUnder(folder string) (string, bool) {
+	self := resolvePath(folder)
+	for _, m := range mountsUnder(folder) {
+		// mountsUnder includes folder itself when folder IS a mount, and its
+		// parent is then the root this project legitimately lives in —
+		// `bdrive init` in a project under a root must keep working, which is
+		// the whole shipping layout.
+		if resolvePath(m) == self {
+			continue
+		}
+		// Every level between the mount and folder, not just the mount's own
+		// parent: a project need not sit directly under its root
+		// (<root>/team/wiki is a mount whose root is two levels up), and
+		// checking only the parent let `bdrive init` above such a root
+		// through — which then synced the folders the root exists to hold
+		// apart to the whole team.
+		//
+		// Bounded by the depth between a path this device syncs and a folder
+		// the user just named, both of which the command is about to walk
+		// anyway. That is why this is acceptable here and the same shape is
+		// not acceptable in the desktop connect (config.CheckRootPlacement).
+		// Walk the RESOLVED mount path: a mount registered by a symlinked
+		// spelling walks up a different chain than the one `folder` names, so
+		// the "stop at folder" test never fires and the walk continues past
+		// it — reporting a root ABOVE the named folder as one beneath it.
+		for cur := filepath.Dir(resolvePath(m)); resolvePath(cur) != self; cur = filepath.Dir(cur) {
+			if config.HasManifest(cur) {
+				return cur, true
+			}
+			if filepath.Dir(cur) == cur {
+				break
+			}
+		}
+	}
+	return "", false
+}
+
+// notAProject is the "this folder has no project" error every command shares,
+// including the one case where the usual advice is wrong: at a workspace root
+// `bdrive init` refuses on purpose, so sending the user there is a dead end.
+func notAProject(folder string) error {
+	if config.HasManifest(folder) {
+		return fmt.Errorf("%s is a BearDrive workspace root: it holds your projects and never syncs itself\n"+
+			"run this in one of the project folders inside it", folder)
+	}
+	return fmt.Errorf("%s is not a beardrive project (run `bdrive init` there first)", folder)
+}
+
 // mustProject resolves a folder's project settings (from .bdrive/config.json,
 // self-healing the registry when the folder moved).
 func mustProject(folder string) (config.Project, error) {
@@ -99,7 +161,7 @@ func mustProject(folder string) (config.Project, error) {
 		return proj, err
 	}
 	if !found {
-		return proj, fmt.Errorf("%s is not a beardrive project (run `bdrive init` there first)", folder)
+		return proj, notAProject(folder)
 	}
 	if proj.Volume == "" {
 		proj.Volume = filepath.Base(folder)

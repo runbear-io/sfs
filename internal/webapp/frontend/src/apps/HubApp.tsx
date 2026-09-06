@@ -1,18 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
 import { postJSON } from "../api/http";
 import type { InviteAccepted, Project, ProjectCreated, ServerConfig } from "../api/types";
-import { useFetchProjects, useOrgs, usePending, useProjects, useHubRefresh } from "../hooks/useHub";
+import { useFetchProjects, useOrgs, usePending, usePermissions, useProjects, useHubRefresh } from "../hooks/useHub";
 import { decodePath, parseRoute, projectByName, urlForPath, urlForView } from "../router";
 import { linkProps, navigate, Redirect, useLocationPath } from "../nav";
 import { AppShell, Page, Topbar, VaultHeader, closeSidebarOnMobile } from "../components/shell";
 import { OrgAdmin } from "../components/OrgAdmin";
 import { HubSettings } from "../components/HubSettings";
 import { ProjectNav } from "../components/ProjectNav";
-import { AccountBar } from "../components/AccountBar";
+import { useQueryClient } from "@tanstack/react-query";
+import { AccountBar, SignedOutBar } from "../components/AccountBar";
 import { BillingView } from "../components/BillingView";
 import { ProjectSettings } from "../components/ProjectSettings";
 import { ConnectGuide } from "../components/ConnectGuide";
 import { EmptyState } from "../components/EmptyState";
+import { Setup, type SetupStep } from "../components/Setup";
 import { EXISTING, NewProjectDialog } from "../components/NewProjectDialog";
 import { toast } from "../toast";
 import { lastProject, rememberProject } from "../util";
@@ -29,6 +31,15 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   // closes it. Org administration is a real route — see /orgs/<id> below.
   const [panel, setPanel] = useState<null | { kind: "hub" }>(null);
   useEffect(() => setPanel(null), [loc]);
+
+  // The desktop app's onboarding owns real URLs (/setup, /setup/connect,
+  // /setup/syncing, /setup/done) — same project-less pattern as /join below,
+  // since router.ts is project-scoped. Hub mode never renders it.
+  const setupStep = useMemo<SetupStep | null>(() => {
+    if (!config.desktop) return null;
+    const m = loc.split("?")[0].match(/^\/setup(?:\/(connect|syncing|done))?\/?$/);
+    return m ? ((m[1] as SetupStep) ?? "welcome") : null;
+  }, [loc, config.desktop]);
 
   const joinToken = useMemo(() => {
     const m = loc.split("?")[0].match(/^\/join\/([0-9a-f]+)\/?$/);
@@ -57,6 +68,13 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   // with zero projects, which covered the empty state's agent paste-prompt
   // and pointer-blocked its own "New project" button.
   const [creating, setCreating] = useState(false);
+  // "New project" means different things on the two platforms. On the hub it
+  // is a record: name it, pick a structure, done. On desktop a project with
+  // no local folder is a dead end — it cannot even appear in the list, which
+  // is built from this machine's mounts — so the button runs the onboarding
+  // connect flow instead: pick the folder, name the shared one, sync. One
+  // way to make a project on the Mac, and it always ends with files moving.
+  const newProject = () => (config.desktop ? navigate("/setup/connect") : setCreating(true));
   // A read-only hub refuses creation server-side (403), so never offer it.
   const canCreate = config.upload.enabled;
 
@@ -80,7 +98,8 @@ export default function HubApp({ config }: { config: ServerConfig }) {
     }
   };
 
-  const newProjectDialog = creating ? (
+  // Never on desktop: newProject() routes there instead of opening it.
+  const newProjectDialog = creating && !config.desktop ? (
     <NewProjectDialog
       templates={config.templates ?? []}
       onCreate={createProject}
@@ -103,6 +122,17 @@ export default function HubApp({ config }: { config: ServerConfig }) {
       null
     );
   }, [projects, route.project, joinedOrgId]);
+
+  // On desktop the sidecar reports every project as "read" — that guards the
+  // LOCAL stores, which never take writes. The account's real level lives on
+  // the project's hub and arrives through the proxied /permissions. Resolving
+  // it here, once, keeps every downstream surface (share, restore, settings)
+  // platform-blind on project.perm — no scattered desktop checks.
+  const hubPerms = usePermissions(config.desktop ? current?.id : undefined);
+  const project: Project | null = useMemo(() => {
+    if (!current || !config.desktop) return current;
+    return { ...current, perm: hubPerms.data?.me ?? current.perm };
+  }, [current, config.desktop, hubPerms.data]);
 
   useEffect(() => {
     document.title = current
@@ -159,12 +189,25 @@ export default function HubApp({ config }: { config: ServerConfig }) {
     />
   );
 
+  // Desktop app: session changes go through the sidecar (which runs the same
+  // flows as `bdrive login`/`logout`), then the config query is refetched so
+  // this bar tracks the new state without a reload. Sign-in resolves only
+  // when the user finishes in the system browser, hence the toast first.
+  const qc = useQueryClient();
+  const desktopAuth = (path: string, waitMsg?: string) => {
+    if (waitMsg) toast(waitMsg);
+    void fetch(path, { method: "POST", headers: { "X-Bdrive-Desktop": "1" } })
+      .catch(() => {})
+      .finally(() => qc.invalidateQueries({ queryKey: ["config"] }));
+  };
+
   const accountBar = config.me ? (
     <AccountBar
       me={config.me}
       org={org}
       orgActive={!!route.org}
       billing={config.billing}
+      signOut={config.desktop ? () => desktopAuth("/api/desktop/logout") : undefined}
       admin={
         isAdmin
           ? {
@@ -177,7 +220,23 @@ export default function HubApp({ config }: { config: ServerConfig }) {
           : undefined
       }
     />
+  ) : config.desktop ? (
+    <SignedOutBar onSignIn={() => desktopAuth("/api/desktop/login", "Finish signing in in your browser…")} />
   ) : undefined;
+
+  if (setupStep) {
+    return (
+      <AppShell vault={vault} topbar={<Topbar />}>
+        <Page>
+          <Setup
+            step={setupStep}
+            signedIn={!!config.me}
+            onSignIn={() => desktopAuth("/api/desktop/login", "Finish signing in in your browser…")}
+          />
+        </Page>
+      </AppShell>
+    );
+  }
 
   if (!projects || !orgs) {
     return (
@@ -189,16 +248,31 @@ export default function HubApp({ config }: { config: ServerConfig }) {
     );
   }
 
+  // Nothing synced on this Mac IS onboarding, signed in or not: /setup shows
+  // the welcome step or jumps to connect depending on the session. Reload and
+  // back/forward work because those are real routes.
+  if (config.desktop && projects.length === 0) {
+    return <Redirect to="/setup" />;
+  }
+
   if (!current) {
     return (
       <AppShell
         vault={vault}
-        projectsNav={<ProjectNav projects={projects} onNew={() => setCreating(true)} />}
+        projectsNav={<ProjectNav projects={projects} onNew={newProject} />}
         orgBar={accountBar}
         topbar={<Topbar />}
       >
         <Page>
-          <EmptyState onNew={() => setCreating(true)} canCreate={canCreate} />
+          <EmptyState
+            onNew={newProject}
+            canCreate={canCreate}
+            signIn={
+              config.desktop && !config.me
+                ? () => desktopAuth("/api/desktop/login", "Finish signing in in your browser…")
+                : undefined
+            }
+          />
         </Page>
         {newProjectDialog}
       </AppShell>
@@ -272,7 +346,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
     return (
       <AppShell
         vault={vault}
-        projectsNav={<ProjectNav projects={projects} onNew={() => setCreating(true)} />}
+        projectsNav={<ProjectNav projects={projects} onNew={newProject} />}
         orgBar={accountBar}
         topbar={<Topbar />}
       >
@@ -317,7 +391,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
           crumb: "Project settings",
           body: (
             <ProjectSettings
-              project={current}
+              project={project ?? current}
               org={org}
               onDeleted={async () => {
                 // The id is dead now: refresh drops it from the list, and
@@ -380,7 +454,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
       apiBase={"/api/p/" + current.id + "/"}
       route={route}
       hub
-      project={current}
+      project={project ?? current}
       projects={projects}
       sidebar={{
         vault,
@@ -388,7 +462,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
           <ProjectNav
             projects={projects}
             currentId={current.id}
-            onNew={() => setCreating(true)}
+            onNew={newProject}
             menu={{
               // Scoped views (/dashboard/<path>, /history/<path>) belong to
               // the file/folder — the tree carries the selection, no menu

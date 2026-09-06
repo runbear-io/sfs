@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Merged into the bundle's Info.plist by the Tauri bundler. These strings
+     are what macOS shows when it asks whether BearDrive may read a folder in
+     one of its protected locations. Without them the prompt is generic; with
+     them it says why, which is the difference between "allow" and "what?". -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSDesktopFolderUsageDescription</key>
+  <string>BearDrive needs to read this folder to sync the shared folder inside it.</string>
+  <key>NSDocumentsFolderUsageDescription</key>
+  <string>BearDrive needs to read this folder to sync the shared folder inside it.</string>
+  <key>NSDownloadsFolderUsageDescription</key>
+  <string>BearDrive needs to read this folder to sync the shared folder inside it, and to save files you download from the app.</string>
+</dict>
+</plist>

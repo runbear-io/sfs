@@ -28,10 +28,13 @@ classDiagram
         +Analytics AnalyticsConfig
         +ShareRPM int
         +TrustProxy bool
+        +Desktop bool
+        +DesktopMe func() (email, name)
         -vols per-project volume cache
         -grants reservation ledger
         +Handler() http.Handler
     }
+    note for Server "Desktop marks the loopback sidecar posture (`bdrive desktop`), NOT a hub: the server fronts this machine's own volume stores. It is set in exactly one production place — cmd/bdrive/desktop.go — so on a deployed hub it stays false and both branches below are dead code, leaving /api/config byte-identical to a hub without it. DesktopMe supplies `me` from the device's saved sign-in (settings.json), a func because the tray can change it at runtime; the desktop has no AuthProvider"
     note for Server "clientIP is a METHOD now, not a package func: X-Forwarded-For is honored when the PEER is loopback/private (the operator's own proxy) or TrustProxy is set, and then only its LAST hop. Every caller that gates on an IP — the auth rate limiter, /s/*, device rows, share telemetry — goes through it, so a client-supplied header cannot forge the identity a limiter counts"
 
     class volume {
@@ -274,12 +277,14 @@ classDiagram
 
     class projectPerm {
         <<resolver>>
+        Server.Desktop → read (first)
         org owner → admin
         explicit grant → that level
         org member → project Default
         otherwise → none
         projectPermFor(p, email) for public callers
     }
+    note for projectPerm "The Desktop arm is FIRST in both projectPerm and projectPermOf: the desktop viewer is read-only for everyone, and reusing this ladder rather than adding a second gate is what keeps every local write route refused by the machinery that already guards the hub. It cannot widen a hub — Desktop is false there"
     class folderLevel {
         <<resolver, one level down>>
         base none → none, always

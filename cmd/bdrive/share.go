@@ -234,6 +234,11 @@ func findProject(dir string) (string, config.Project, error) {
 	if err != nil {
 		return "", config.Project{}, err
 	}
+	// The nearest workspace root passed on the way up, if any: reaching the
+	// top from inside one means the user is at their root or in a folder
+	// beside their projects, and "run `bdrive init`" is a dead end there —
+	// init refuses a root on purpose.
+	var wsRoot string
 	for cur := abs; ; cur = filepath.Dir(cur) {
 		if proj, ok, err := config.LoadProject(cur); err != nil {
 			return "", proj, err
@@ -242,7 +247,13 @@ func findProject(dir string) (string, config.Project, error) {
 			config.ResolveMount(cur)
 			return cur, proj, nil
 		}
+		if wsRoot == "" && config.HasManifest(cur) {
+			wsRoot = cur
+		}
 		if filepath.Dir(cur) == cur {
+			if wsRoot != "" {
+				return "", config.Project{}, notAProject(wsRoot)
+			}
 			return "", config.Project{}, fmt.Errorf("not inside a bdrive project (run `bdrive init` first)")
 		}
 	}
