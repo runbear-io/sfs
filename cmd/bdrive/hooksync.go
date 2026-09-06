@@ -140,12 +140,13 @@ func runHookSync(cmd *cobra.Command, target, sessionID, label string, deadline t
 	// changes without them, so every turn sees the ones still true.
 	found, _ := sess.Store.LoadSecrets(sess.MountID)
 
-	stale, rules := hookStaleDocs(sess, deadline)
-
 	server, projectID, err := splitHubRemote(proj.Remote)
 	if err != nil {
 		return hookSync{}, false // non-hub remote: nothing to link to
 	}
+	// After the hub check, not before: a mount with no link contributes no
+	// brief either, so there is no reason to spend the budget on it.
+	stale, rules := hookStaleDocs(sess, deadline)
 	return hookSync{base: server + "/" + projectID, paths: paths, secrets: found, stale: stale, rules: rules}, true
 }
 
