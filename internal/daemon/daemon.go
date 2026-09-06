@@ -226,6 +226,18 @@ func Start(folder, volDir string, scanInterval, remoteInterval time.Duration) (i
 		return 0, err
 	}
 	defer logf.Close()
+	// A `go test` binary must never re-exec itself as a daemon: os.Args[0] is
+	// then the TEST binary, so the spawned "daemon run" re-runs the whole
+	// suite — which spawns again. A test that reached this line once took a
+	// developer's Mac to load 47 before anyone noticed. Any test that wants a
+	// real daemon builds the real binary and runs it (cli_e2e_test.go).
+	//
+	// After the log is opened, not before: the log file's mode is itself a
+	// tested invariant (sec_daemon_test.go), and the state a caller can
+	// observe should not depend on which binary asked.
+	if strings.HasSuffix(exe, ".test") || strings.Contains(exe, "/_test/") {
+		return 0, fmt.Errorf("refusing to start a daemon from a test binary (%s)", filepath.Base(exe))
+	}
 	cmd := exec.Command(exe, "daemon", "run", folder,
 		"--scan-interval", scanInterval.String(),
 		"--remote-interval", remoteInterval.String())
@@ -288,9 +300,24 @@ func Stop(volDir string) (bool, error) {
 		os.Remove(PidPath(volDir))
 		return false, nil
 	}
+	legacy := false
 	if pid <= 0 {
-		return false, fmt.Errorf("a daemon holds %s but it announced no pid; kill it by hand",
-			LockPath(volDir))
+		// A held lock whose file names no pid is a daemon from before the pid
+		// moved into the lock — it wrote daemon.pid instead, and telling its
+		// user "kill it by hand" made every pre-upgrade mount unstoppable.
+		// daemon.pid alone is never a license to signal (recycled pids, and a
+		// number in a file the holder never wrote — see the sec test), so the
+		// fallback signals only a process that VERIFIABLY looks like a bdrive
+		// daemon: the pidfile's process must be alive and its command line
+		// must say `daemon run`. SIGTERM only, below — no SIGKILL escalation
+		// on a pre-invariant number.
+		data, rerr := os.ReadFile(PidPath(volDir))
+		p, perr := strconv.Atoi(strings.TrimSpace(string(data)))
+		if rerr != nil || perr != nil || p <= 0 || !strings.Contains(cmdline(p), "daemon run") {
+			return false, fmt.Errorf("a daemon holds %s but it announced no pid; kill it by hand",
+				LockPath(volDir))
+		}
+		pid, legacy = p, true
 	}
 	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
 		return false, err
@@ -303,9 +330,26 @@ func Stop(volDir string) (bool, error) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	if legacy {
+		return false, fmt.Errorf("daemon (pid %d) did not exit after SIGTERM; kill it by hand", pid)
+	}
 	syscall.Kill(pid, syscall.SIGKILL)
 	os.Remove(PidPath(volDir))
 	return true, nil
+}
+
+// cmdline reports a process's command line, or "" when it cannot be known —
+// /proc on Linux, ps everywhere else. Used only to recognize a legacy daemon
+// before signalling it; "" fails closed.
+func cmdline(pid int) string {
+	if data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); err == nil {
+		return strings.ReplaceAll(string(data), "\x00", " ")
+	}
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+	if err != nil {
+		return ""
+	}
+	return string(out)
 }
 
 // Run is the daemon main loop, executed in the foreground of the (usually
@@ -354,6 +398,27 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 
 	log.Printf("daemon started: folder=%s mount=%s volume=%s remote=%q device=%s(%s) scan=%s sync=%s",
 		folder, proj.ID, proj.Volume, proj.Remote, dev.Name, dev.ID, scanInterval, remoteInterval)
+
+	// Re-index the workspace root above this project, if there is one. Here
+	// because THIS is what every daemon start passes through — `bdrive resume`
+	// (the reboot path) calls Start directly, so a manifest refreshed only by
+	// `bdrive init` would never notice a project added on another device or a
+	// folder the user deleted.
+	//
+	// In a goroutine, and that is the whole point. The scan reads a directory
+	// the user chose plus one config per child, neither bounded: a wedged
+	// network mount or a TCC-gated sibling blocks it forever. Inline it would
+	// take the daemon with it — before announce that fails a healthy project's
+	// start, and after announce it is worse, because the flock says "running"
+	// while the sync loop never begins. Sync must never wait on an index.
+	//
+	// A no-op when no root sits above, it never creates one, and nothing
+	// resolves state from what it writes.
+	go func() {
+		if err := config.RefreshWorkspaceOf(folder); err != nil {
+			log.Printf("workspace manifest not refreshed: %v", err)
+		}
+	}()
 
 	var be remote.Backend
 	defer func() {

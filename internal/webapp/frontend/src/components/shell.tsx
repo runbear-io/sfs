@@ -9,6 +9,7 @@ import {
   Calendar,
   Check,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Clock,
   Code,
@@ -130,6 +131,7 @@ const ICONS: Record<string, LucideIcon> = {
   check: Check,
   chev: ChevronRight,
   chevd: ChevronDown,
+  chevl: ChevronLeft,
   clock: Clock,
   copy: Copy,
   doc: FileText,
@@ -368,7 +370,7 @@ export function VaultHeader(props: {
   );
 }
 
-export function Topbar(props: { crumb?: ReactNode; meta?: ReactNode; actions?: ReactNode }) {
+export function Topbar(props: { crumb?: ReactNode; meta?: ReactNode; actions?: ReactNode; nav?: ReactNode }) {
   return (
     <header id="topbar">
       <button
@@ -382,6 +384,7 @@ export function Topbar(props: { crumb?: ReactNode; meta?: ReactNode; actions?: R
       >
         <Icon name="menu" />
       </button>
+      {props.nav}
       <span id="crumb">{props.crumb}</span>
       <span id="meta">{props.meta}</span>
       {props.actions}

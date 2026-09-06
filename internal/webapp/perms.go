@@ -68,6 +68,9 @@ func validLevel(l string) bool {
 // configured hub, and "inherited from code that no longer exists" is not a
 // reason to keep an escape that makes a project world-writable.
 func (s *Server) projectPerm(r *http.Request, projectID string) string {
+	if s.Desktop {
+		return PermRead // the desktop viewer is read-only, for everyone
+	}
 	if s.Dir == nil || s.Auth == nil {
 		return PermAdmin
 	}
@@ -85,6 +88,9 @@ func (s *Server) projectPerm(r *http.Request, projectID string) string {
 // Postgres. Same rules, same fail-closed defaults; the resolution just does
 // not happen again.
 func (s *Server) projectPermOf(r *http.Request, p Project) string {
+	if s.Desktop {
+		return PermRead // the desktop viewer is read-only, for everyone
+	}
 	if s.Dir == nil || s.Auth == nil {
 		return PermAdmin
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -15,6 +16,13 @@ import (
 // startSync brings a project folder live: register the mount, open the
 // volume store, run the initial cycle, start the background daemon. Called
 // by `bdrive init` (and by anything that needs to resume a stopped project).
+// errDaemonStart marks the ONE startSync failure that leaves a working mount
+// behind: the folder is enrolled, the project exists and the first cycle ran
+// — only the background daemon did not come up, which the next bdrive command
+// in the folder heals. A caller that already created files (the desktop
+// connect step) must report it, never unwind over it.
+var errDaemonStart = errors.New("start sync daemon")
+
 func startSync(ctx context.Context, folder string, proj config.Project, foreground bool, scanInterval, remoteInterval time.Duration) error {
 	// EnrollMount, not ResolveMount: creating the registry row is the
 	// enrollment gesture and startSync is `bdrive init`'s path, the one place
@@ -22,6 +30,13 @@ func startSync(ctx context.Context, folder string, proj config.Project, foregrou
 	if _, _, err := config.EnrollMount(folder); err != nil {
 		return err
 	}
+	// No workspace-manifest refresh here on purpose. `daemon.Run` does it, off
+	// the startup path, and covers every gesture that reaches a daemon;
+	// repeating it inline here put an unbounded directory scan in front of
+	// `bdrive init` and of the desktop connect's sync step, either of which a
+	// single wedged sibling folder could hang forever. The narrow case it
+	// covered — a daemon that never spawns — leaves the index stale until the
+	// next start, which is exactly what an index is allowed to do.
 	vdir, err := config.VolumeDir(proj.ID)
 	if err != nil {
 		return err
@@ -53,7 +68,7 @@ func startSync(ctx context.Context, folder string, proj config.Project, foregrou
 	}
 	pid, err := daemon.Start(folder, vdir, scanInterval, remoteInterval)
 	if err != nil {
-		return fmt.Errorf("start sync daemon: %w", err)
+		return fmt.Errorf("%w: %w", errDaemonStart, err)
 	}
 	fmt.Printf("  daemon:  running (pid %d, scan %s, remote sync %s)\n", pid, scanInterval, remoteInterval)
 	return nil

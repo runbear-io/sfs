@@ -9,30 +9,74 @@ import (
 	"strings"
 
 	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
+	"github.com/yuin/goldmark/text"
+	"github.com/yuin/goldmark/util"
 	"gopkg.in/yaml.v3"
 )
 
 var md = goldmark.New(
 	goldmark.WithExtensions(extension.GFM),
-	goldmark.WithParserOptions(parser.WithAutoHeadingID()),
+	goldmark.WithParserOptions(
+		parser.WithAutoHeadingID(),
+		// 150 is load-bearing: below goldmark's link parser (200) so `[[`
+		// is claimed before the ordinary link syntax sees the first `[`,
+		// above its code span parser (100) so backticks still swallow
+		// their contents whole.
+		parser.WithInlineParsers(util.Prioritized(wikiParser{}, 150)),
+	),
 )
 
-// wikiRe matches Obsidian-style [[target]] and [[target|label]] links.
-var wikiRe = regexp.MustCompile(`\[\[([^\]|]+)(?:\|([^\]]+))?\]\]`)
+// wikiParser expands Obsidian-style [[target]] and [[target|label]] to
+// <a href="wiki:target">, which the frontend resolves against the file tree
+// by basename (FileView.tsx).
+//
+// It is an inline parser rather than a rewrite of the raw source so that code
+// never sees it. goldmark runs no inline parser over a fenced or indented code
+// block, and a code span outranks this one, so `[[x]]` inside backticks or a
+// ``` block survives verbatim — which is the whole point: Mermaid's subroutine
+// node shape is written B[[label]], and rewriting it handed Mermaid a diagram
+// that could not parse.
+//
+// Two consequences of parsing instead of rewriting, both matching Obsidian:
+// a label is literal text ([[t|*v*]] renders *v*, not <em>v</em>), and a
+// wikilink cannot span a newline.
+type wikiParser struct{}
 
-// expandWikilinks rewrites [[target]] to a markdown link with a wiki: URL;
-// the frontend resolves the target against the file tree by basename.
-func expandWikilinks(src []byte) []byte {
-	return wikiRe.ReplaceAllFunc(src, func(m []byte) []byte {
-		g := wikiRe.FindSubmatch(m)
-		target, label := g[1], g[2]
-		if len(label) == 0 {
-			label = target
-		}
-		return []byte("[" + string(label) + "](wiki:" + url.PathEscape(string(target)) + ")")
-	})
+func (wikiParser) Trigger() []byte { return []byte{'['} }
+
+// Parse matches [[target]] / [[target|label]] on the current line. Neither
+// half may contain `]` — the first `]` must be the closer — which is what
+// keeps a destination-breaking target like [[a) [pwn](javascript:...)]]
+// literal text, exactly as the regex this replaced left it.
+func (wikiParser) Parse(parent ast.Node, block text.Reader, pc parser.Context) ast.Node {
+	line, seg := block.PeekLine()
+	if len(line) < 5 || line[1] != '[' { // [[x]] is the shortest form
+		return nil
+	}
+	body := line[2:]
+	i := bytes.IndexByte(body, ']')
+	if i < 1 || i+1 >= len(body) || body[i+1] != ']' {
+		return nil
+	}
+	target, label := body[:i], body[:i]
+	if j := bytes.IndexByte(target, '|'); j >= 0 {
+		target, label = target[:j], target[j+1:]
+	}
+	if len(target) == 0 || len(label) == 0 {
+		return nil
+	}
+	// The label is a segment into the source, not a new string, so goldmark's
+	// own text renderer escapes it the way it escapes every other text node.
+	// It is a suffix of body[:i], so its offset falls out of the lengths.
+	labelStart := seg.Start + 2 + i - len(label)
+	block.Advance(i + 4) // "[[" + body[:i] + "]]"
+	link := ast.NewLink()
+	link.Destination = []byte("wiki:" + url.PathEscape(string(target)))
+	link.AppendChild(link, ast.NewTextSegment(text.NewSegment(labelStart, labelStart+len(label))))
+	return link
 }
 
 // RenderMarkdown converts markdown to HTML (GFM + wikilinks). Raw HTML in
@@ -68,7 +112,7 @@ func RenderMarkdownPairs(src []byte) ([]FrontmatterPair, string, error) {
 
 func renderBody(body []byte) (string, error) {
 	var buf bytes.Buffer
-	if err := md.Convert(expandWikilinks(body), &buf); err != nil {
+	if err := md.Convert(body, &buf); err != nil {
 		return "", err
 	}
 	return buf.String(), nil

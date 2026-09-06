@@ -31,7 +31,16 @@ classDiagram
         project list, org walls
         admin panels, invites
         remembers last opened project (localStorage)
+        +desktop mode: /setup/* routes, no project id
     }
+    note for HubApp "One codebase serves the hub and the desktop sidecar; `desktop: true` from /api/config is the only switch. In desktop mode HubApp routes the project-less /setup, /setup/connect, /setup/syncing and /setup/done frames the same way it already routes /join/<token>, and Browser gains a Copy-web-link item built from the mount's own hub URL"
+
+    class Setup {
+        onboarding frames
+        inspect folder → connect → syncing → done
+        name from the URL, not the first poll
+    }
+    note for Setup "components/Setup.tsx — desktop-only. Every frame owns a URL, so reload and Back behave; the Syncing frame reads ?name= so its heading is right on the FIRST paint rather than reading 'Syncing your folder' until the 400ms status poll lands. That poll navigates away on a terminal phase, which is what makes the frame order-dependent under test"
     class VolumeApp {
         thin wrapper: one volume
     }
@@ -124,6 +133,7 @@ classDiagram
         +sniff.ts sniffBytes BlobText MAX_BYTES
         +scroll.ts Goal armGoal applyGoal noteScroll MAX_APPLY
         +csv.ts parseDelimited Csv CSV_ROWS
+        +fuzzy.ts fuzzy fuzzyStemmed scoreLabel
         +secrets.ts SecretFinding secretsMessage secretsBadge
         +mermaid.ts hasMermaid renderMermaid Palette DARK LIGHT
         +utils.ts
@@ -133,6 +143,7 @@ classDiagram
     note for lib "scroll.ts is the per-route scroll goal, lifted out of Browser.tsx so it can be tested at all — the frontend suite is node --test over pure TS with no jsdom. A route change arms a goal (0 on a fresh navigation, the memoized offset on POP) and views re-apply it up to MAX_APPLY times as content grows after first paint; noteScroll RETIRES it the moment the reader scrolls, which is the choke point that stops any onRendered caller — a metadata refresh, a poll, anything added later — from moving a reader mid-read (BEA-155). Two clauses in that guard are load-bearing and each has its own test: scrollTo fires a scroll event of its own, so movement is measured against the goal and never against zero, and a page shorter than the last one makes the browser CLAMP the carried-over offset to the bottom, which is either the old page arriving or a goal that does not fit yet"
     note for lib "secrets.ts is the six credential rules in words, mirroring internal/secrets' Label map. It lived in Browser.tsx under a comment saying one caller did not justify a file; BEA-147 gave it a second one, and the two callers are the two surfaces that report the SAME finding — the share dialog that refuses to mint, and FileView's badge that only warns. One map is what makes 'wording consistent with the share dialog' mechanical rather than a copy-editing promise"
     note for lib "conflict.ts recognises a conflict copy from its NAME alone — syncer.conflictName is a pure function of the path, so the device and the moment come out of the string with no server route, no journal field and no request. The regex is an ANCHORED suffix and a strictly narrower match of the Go convention (sanitize's character class, clip's 32), and every mismatch — truncated suffix, impossible date — is null rather than a throw, so a stray filename can never break a listing. Two callers: FolderListing marks the row, ConflictBanner explains the file (BEA-128)"
+    note for lib "fuzzy.ts is the palette matcher, lifted out of Palette.tsx so it can be tested at all. scoreLabel is the whole query: it splits on whitespace and every token must match the label (AND, order irrelevant, scores summed) — a space used to be just another character to the subsequence walk, and a path never contains one, so any two-word query matched NOTHING (BEA-194). Its typo pass is one rule, not an edit-distance routine: retry a token of 4+ characters with each single character dropped, which covers a transposition, a substitution and an insertion because subsequence matching already tolerates the other direction. Three properties are load-bearing and each has a test: a blank query returns score 0 with no hits BEFORE it splits (the stable sort over that is what keeps the project's own destinations on top — BEA-52, BEA-105), an errored token costs a flat penalty no bonus can climb over (so exact beats approximate by construction, not by tuning), and hits come back sorted and de-duplicated — Highlight slices forward from the last index and would silently duplicate letters otherwise. Palette runs it strict over every candidate and retries only the misses, only when the strict pass came back short of the 40-row cap, so a query that already matches never pays for the typo pass"
     note for lib "csv.ts parses .csv/.tsv for FileView's table view — ~50 lines against RFC 4180, so no papaparse. It NEVER throws: null means 'not a table' (unterminated quote, no delimiter) and the caller falls back to the plain-text preview, which is why the fallback is a type-level guarantee rather than a try/catch someone can forget"
 
     ErrorBoundary --> App : wraps the whole tree
@@ -146,7 +157,7 @@ classDiagram
     Browser --> components
     HubApp --> components
     components --> nav : linkProps navigate
-    components --> lib : diffText groupRuns hotPathSplit placeLabels staleNote isDanger parseDelimited renderMermaid parseConflict secretsBadge
+    components --> lib : diffText groupRuns hotPathSplit placeLabels staleNote isDanger parseDelimited renderMermaid parseConflict secretsBadge scoreLabel
     Browser --> lib : secretsMessage (the share dialog's half of lib/secrets)
     Browser --> lib : armGoal applyGoal noteScroll
     hooks --> lib : re-exports heat.ts, sniffBytes
@@ -154,6 +165,9 @@ classDiagram
     hooks --> api
     Browser --> hooks : useTree useHeat useShares useProjectEvents, fetchBlobText + fileURLFor (Copy)
     HubApp --> hooks
+    HubApp --> Setup : desktop mode only, /setup/* frames
+    Setup --> api : /api/desktop/init/{start,status}
+    Setup --> nav : each frame owns a URL
     hooks --> analytics : initAnalytics + identify on config
     api --> analytics : track(product event)
     Browser --> analytics : share_created (the one raw fetch)

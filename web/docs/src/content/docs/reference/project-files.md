@@ -90,9 +90,41 @@ Everything else under an agent-config directory — `.claude/skills`,
 normally. Sharing what an agent *reads* is the product; sharing what it *runs*
 is not. See [What agents read](/guides/what-agents-read/).
 
+## `.bdrive/workspace.json` — a workspace root
+
+A folder that *holds* projects, rather than being one, can carry a manifest
+naming which of its immediate children are project folders — one this device
+has paused, or has never connected, is listed too: the manifest answers "which
+of these are BearDrive projects", not "which are syncing right now". The Mac
+app writes one at the folder you connect; the CLI never creates one on its own.
+
+```jsonc
+// <root>/.bdrive/workspace.json
+{ "kind": "workspace",
+  "projects": [ { "path": "team", "id": "m-5a10b713" } ] }
+```
+
+A root is **not a project**: nothing in it syncs — not the manifest, not the
+folders beside your projects — and `bdrive init` refuses to mount one, telling
+you to run it in a folder underneath instead. A root is never a project folder
+itself. (Roots are not *meant* to nest either, but connecting two folders where
+one is inside the other will produce that — harmlessly: the inner folder simply
+ends up with two indexes, and an index decides nothing.)
+
+The file is only an index — identity lives in each project's own `config.json`
+— so a wrong or stale **entry** is harmless: every daemon start rebuilds the
+list from what is actually on disk, and a hand-edited entry is corrected rather
+than obeyed. Deleting the file is different: it is how you **un-root** the
+folder. Nothing recreates it, and `bdrive init` will then treat the folder like
+any other. A corrupted manifest has the same effect.
+
+Run [`bdrive stop`](/reference/cli/) in the projects under it first, though: a
+re-index that is already running can write the file back one last time, because
+it decided the folder was a root before you deleted it.
+
 ## And nothing else
 
-Those two are all BearDrive puts in a project: `.bdrive/config.json`,
+Inside a project, those two are all BearDrive puts there: `.bdrive/config.json`,
 `.bdriveignore`, and your own files. (A project created from a template also
 starts with an `AGENTS.md` and a directory skeleton — but those are ordinary
 synced files, yours to edit or delete like any other; nothing reads them but

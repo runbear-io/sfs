@@ -97,6 +97,17 @@ type Result struct {
 // $BDRIVE_HOME (~/.bdrive, which has no config.json) from reading as a mount.
 func mountGuard() string {
 	return `cd "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || exit 0; ` +
+		// Matching config.json is also what keeps a WORKSPACE ROOT from
+		// stopping the walk: the root's manifest is .bdrive/workspace.json,
+		// deliberately a different name (internal/config/workspace.go), so a
+		// non-BearDrive folder beside the projects climbs straight past it and
+		// falls through to the registry check below — without this guard
+		// having to know what a workspace is.
+		//
+		// The consequence, stated: a manifest hand-written into config.json
+		// instead DOES stop the walk here, and this guard will not notice.
+		// Nothing writes that layout; if something ever does, this is the line
+		// that has to learn about it.
 		`d=$PWD; while [ ! -f "$d/.bdrive/config.json" ]; do case "$d" in ""|/) d=; break;; esac; d=${d%/*}; done; ` +
 		// $PWD is interpolated into the grep pattern below, and grep -F reads
 		// every LINE of its pattern as a separate alternative — a directory
