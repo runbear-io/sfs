@@ -1,14 +1,14 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { useQueryClient } from "@tanstack/react-query";
-import { api, postJSON } from "../api/http";
+import { api } from "../api/http";
 import { modalConfirm, modalPrompt } from "../modal";
-import { copyText } from "../util";
 import { toast } from "../toast";
 import { useHubRefresh, usePermissions, useShares } from "../hooks/useHub";
 import { PROJECT_ICONS, ProjectIcon } from "./shell";
+import { InviteDialog } from "./InviteDialog";
 import { OPENS_NOTE, SharesTable } from "./SharesTable";
 import { projColor } from "./ProjectNav";
 import { Button } from "@/components/ui/button";
@@ -355,6 +355,7 @@ const LABEL: Record<string, string> = Object.fromEntries(LEVELS.map((l) => [l.va
 // who see the same table with live controls.
 function People({ project, org }: { project: Project; org: Org | null }) {
   const qc = useQueryClient();
+  const [inviting, setInviting] = useState(false);
   const { data, error } = usePermissions(project.id);
   const isAdmin = atLeast(project.perm, "admin");
   const reload = () => {
@@ -408,31 +409,30 @@ function People({ project, org }: { project: Project; org: Org | null }) {
             project admin who is a plain org member is exactly the account
             that would be shown a button that fails. The "?p=" is the whole
             feature — the recipient lands on this project's install page
-            instead of a nameless project list. */}
+            instead of a nameless project list.
+
+            Which is also why the dialog, not a toast, is the handoff: the
+            invite the hub stores and Organization settings lists is ORG-scoped
+            and has no "?p=", so a link re-copied from there silently drops the
+            project and lands the joiner on a nameless list. This dialog is the
+            only place the project-scoped form of the link ever exists — it must
+            never depend on the clipboard to survive. */}
         {org?.role === "owner" && (
           <p className="ps-row">
             <span>Not in {org.name} yet?</span>
-            <Button
-              id="ps-invite"
-              type="button"
-              variant="subtle"
-              onClick={async () => {
-                try {
-                  const out = await postJSON<{ url: string }>(`/api/orgs/${org.id}/invites`);
-                  const ok = await copyText(out.url + "?p=" + project.id);
-                  toast(
-                    ok
-                      ? "Invite link copied — it opens this project."
-                      : "Invite created — copy it from Organization settings.",
-                  );
-                } catch (e) {
-                  toast((e as Error).message, true);
-                }
-              }}
-            >
+            <Button id="ps-invite" type="button" variant="subtle" onClick={() => setInviting(true)}>
               Invite a teammate
             </Button>
           </p>
+        )}
+        {inviting && org && (
+          <InviteDialog
+            orgId={org.id}
+            orgName={org.name}
+            projectId={project.id}
+            projectName={project.name}
+            onClose={() => setInviting(false)}
+          />
         )}
         <p className="ps-row">
           <span>Everyone in {org?.name || "this workspace"} can</span>
