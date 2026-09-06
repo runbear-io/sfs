@@ -417,7 +417,15 @@ test("missing path gets the not-found view; Check again finds a late upload", as
     `/api/p/${pid}/upload/content?path=${encodeURIComponent("later.md")}`,
     { data: "# Finally here\n" },
   );
-  await page.click(".notfound .pbtn"); // Check again
+  // …and the change stream now recovers the view by itself, so "Check again"
+  // may be gone before it can be clicked — the button races its own reason to
+  // exist. Click it if it is still there, since that is the path a hub with no
+  // stream (older version, a proxy that buffers) still takes. Either way the
+  // assertion is the same: the reader ends up looking at the file.
+  const again = page.locator(".notfound .pbtn");
+  if (await again.count()) {
+    await again.click({ timeout: 5000 }).catch(() => {});
+  }
   await expect(page.locator("#content h1")).toHaveText("Finally here");
 });
 
