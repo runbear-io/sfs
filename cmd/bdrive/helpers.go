@@ -254,6 +254,9 @@ func printReason(reason string) {
 func printCycle(res *syncer.Result) {
 	fmt.Printf("  local changes:  %d\n", res.LocalOps)
 	fmt.Printf("  pulled changes: %d\n", res.PulledOps)
+	if res.Merged > 0 {
+		fmt.Printf("  merged:         %d (concurrent edits to different parts of a file)\n", res.Merged)
+	}
 	if res.Conflicts > 0 {
 		fmt.Printf("  conflicts:      %d (preserved as *.bdrive-conflict-* files)\n", res.Conflicts)
 	}

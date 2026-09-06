@@ -5,8 +5,12 @@ import { atLeast } from "../api/types";
 import { getJSON, postJSON } from "../api/http";
 import type { Project, ServerConfig, UndoPlan } from "../api/types";
 import { useHeat, useTree } from "../hooks/useBrowse";
+import { useProjectEvents } from "../hooks/useProjectEvents";
+import { usePresence } from "../hooks/usePresence";
+import { PresenceBar } from "../components/PresenceBar";
 import { fetchBlobText, fileURLFor } from "../hooks/useBlob";
 import { useFolders, useShares } from "../hooks/useHub";
+import { ruleFor } from "../lib/folders";
 import { urlForPath, urlForView, type Route } from "../router";
 import { currentNavType, navigate, useLocationPath } from "../nav";
 import { HTML_EXT, IMG_EXT, PDF_EXT, copyText } from "../util";
@@ -53,6 +57,12 @@ export default function Browser(props: {
   const qc = useQueryClient();
 
   const { tree, flatFiles, dirIndex, loaded } = useTree(apiBase, !hub || !!project);
+  // Live updates on top of the polls above: a teammate's change invalidates
+  // what it touched as it happens. Same gate as the tree — in hub mode there
+  // is nothing to stream until a project is chosen.
+  const live = !hub || !!project;
+  const { people, setPeople } = usePresence(apiBase, route.path ?? "", live);
+  useProjectEvents(apiBase, live, setPeople);
   const heatMap = useHeat(apiBase, hub && !!project && !!config.reads?.enabled);
   // Folder rules, for the badge on a restricted folder's row. Same shape as
   // heatMap: one project-wide query, read from cache by the dialog too.
@@ -211,7 +221,40 @@ export default function Browser(props: {
   // carries the hub's answer for this account (HubApp resolves it from the
   // proxied /permissions), so this same gate is accurate there too.
   const canShare = !panel && hub && !!project && (isFile || isDir) && atLeast(project.perm, "write");
-  // The project's live public links, filtered to the open file. One query
+
+  // Editing needs write, a real file, and the CURRENT version: editing a
+  // pinned ?v= would journal a new put built on an old body, silently
+  // discarding whatever happened since. Read-only members get no button
+  // rather than a button that 403s — the same rule Share follows.
+  // Editing is gated per FOLDER, not just per project: upload/content now
+  // runs writablePath server-side, so a project-level check alone would show
+  // an Edit button on a read-only folder that 403s on the first save — the
+  // "button that 403s" Share deliberately avoids. FolderRule.me is the hub's
+  // own answer for this account, so this reads its decision rather than
+  // recomputing one.
+  const folderPerm = (p: string): string | undefined =>
+    ruleFor(folderRules, p)?.me;
+  const canEdit =
+    !panel &&
+    isFile &&
+    !version &&
+    (!hub ||
+      (!!project &&
+        atLeast(folderPerm(path) ?? project.perm, "write")));
+  const [editing, setEditing] = useState(false);
+  // Leaving the file (or pinning a version) leaves edit mode with it, so the
+  // next file never opens straight into an editor the reader did not ask for.
+  useEffect(() => setEditing(false), [path, version]);
+  // The label and colour on this account's caret in a co-editor's window. The
+  // colour is derived from the identity rather than assigned by the server, so
+  // the same person is the same colour on everyone's screen and in every
+  // session — an index would re-colour the room whenever someone left.
+  const editorIdentity = useMemo(() => {
+    const who = config.me?.name || config.me?.email || "Someone";
+    let h = 0;
+    for (let i = 0; i < who.length; i++) h = (h * 31 + who.charCodeAt(i)) % 360;
+    return { name: who, colour: `hsl(${h} 70% 45%)` };
+  }, [config.me?.name, config.me?.email]);  // The project's live public links, filtered to the open file. One query
   // for the whole project (Settings reads the same cache entry), so opening
   // a file costs no extra request.
   const { data: shares } = useShares(project?.id, hub && !!project);
@@ -646,6 +689,8 @@ export default function Browser(props: {
             onOpenFile={openPath}
             onMeta={setMeta}
             onRendered={onRendered}
+            editing={editing && canEdit}
+            me={editorIdentity}
           />
         </>
       );
@@ -729,6 +774,17 @@ export default function Browser(props: {
       meta={meta}
       actions={
         <>
+          <PresenceBar people={people} path={path} />
+          {canEdit && (
+            <Button
+              id="edit-btn"
+              variant="toolbar"
+              title={editing ? "Stop editing" : "Edit this file"}
+              onClick={() => setEditing((e) => !e)}
+            >
+              {editing ? "Done" : "Edit"}
+            </Button>
+          )}
           {canShare && (
             <Button id="share-btn" variant="toolbar" className="icon-only" title="Share" aria-label="Share" onClick={shareNow}>
               <Icon name="share" />

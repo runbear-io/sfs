@@ -280,6 +280,13 @@ func Start(folder, volDir string, scanInterval, remoteInterval time.Duration) (i
 // machine, and the only cost of waiting is a slower `bdrive init`.
 const startTimeout = 10 * time.Second
 
+// watchRetry is how long to wait before re-opening the hub's change stream
+// after it fails or ends. Long enough that a hub which does not implement the
+// route (or is down) costs one request a minute rather than one a tick, short
+// enough that a hub restart is invisible: the tick is still running the whole
+// time, so this delay only ever costs latency, never a sync.
+const watchRetry = time.Minute
+
 // Stop terminates the daemon for a mount and waits for it to exit. Exit is
 // observed by the lock being released, not by the pid disappearing: the pid
 // could be recycled while we wait, and the lock cannot.
@@ -425,6 +432,27 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 	// instead of on every tick.
 	lastAccess := store.AccessOK
 
+	// watch carries "a peer pushed" from hubs that implement remote.Watcher,
+	// so a teammate's edit lands in about a second instead of waiting out
+	// remoteInterval. Nil whenever there is no stream — a nil channel blocks
+	// forever in select, which is exactly the polling behaviour we want back.
+	// It is an accelerator only: every guarantee still rests on the tick.
+	var watch <-chan struct{}
+	var watchCancel context.CancelFunc
+	// Re-dialling is not free (a request here, a goroutine on the hub), and a
+	// hub that does not implement the route will never start implementing it
+	// mid-connection, so a failed dial backs off instead of retrying per tick.
+	var nextWatch time.Time
+	var watchOpened time.Time
+	stopWatch := func() {
+		if watchCancel != nil {
+			watchCancel()
+			watchCancel = nil
+		}
+		watch = nil
+	}
+	defer stopWatch()
+
 	for {
 		// Re-read the project config each tick: picks up `bdrive remote set`
 		// and hand-edits. A vanished config means the folder was moved,
@@ -476,6 +504,7 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 				be.Close()
 				be = nil
 			}
+			stopWatch() // the stream carries the old credential
 			lastToken = settings.Token
 			lastRemote = time.Time{}
 		}
@@ -489,6 +518,26 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 				lastRemote = time.Now()
 			} else {
 				be = b
+			}
+		}
+		// Open the change stream once there is a backend to open it on. Only
+		// hub (https://) remotes implement Watcher; a bucket never will, and
+		// the type assertion failing is the normal case, not an error.
+		if be != nil && watch == nil && time.Now().After(nextWatch) {
+			if wr, ok := be.(remote.Watcher); ok {
+				wctx, cancel := context.WithCancel(ctx)
+				ch, err := wr.Watch(wctx)
+				if err != nil {
+					cancel()
+					// Quietly: an older hub answers 404 here forever, and this
+					// must not become a log line every 30s for a daemon that
+					// is otherwise working perfectly.
+					nextWatch = time.Now().Add(watchRetry)
+				} else {
+					watch, watchCancel, watchOpened = ch, cancel, time.Now()
+				}
+			} else {
+				nextWatch = time.Now().Add(time.Hour) // not a hub; stop asking
 			}
 		}
 
@@ -528,6 +577,7 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 				be.Close()
 				be = nil
 			}
+			stopWatch() // its connection is to the host we just failed to reach
 			lastRemote = time.Now()
 		default:
 			// "access restored" is a claim about the hub, and a local-only tick
@@ -540,8 +590,8 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 				lastAccess = store.AccessOK
 			}
 			if res.Activity() {
-				log.Printf("local+%d pulled+%d conflicts=%d files~%d pushed=%v",
-					res.LocalOps, res.PulledOps, res.Conflicts, res.Materialized, res.Pushed)
+				log.Printf("local+%d pulled+%d merged=%d conflicts=%d files~%d pushed=%v",
+					res.LocalOps, res.PulledOps, res.Merged, res.Conflicts, res.Materialized, res.Pushed)
 			}
 			if doRemote {
 				lastRemote = time.Now()
@@ -555,6 +605,23 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 		case <-ctx.Done():
 			log.Printf("daemon stopping")
 			return nil
+		case _, open := <-watch:
+			if !open {
+				// The stream ended. A stream that ran a long time was healthy
+				// and hit the hub's streamMaxAge, so re-dial at once; one that
+				// died quickly is a hub that is down or has no such route, and
+				// backs off. Without the distinction every client would go
+				// blind for watchRetry once an hour, on purpose, forever.
+				lived := time.Since(watchOpened)
+				stopWatch()
+				if lived < watchRetry {
+					nextWatch = time.Now().Add(watchRetry)
+				}
+				break
+			}
+			// A peer pushed. Clearing the gate makes the cycle below a remote
+			// one instead of a cheap local scan.
+			lastRemote = time.Time{}
 		case <-time.After(scanInterval):
 		}
 	}

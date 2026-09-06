@@ -198,12 +198,24 @@ classDiagram
     }
     note for Backend "internal/remote — client devices use the https:// hub backend (token from BDRIVE_TOKEN / settings.json); a hub 403 wraps ErrForbidden, which is what Result turns into ReadOnly/NoAccess instead of Offline"
 
+    class merge {
+        <<internal/syncer, merge.go>>
+        +tryMerge(path, mine, theirs, all) blob, ok
+        +mergeText(base, a, b) out, ok
+        +commonAncestor(path, mine, theirs, all)
+        -maxMergeBytes 4 MiB, UTF-8 only
+    }
+
     class daemon {
         +Run(folder, scan, remote)
         +Start / Stop / Running
     }
     note for daemon "per-mount detached loop; re-reads .bdrive/config.json each tick, exits without deletes if it vanishes"
+    note for Session "Concurrent edits to different parts of one text file MERGE now instead of forking. conflictCopies tries a three-way merge first (merge.go): the common ancestor is the greatest op for that path ordered before BOTH sides, which the journal already holds. It declines far more than it resolves — no ancestor, non-UTF-8 or NUL, over 4 MiB, an unreadable blob, or edits touching the same lines all fall through to exactly the conflict copy that existed before, because a machine guessing between two rewrites of one sentence is how people lose work quietly. Only NON-overlapping regions are ever taken, which makes merge(base,a,b) equal merge(base,b,a) — the property that lets two devices each observe the same concurrency and merge independently without pushing different blobs. Result.Merged is counted apart from Result.Conflicts: a merge is work the machine finished, a conflict is work it handed back"
 
+    note for daemon "The tick now selects on a THIRD arm: remote.Watcher's channel, when the backend is a hub that implements it. A peer's push clears lastRemote so the next cycle is a remote one, turning ~10s of latency into ~1s. The stream is torn down wherever the backend is dropped (token change, offline) since its connection carries the old credential to the old host, and a failed or ended dial backs off watchRetry (1m) rather than retrying per tick — an older hub 404s here forever and must not become a log line every few seconds. Strictly an accelerator: the scan and remote intervals still run underneath, so a hub with no stream syncs exactly as it always did"
+
+    Session --> merge : before a conflict copy
     Session --> Store : volume state
     Session --> Backend : pull and push
     Session --> Manifest : chunked push and pull, files over 4 MiB

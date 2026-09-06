@@ -1354,3 +1354,69 @@ pre.plain { background: var(--code-bg); border: 1px solid var(--border); border-
   .setup-body, .setup-cards { flex-direction: column; }
   .setup-tree { width: 100%; }
 }
+
+/* ---- editor (components/Editor.tsx) ----
+   CodeMirror brings no theme of its own here: it inherits the app's tokens so
+   the editor and the rendered view are visibly the same document, not two
+   apps. Only the pieces CM needs told explicitly are set. */
+.cm-host { height: 100%; }
+.cm-host .cm-editor { height: 100%; background: transparent; color: var(--text); }
+.cm-host .cm-editor.cm-focused { outline: none; }
+.cm-host .cm-scroller {
+  font: 13px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 8px 0 40vh; /* room to type at the bottom without hugging the edge */
+}
+.cm-host .cm-gutters {
+  background: transparent;
+  border-right: 1px solid var(--line);
+  color: var(--text-faint);
+}
+.cm-host .cm-activeLine { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.cm-host .cm-activeLineGutter { background: transparent; color: var(--text); }
+.cm-host .cm-cursor { border-left-color: var(--text); }
+.cm-host .cm-selectionBackground,
+.cm-host .cm-content ::selection { background: color-mix(in srgb, var(--accent) 26%, transparent); }
+
+/* Save state sits in the meta line beside the byline, so it reads as part of
+   the file's status rather than as a toolbar control. */
+#editor-state { color: var(--text-faint); }
+#editor-state[data-state="saving"] { color: var(--accent); }
+#editor-state[data-state="error"] { color: var(--del); }
+
+#peer-wrote {
+  margin: 0 0 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+/* Remote cursors and selections (y-codemirror.next). Each peer gets a colour
+   from awareness; these only place and size the marks. */
+.cm-host .cm-ySelection { opacity: 0.35; }
+.cm-host .cm-ySelectionCaret {
+  position: relative;
+  border-left: 1px solid currentColor;
+  border-right: 1px solid currentColor;
+  margin-left: -1px;
+  margin-right: -1px;
+  box-sizing: border-box;
+}
+.cm-host .cm-ySelectionInfo {
+  position: absolute;
+  top: -1.05em;
+  left: -1px;
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 0 4px;
+  border-radius: 3px 3px 3px 0;
+  color: #fff;
+  white-space: nowrap;
+  opacity: 0; /* named only on hover: a live label over every keystroke is noise */
+  transition: opacity 120ms;
+  pointer-events: none;
+  user-select: none;
+}
+.cm-host .cm-ySelectionCaret:hover .cm-ySelectionInfo { opacity: 1; }

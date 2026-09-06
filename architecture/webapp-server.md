@@ -158,8 +158,66 @@ classDiagram
         <<interface>>
         +SignPut(ctx, key, size, ttl)
     }
+    class Watcher {
+        <<interface>>
+        +Watch(ctx) signal channel
+    }
+    note for Watcher "internal/remote — optional, in the PutSigner mold: only httpBackend implements it (GET /api/p/id/events). The channel carries NO payload — the daemon's only question is &quot;talk to the remote now?&quot;, and the answer to a burst is one cycle, so the impl coalesces on a buffer of one and can never make the hub's writer block. A closed channel means the path is gone (hub down, proxy timeout, an older hub with no route) and the caller falls back to its interval. Accelerator only: nothing may depend on a signal arriving, because for every object-store backend none ever will. Its stream gets a client WITHOUT httpBackend's 5-minute whole-request timeout (doWith), which would otherwise sever a healthy idle stream on the dot"
     note for Backend "internal/remote — impls: localBackend (file://), s3Backend, gcsBackend, httpBackend (https:// hub), Prefixed wrapper"
     note for Backend "Key handling is fallible now: Prefixed.key and localBackend.path RETURN AN ERROR (safeKey / store.UnderRoot) rather than concatenating, so a `..` key cannot walk out of a project's prefix or out of a file:// root — and Prefixed.List re-checks the STRIPPED key on the way out, since the prefix it removes is the only thing that was ever validated. The httpBackend client is origin-bound: the device token is keyed to settings.Server, SameOrigin is the one rule, refuseOffOriginRedirect is its CheckRedirect, a presign target must be https on a trusted origin (directTargetOK), and List drops keys failing journal.SafePath and clamps a negative Size. gcs SignPut now signs Content-Length too. Object carries Modified (S3 LastModified, GCS Updated, file mtime; zero where the backend has none) — RemoteSource.verify reads it to decide when a blob can no longer be rewritten by a presigned URL"
+
+    class eventHub {
+        <<internal/webapp, events.go>>
+        -subs per project id
+        -total int
+        +subscribe(project) sub, ok
+        +unsubscribe(project, sub)
+        +publish(project, changeEvent)
+    }
+    class subscriber {
+        -ch chan of frames
+        -lost atomic.Bool
+    }
+    class collabHub {
+        <<internal/webapp, collab.go>>
+        -rooms per project and path
+        +room(key) collabRoom
+    }
+    class collabRoom {
+        -updates opaque Yjs updates
+        -seeded claimed at join
+        +join(sub) log, first
+        +post(update, from) ok
+        +relay(frame) not logged
+        +reset()
+    }
+    note for collabHub "GET and POST {prefix}collab?path=, proj(PermWrite) — the editing channel, so a read-only member has nothing to send on it. The hub is a RELAY and an append-only log: it never parses a Yjs update, holds no document, and links no CRDT library, which is what keeps the build pure Go (a cgo y-crdt would break the cross-compiled release the way a cgo sqlite would). Nothing here touches the journal — the DOCUMENT is a CRDT between browsers, the FILE is still an ordinary blob written by an ordinary upload/content call from whichever client stopped typing last, so journal.Less and Replay are untouched and every desktop device, agent and older client converges as before. The log is deliberately NOT durable; the file is"
+    note for collabRoom "`seeded` is CLAIMED at join under the room lock, never inferred from an empty log: the log only fills once the seeding client has POSTED, so every joiner arriving inside that window was told to seed too — 32 of 32 in the test that found it — and two clients seeding the same text build two DIFFERENT Yjs documents whose merge duplicates every character. The claim is released when the last editor leaves without having posted, or a tab opened and closed would leave the room claimed but empty and the next joiner would snapshot that emptiness over a real file. relay() is the awareness path: broadcast, never recorded, because a caret position replayed to a joiner paints cursors for people who have left"
+
+    class presenceHub {
+        <<internal/webapp, presence.go>>
+        -at per project, per actor entry
+        +mark(project, actor, name, path, now) roster, changed
+        +drop(project, actor) roster, changed
+    }
+    class person {
+        +Name string
+        +Path string
+    }
+    note for presenceHub "POST {prefix}presence, proj(PermRead) — saying &quot;I am reading this&quot; is not a write, and a read-only member is precisely who a teammate most wants to see on a file. NOT persisted and deliberately not a MetaStore repo: presence is true for 15s and then it is a lie, so storing it would only create something to serve staler than the thing it describes. The actor key is an account email and the roster reaches every member of the project, so the key is a MAP KEY ONLY and never serialized — rosterOf emits display name + path, the same pair History already shows them. A claimed path is untrusted text echoed to teammates, so it goes through journal.SafePath. Expiry is LAZY, computed in mark rather than by a sweeper: the only people who need to know a roster shrank are the ones still in it, and they are exactly the ones still heartbeating. rosterOf sorts because Go map order is random and an unstable roster would look like a change on every beat"
+
+    class changeEvent {
+        +Type change or resync
+        +Paths list
+        +More bool
+        +Puts int
+        +Deletes int
+        +Source sync or browser
+        +Device string
+        +People roster, presence frames only
+    }
+    note for eventHub "GET {prefix}events, proj(PermRead) — reading the stream names paths, so it sits behind the same permission the tree does, and proj() already walls it by org membership. publish() is called from the FIVE write handlers beside captureChange, never inside it: that one is the PostHog path, whose contract is that &quot;nothing here carries a path or a file name&quot;, and whose signature is counts-only. publish sits on the sync push path, so it never blocks and never errors — it copies the subscriber set under the lock and sends outside it, and a full buffer marks the subscriber lost rather than waiting. Bounded (subBuffer 32, 256/project, 4096/hub) in the ratelimit.go mold"
+    note for subscriber "A reader that falls behind is not waited for: the next frame it does receive is preceded by a single {type:resync}, because a client that missed one change and a client that missed fifty both need the same thing — to refetch. The frontend keeps its 15s tree poll underneath all of this, so a dropped frame self-heals regardless"
 
     class wireCodec {
         <<internal/remote, compress.go>>
@@ -532,6 +590,15 @@ classDiagram
     DirectUploader <|.. RemoteSource
     RemoteSource o-- Backend : Prefixed(Root, projectID)
     Backend <|-- PutSigner : optional capability
+    Backend <|-- Watcher : optional capability
+    Server *-- eventHub : live change fan-out
+    Server *-- presenceHub : who is looking at what
+    Server *-- collabHub : per-document editing relay
+    collabHub *-- collabRoom
+    collabRoom o-- subscriber : reuses the event fan-out
+    eventHub *-- subscriber
+    presenceHub ..> eventHub : publishes roster on the SAME stream
+    presenceHub ..> person : rosterOf
 
     AuthProvider <|.. BuiltinAuth
     AccountApprover <|.. BuiltinAuth

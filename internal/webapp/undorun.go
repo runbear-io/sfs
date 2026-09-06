@@ -277,7 +277,35 @@ func (s *Server) handleUndoRun(v *volume, w http.ResponseWriter, r *http.Request
 	}
 	s.quota().RecordUsage(org, 0)
 	v.invalidate()
+	// captureChange's contract is that EVERY write path calls it, so that
+	// "how many files changed" stays one number instead of a per-route set
+	// that "silently misses whichever route someone forgets" — this was that
+	// route. An undo run writes put and delete ops like any other edit.
+	puts, deletes, paths := undoTotals(plan.Ops)
+	s.captureChange(r, "browser", puts, deletes)
+	s.publishChange(r, "browser", paths, puts, deletes)
 	writeJSON(w, undoResponse(plan))
+}
+
+// undoTotals summarizes what an undo run wrote. Counted directly rather than
+// through countOps: that one filters on Seq to skip ops a journal already had,
+// and every op here is new by construction — plan.Ops is built in this
+// request. Paths are deduped, since a run that rewrote one file ten times is
+// one path to refetch.
+func undoTotals(ops []journal.Op) (puts, deletes int, paths []string) {
+	seen := map[string]bool{}
+	for _, op := range ops {
+		if op.Kind == journal.KindDelete {
+			deletes++
+		} else {
+			puts++
+		}
+		if !seen[op.Path] {
+			seen[op.Path] = true
+			paths = append(paths, op.Path)
+		}
+	}
+	return puts, deletes, paths
 }
 
 // undoResponse is the one shape both the preview and the write answer with.

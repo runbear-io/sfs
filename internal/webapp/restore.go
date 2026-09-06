@@ -119,5 +119,6 @@ func (s *Server) handleRestore(v *volume, w http.ResponseWriter, r *http.Request
 	// count. The frontend's `file_restored` says which BUTTON was pressed; this
 	// says a file changed.
 	s.captureChange(r, "browser", 1, 0)
+	s.publishChange(r, "browser", []string{p}, 1, 0)
 	writeJSON(w, map[string]any{"ok": true, "blob": req.SHA, "size": found.Size})
 }

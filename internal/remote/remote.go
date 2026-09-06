@@ -127,6 +127,24 @@ type ReadReporter interface {
 	ReportReads(ctx context.Context, kind string, reads []ReadEvent) error
 }
 
+// Watcher is the optional change-notification capability, in the PutSigner
+// mold: a hub can tell a device that a peer pushed, so the daemon syncs on the
+// news instead of waiting out its remote interval. Object-store backends
+// simply don't implement it — a bucket has nobody to do the telling, and the
+// daemon keeps polling exactly as it does today.
+//
+// The channel carries no payload on purpose. The only question the daemon asks
+// is "is it worth talking to the remote now", and the answer to a burst of
+// changes is one cycle, not one per change — so an implementation coalesces
+// and the daemon can never fall behind the stream. A closed channel means the
+// notification path is gone (hub down, connection dropped, an older hub with
+// no such route): callers fall back to polling and may re-dial. It is an
+// accelerator, never a correctness input — nothing may depend on a signal
+// arriving, because for most backends none ever will.
+type Watcher interface {
+	Watch(ctx context.Context) (<-chan struct{}, error)
+}
+
 // Open creates a backend from a remote URL.
 func Open(ctx context.Context, raw string) (Backend, error) {
 	u, err := url.Parse(raw)

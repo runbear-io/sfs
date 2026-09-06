@@ -1,6 +1,7 @@
 package remote
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -181,6 +182,13 @@ func refuseOffOriginRedirect(req *http.Request, via []*http.Request) error {
 const PermsCapability = "X-Bdrive-Perms"
 
 func (b *httpBackend) do(req *http.Request) (*http.Response, error) {
+	return b.doWith(b.hc, req)
+}
+
+// doWith is do against a caller-chosen client. It exists for Watch, whose
+// stream must not inherit b.hc's whole-request timeout; everything else uses
+// do. The headers are the same either way — that is the point of the split.
+func (b *httpBackend) doWith(hc *http.Client, req *http.Request) (*http.Response, error) {
 	if b.token != "" {
 		req.Header.Set("Authorization", "Bearer "+b.token)
 	}
@@ -194,7 +202,7 @@ func (b *httpBackend) do(req *http.Request) (*http.Response, error) {
 		req.Header.Set("X-Bdrive-Device-Name", b.device.Name)
 		req.Header.Set("X-Bdrive-Os", runtime.GOOS+"/"+runtime.GOARCH)
 	}
-	return b.hc.Do(req)
+	return hc.Do(req)
 }
 
 var journalKeyRe = regexp.MustCompile(`^journal/([A-Za-z0-9._-]+)\.jsonl$`)
@@ -558,6 +566,57 @@ func (b *httpBackend) ReportReads(ctx context.Context, kind string, reads []Read
 		return httpError(resp)
 	}
 	return nil
+}
+
+// maxEventLine bounds one line of the hub's event stream. The daemon reads
+// this from a server a folder's config chose, so a stream that never sends a
+// newline must not be able to grow the process without limit. The frames are
+// a few hundred bytes; this is four orders of magnitude of headroom.
+const maxEventLine = 1 << 20
+
+// Watch opens the hub's change stream and reports each announcement as one
+// wakeup. See remote.Watcher for the contract.
+func (b *httpBackend) Watch(ctx context.Context) (<-chan struct{}, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		b.base+"/api/p/"+b.project+"/events", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	// b.hc carries a 5 minute whole-request timeout, which is right for every
+	// other call here and fatal for this one: a stream that is working
+	// perfectly and simply has nothing to say would be severed on the dot.
+	// Same redirect policy — the token must not follow a hub off-origin.
+	resp, err := b.doWith(&http.Client{CheckRedirect: refuseOffOriginRedirect}, req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+		return nil, httpError(resp)
+	}
+	ch := make(chan struct{}, 1)
+	go func() {
+		defer close(ch)
+		defer resp.Body.Close()
+		sc := bufio.NewScanner(resp.Body)
+		sc.Buffer(make([]byte, 0, 4096), maxEventLine)
+		for sc.Scan() {
+			// Only data frames are news. Blank separators and ": keepalive"
+			// comments are how the stream stays open, not something happening.
+			if !bytes.HasPrefix(sc.Bytes(), []byte("data: ")) {
+				continue
+			}
+			// Coalesce: a buffer of one means a burst of pushes costs one
+			// cycle, and a daemon busy syncing never makes the hub's writer
+			// block behind it.
+			select {
+			case ch <- struct{}{}:
+			default:
+			}
+		}
+	}()
+	return ch, nil
 }
 
 // Scope asks the hub what this account may write in this project. A hub that

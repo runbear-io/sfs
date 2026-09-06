@@ -1089,6 +1089,9 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 		v.invalidate() // new ops should show in the viewer immediately
 		puts, deletes := countOps(ops, storedMax)
 		s.captureChange(r, "sync", puts, deletes)
+		// The same intent as the invalidate above, carried one hop further:
+		// a client watching the stream refetches now instead of on its poll.
+		s.publishChange(r, "sync", newOpPaths(ops, storedMax), puts, deletes)
 	}
 	writeJSON(w, map[string]any{"ok": true})
 }
