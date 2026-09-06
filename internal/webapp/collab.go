@@ -169,6 +169,30 @@ func (r *collabRoom) post(update []byte, from *subscriber) bool {
 	return true
 }
 
+// relay fans a frame out without recording it. Used for awareness, which is
+// true for a moment and then is not.
+func (r *collabRoom) relay(ev collabFrame) {
+	frame, err := json.Marshal(ev)
+	if err != nil {
+		return
+	}
+	r.mu.Lock()
+	peers := make([]*subscriber, 0, len(r.subs))
+	for sub := range r.subs {
+		peers = append(peers, sub)
+	}
+	r.touched = time.Now()
+	r.mu.Unlock()
+	for _, sub := range peers {
+		select {
+		case sub.ch <- frame:
+		default:
+			// A dropped cursor position is not worth a resync: the next one
+			// is along in a moment and corrects it.
+		}
+	}
+}
+
 // reset empties a full room so the clients that just snapshotted can rebuild
 // it from the file.
 func (r *collabRoom) reset() {
@@ -180,7 +204,7 @@ func (r *collabRoom) reset() {
 }
 
 type collabFrame struct {
-	Type string `json:"type"` // "hello" | "update" | "resync" | "full"
+	Type string `json:"type"` // "hello" | "update" | "awareness" | "resync"
 	// Seed is set on hello: this client must build the document from the
 	// file's current text, because the room is empty and someone has to.
 	Seed bool `json:"seed,omitempty"`
@@ -188,6 +212,11 @@ type collabFrame struct {
 	Log []string `json:"log,omitempty"`
 	// Update is one Yjs update, base64. The hub never looks inside it.
 	Update string `json:"update,omitempty"`
+	// Awareness is a cursor/selection/identity update. Relayed but NEVER
+	// logged: it describes where someone's caret is this second, so replaying
+	// it to a joiner would paint cursors for people who have left, and storing
+	// it would grow the room without bound for something with no history.
+	Awareness string `json:"awareness,omitempty"`
 }
 
 func b64(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
@@ -278,10 +307,24 @@ func (s *Server) handleCollabPost(v *volume, w http.ResponseWriter, r *http.Requ
 		return
 	}
 	var req struct {
-		Update string `json:"update"`
+		Update    string `json:"update"`
+		Awareness string `json:"awareness"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxUpdateBytes*2)).Decode(&req); err != nil {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	// Awareness is the ephemeral half: broadcast to the room, never stored.
+	if req.Awareness != "" {
+		aw, err := base64.StdEncoding.DecodeString(req.Awareness)
+		if err != nil || len(aw) == 0 || len(aw) > maxUpdateBytes {
+			http.Error(w, "awareness must be base64 and under the size limit", http.StatusBadRequest)
+			return
+		}
+		s.collab().room(roomKey(projectID(r), path)).relay(collabFrame{
+			Type: "awareness", Awareness: b64(aw),
+		})
+		writeJSON(w, map[string]any{"ok": true})
 		return
 	}
 	update, err := base64.StdEncoding.DecodeString(req.Update)

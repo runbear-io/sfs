@@ -1,5 +1,9 @@
 import * as Y from "yjs";
-import { Awareness } from "y-protocols/awareness";
+import {
+  Awareness,
+  applyAwarenessUpdate,
+  encodeAwarenessUpdate,
+} from "y-protocols/awareness";
 
 /* A Yjs provider over the hub's collab relay.
 
@@ -40,9 +44,21 @@ export class CollabDoc {
     private readonly seedText: string,
     private readonly onStatus: (s: CollabStatus) => void,
     private readonly onSeeded: () => void,
+    private readonly me?: { name: string; colour: string },
   ) {
     this.text = this.doc.getText("body");
     this.awareness = new Awareness(this.doc);
+    // y-codemirror.next reads these two fields to label and colour a remote
+    // caret. Without a local state this client is invisible to everyone else
+    // and its own peer count never moves off zero.
+    if (this.me) {
+      this.awareness.setLocalStateField("user", {
+        name: this.me.name,
+        color: this.me.colour,
+        colorLight: this.me.colour + "33",
+      });
+    }
+    this.awareness.on("update", this.onAwareness);
     this.doc.on("update", (u: Uint8Array) => {
       if (this.applying) return;
       this.pending.push(u);
@@ -50,12 +66,41 @@ export class CollabDoc {
     });
   }
 
+  // Awareness is relayed, never logged: it says where a caret is this second,
+  // so a joiner replaying it would get cursors for people who have gone home.
+  private onAwareness = ({
+    added,
+    updated,
+    removed,
+  }: {
+    added: number[];
+    updated: number[];
+    removed: number[];
+  }) => {
+    const changed = added.concat(updated, removed);
+    if (!changed.length || this.closed) return;
+    const update = encodeAwarenessUpdate(this.awareness, changed);
+    void fetch(this.url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ awareness: bytesToB64(update) }),
+    }).catch(() => {
+      // A lost cursor position corrects itself on the next keystroke.
+    });
+  };
+
   connect() {
     this.onStatus("connecting");
     const es = new EventSource(this.url);
     this.es = es;
     es.onmessage = (e) => {
-      let f: { type: string; seed?: boolean; log?: string[]; update?: string };
+      let f: {
+        type: string;
+        seed?: boolean;
+        log?: string[];
+        update?: string;
+        awareness?: string;
+      };
       try {
         f = JSON.parse(e.data);
       } catch {
@@ -84,6 +129,10 @@ export class CollabDoc {
         } finally {
           this.applying = false;
         }
+        return;
+      }
+      if (f.type === "awareness" && f.awareness) {
+        applyAwarenessUpdate(this.awareness, b64ToBytes(f.awareness), this);
         return;
       }
       if (f.type === "resync") {
@@ -132,8 +181,18 @@ export class CollabDoc {
     }
   }
 
+  /* How many OTHER editors are in this document right now, from awareness.
+     It is what tells a write on this path apart: with a co-editor present the
+     change is their snapshot of the document I already have, so warning me
+     about it is noise. Alone, the same event is somebody editing outside the
+     room — a CLI, another device — which I really do need to know about. */
+  peerCount(): number {
+    return Math.max(0, this.awareness.getStates().size - 1);
+  }
+
   destroy() {
     this.closed = true;
+    this.awareness.off("update", this.onAwareness);
     if (this.timer) clearTimeout(this.timer);
     this.es?.close();
     this.awareness.destroy();

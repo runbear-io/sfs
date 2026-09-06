@@ -39,6 +39,9 @@ export function FileView(props: {
   onOpenFile: (path: string) => void;
   onMeta: (meta: ReactNode) => void;
   onRendered?: () => void;
+  // Who is editing, for the label and colour on this account's caret in
+  // everyone else's editor.
+  me?: { name: string; colour: string };
   // Editing is a write, so the caller decides whether this reader may: never
   // on a pinned past version (that would silently fork history at ?v=), and
   // never below write permission.
@@ -192,6 +195,12 @@ function EditView(props: Parameters<typeof FileView>[0]) {
   // a co-editor's keystrokes are already in the buffer.
   const [peerWrote, setPeerWrote] = useState(false);
   const mine = useRef(false);
+  // Co-editors in this document right now. A write while somebody else is in
+  // the room is their snapshot of the document I already have — warning about
+  // it would fire on every co-editing save. Alone, the same event means
+  // somebody edited outside the room (a CLI, another device), which is the
+  // case the banner exists for.
+  const peers = useRef(0);
 
   useEffect(() => {
     const onPeer = (e: Event) => {
@@ -202,6 +211,7 @@ function EditView(props: Parameters<typeof FileView>[0]) {
         mine.current = false;
         return;
       }
+      if (peers.current > 0) return; // a co-editor's snapshot, already in my buffer
       setPeerWrote(true);
     };
     window.addEventListener("bdrive:changed", onPeer);
@@ -250,6 +260,10 @@ function EditView(props: Parameters<typeof FileView>[0]) {
         }}
         onStateChange={setState}
         onCollab={setCollab}
+        onPeers={(n) => {
+          peers.current = n;
+        }}
+        me={props.me}
       />
     </>
   );

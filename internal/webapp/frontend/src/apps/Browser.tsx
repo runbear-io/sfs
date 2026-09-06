@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -255,6 +256,16 @@ export default function Browser(props: {
     !version &&
     (!hub || (!!project && atLeast(project.perm, "write")));
   const [editing, setEditing] = useState(false);
+  // The label and colour on this account's caret in a co-editor's window. The
+  // colour is derived from the identity rather than assigned by the server, so
+  // the same person is the same colour on everyone's screen and in every
+  // session — an index would re-colour the room whenever someone left.
+  const editorIdentity = useMemo(() => {
+    const who = config.me?.name || config.me?.email || "Someone";
+    let h = 0;
+    for (let i = 0; i < who.length; i++) h = (h * 31 + who.charCodeAt(i)) % 360;
+    return { name: who, colour: `hsl(${h} 70% 45%)` };
+  }, [config.me?.name, config.me?.email]);
   // Leaving the file (or pinning a version) leaves edit mode with it, so the
   // next file never opens straight into an editor the reader did not ask for.
   useEffect(() => setEditing(false), [path, version]);
@@ -808,6 +819,7 @@ export default function Browser(props: {
             onMeta={setMeta}
             onRendered={onRendered}
             editing={editing && canEdit}
+            me={editorIdentity}
           />
         </>
       );

@@ -54,6 +54,8 @@ export function Editor({
   onSaved,
   onStateChange,
   onCollab,
+  onPeers,
+  me,
 }: {
   apiBase: string;
   path: string;
@@ -61,6 +63,11 @@ export function Editor({
   onSaved?: (text: string) => void;
   onStateChange?: (s: SaveState) => void;
   onCollab?: (s: CollabStatus) => void;
+  // Who this editor is, for the label and colour on a remote caret.
+  me?: { name: string; colour: string };
+  // Reports whether other editors are in the document, so the caller can
+  // tell a co-editor's snapshot from an outside write.
+  onPeers?: (n: number) => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -77,9 +84,11 @@ export function Editor({
   //  - `initial` changes whenever the seed query refetches, and a peer's write
   //    invalidates exactly that query — so it would reset the buffer under the
   //    typist's cursor, which is the one thing this component must never do.
-  const cb = useRef({ onSaved, onStateChange, onCollab });
-  cb.current = { onSaved, onStateChange, onCollab };
+  const cb = useRef({ onSaved, onStateChange, onCollab, onPeers });
+  cb.current = { onSaved, onStateChange, onCollab, onPeers };
   const seed = useRef(initial);
+  const meRef = useRef(me);
+  meRef.current = me;
 
   useEffect(() => {
     if (!host.current) return;
@@ -136,6 +145,7 @@ export function Editor({
       seed.current,
       (s) => cb.current.onCollab?.(s),
       () => mount(),
+      meRef.current,
     );
 
     // Any change to the shared document — mine or a peer's — restarts the
@@ -151,6 +161,8 @@ export function Editor({
       );
     };
     collab.text.observe(onDocChange);
+    const onPeerChange = () => cb.current.onPeers?.(collab.peerCount());
+    collab.awareness.on("change", onPeerChange);
     collab.connect();
 
     return () => {
@@ -158,6 +170,7 @@ export function Editor({
       const text = collab.text.toString();
       // Closing the tab mid-word must not lose the word.
       if (text && text !== saved.current) void save(text);
+      collab.awareness.off("change", onPeerChange);
       collab.text.unobserve(onDocChange);
       view?.destroy();
       collab.destroy();
