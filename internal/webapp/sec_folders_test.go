@@ -270,3 +270,47 @@ func TestFolderScopeReportsWhatADeviceMustNotWrite(t *testing.T) {
 		t.Error("scope tag is empty on a project that has rules")
 	}
 }
+
+// An org owner is admin everywhere, so no folder rule restricts them — and
+// every surface that REPORTS a level has to say so, not just the ones that
+// enforce it.
+//
+// /scope is the one that matters: a device handed "deny: shared/" stops
+// journaling under it entirely, so an owner's edits there would silently never
+// sync, on a folder the hub would happily accept writes to. Enforcement and
+// advice disagreeing is worse than either being wrong alone.
+func TestFolderScopeNeverRestrictsAnOrgOwner(t *testing.T) {
+	h, _, c, p := permHub(t)
+	for _, rule := range []map[string]any{
+		{"prefix": "vault", "default": PermNone},
+		{"prefix": "locked", "default": PermRead},
+	} {
+		if rec := doAs(t, h, "PUT", "/api/p/"+p.ID+"/folders", rule, c["alice"]); rec.Code != 200 {
+			t.Fatalf("set %v: %d %s", rule, rec.Code, rec.Body)
+		}
+	}
+	rec := doAs(t, h, "GET", "/api/p/"+p.ID+"/scope", nil, c["alice"])
+	if rec.Code != 200 {
+		t.Fatalf("scope: %d %s", rec.Code, rec.Body)
+	}
+	var out struct {
+		ReadOnly []string `json:"readonly"`
+		Deny     []string `json:"deny"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	if len(out.Deny) != 0 || len(out.ReadOnly) != 0 {
+		t.Fatalf("an org owner's device was told to restrict itself: deny=%v readonly=%v",
+			out.Deny, out.ReadOnly)
+	}
+	// The reported level agrees with the one that is enforced.
+	body := doAs(t, h, "GET", "/api/p/"+p.ID+"/folders", nil, c["alice"]).Body.String()
+	if strings.Contains(body, `"me":"none"`) || strings.Contains(body, `"me":"read"`) {
+		t.Fatalf("the folder list reports a level an org owner is not held to: %s", body)
+	}
+	// Control: bob really is restricted, so this is not just an empty project.
+	rec = doAs(t, h, "GET", "/api/p/"+p.ID+"/scope", nil, c["bob"])
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	if len(out.Deny) != 1 || len(out.ReadOnly) != 1 {
+		t.Fatalf("control: bob is not restricted: deny=%v readonly=%v", out.Deny, out.ReadOnly)
+	}
+}

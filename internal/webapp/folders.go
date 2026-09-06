@@ -144,6 +144,22 @@ func folderLevel(p Project, email, filePath, base string) string {
 	return rule.Default
 }
 
+// effectiveLevel is folderLevel with the admin short-circuit pathPermOf
+// applies. Every surface that REPORTS a level must use it, not folderLevel:
+// an admin is admin everywhere, so a rule that says "none" says nothing about
+// them, and reporting the rule's own answer tells a client the opposite of
+// what enforcement will do.
+//
+// That is not cosmetic on /scope. An org owner's device given "deny: shared/"
+// stops journaling under it entirely — their edits there would never sync, and
+// nothing would say so, on a folder the hub would happily accept writes to.
+func effectiveLevel(p Project, email, filePath, base string) string {
+	if base == PermAdmin {
+		return PermAdmin
+	}
+	return folderLevel(p, email, filePath, base)
+}
+
 // pathPermOf resolves the caller's level for one path inside a project.
 //
 // An admin — a project admin, and every org owner, who projectPermOf always
@@ -563,7 +579,7 @@ func (s *Server) handleProjectFolders(w http.ResponseWriter, r *http.Request) {
 			"prefix":  rule.Prefix,
 			"default": rule.Default,
 			"grants":  grants,
-			"me":      folderLevel(p, email, rule.Prefix, base),
+			"me":      effectiveLevel(p, email, rule.Prefix, base),
 		})
 	}
 	writeJSON(w, map[string]any{"folders": out, "scope": scopeTag(p, email, base)})
@@ -599,7 +615,7 @@ func (s *Server) handleProjectScope(w http.ResponseWriter, r *http.Request) {
 	email := normEmail(s.requestUser(r).Email)
 	readonly, deny := []string{}, []string{}
 	for _, rule := range p.Folders {
-		switch l := folderLevel(p, email, rule.Prefix, base); {
+		switch l := effectiveLevel(p, email, rule.Prefix, base); {
 		case !atLeast(l, PermRead):
 			deny = append(deny, rule.Prefix)
 		case l == PermRead && atLeast(base, PermWrite):
