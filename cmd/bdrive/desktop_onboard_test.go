@@ -379,9 +379,18 @@ func TestDesktopInspectBlockedFolder(t *testing.T) {
 // rather than the app, and a folder inside Desktop/Documents/Downloads is
 // gated for it. Legal, but worth saying out loud before the folder is picked.
 func TestDesktopInspectProtectedFolderWarns(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("no home dir")
+	// A hermetic home, and the folders really created. protectedRoots() reads
+	// $HOME, and store.UnderRoot answers false for a ROOT that does not exist
+	// (it EvalSymlinks the root first) — so on any machine whose home has no
+	// Desktop/Documents/Downloads, every case below silently measured "no
+	// warning" against "no warning" and passed for the wrong reason. That is
+	// every CI runner, which is where it finally failed.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, dir := range []string{"Desktop", "Documents", "Downloads", "work"} {
+		if err := os.MkdirAll(filepath.Join(home, dir, "acme-app", "team"), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for _, dir := range []string{"Desktop", "Documents", "Downloads"} {
 		got := protectedWarning(filepath.Join(home, dir, "acme-app", "team"))
