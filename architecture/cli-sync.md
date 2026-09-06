@@ -226,6 +226,10 @@ classDiagram
     Store o-- Op : journal files
     Store *-- SyncState : sync.json
     Session --> SyncState : reads the floor, records what it accepted
+    Scoper <|.. Backend : the hub backend answers, a raw bucket has no account to answer for
+    Session ..> Scoper : loadScope, once per cycle before scan
+    Scoper ..> Scope : tag + readonly + deny prefixes
+    Scope ..> SyncState : persisted, so an unreachable hub never widens
     SyncState ..> Filter : AcceptRules(IgnoreAccepted)
     Session ..> SafePath : every path and note, in and out
     Session ..> UnderRoot : materialize writes and deletes
