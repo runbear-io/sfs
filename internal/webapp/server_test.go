@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -309,10 +310,44 @@ func TestConfigBrandNeverLeaksVolume(t *testing.T) {
 	}
 }
 
-func TestExpandWikilinks(t *testing.T) {
-	got := string(expandWikilinks([]byte("a [[x y]] b [[u|v]] c [[no")))
-	want := "a [x y](wiki:x%20y) b [v](wiki:u) c [[no"
-	if got != want {
-		t.Errorf("got %q, want %q", got, want)
+// TestWikilinkRendering drives the real renderer over one document holding
+// every context a [[…]] can sit in. Prose must keep emitting exactly the
+// anchor FileView.tsx resolves; code must come out byte-identical, which is
+// the bug — a mermaid subroutine node B[[label]] used to reach mermaid as
+// B[label](wiki:label) and refuse to parse.
+func TestWikilinkRendering(t *testing.T) {
+	const mermaid = "flowchart LR\n  A[input] --> B[[stored record]]"
+	src := "a [[x y]] b [[u|v]] c [[no\n\n" +
+		"span `[[target]]` end\n\n" +
+		"```mermaid\n" + mermaid + "\n```\n"
+
+	got, err := RenderMarkdown([]byte(src))
+	if err != nil {
+		t.Fatalf("RenderMarkdown: %v", err)
+	}
+
+	// Prose: unchanged from the regex this replaced.
+	for _, want := range []string{
+		`<a href="wiki:x%20y">x y</a>`,
+		`<a href="wiki:u">v</a>`,
+		`c [[no`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("prose: %q missing from\n%s", want, got)
+		}
+	}
+
+	// Code span: literal, no rewrite and no anchor.
+	if !strings.Contains(got, "<code>[[target]]</code>") {
+		t.Errorf("code span was rewritten:\n%s", got)
+	}
+
+	// Fenced block: the bytes mermaid receives are the bytes on disk.
+	inner := html.EscapeString(mermaid)
+	if !strings.Contains(got, inner) {
+		t.Errorf("fenced block not byte-identical, want %q in\n%s", inner, got)
+	}
+	if strings.Contains(got, "wiki:stored") {
+		t.Errorf("fenced block was rewritten:\n%s", got)
 	}
 }
