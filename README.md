@@ -423,7 +423,7 @@ its first admin, and **org owners are implicitly admin on every project in
 their org**, so nobody can lock them out. Grants are org members only, and
 a project always keeps at least one admin.
 
-A **folder rule** (Project settings → Folders) gives one folder inside a
+A **folder rule** (open the folder and press **Share**) gives one folder inside a
 project different access from the rest of it — "everyone can write this
 project, except `designs/`, which most people may only read". A rule names a
 folder prefix, the level everyone else gets there, and optional per-person

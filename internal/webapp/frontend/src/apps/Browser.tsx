@@ -1,10 +1,4 @@
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { atLeast } from "../api/types";
@@ -12,14 +6,13 @@ import { getJSON, postJSON } from "../api/http";
 import type { Project, ServerConfig, UndoPlan } from "../api/types";
 import { useHeat, useTree } from "../hooks/useBrowse";
 import { fetchBlobText, fileURLFor } from "../hooks/useBlob";
-import { useShares } from "../hooks/useHub";
+import { useFolders, useShares } from "../hooks/useHub";
 import { urlForPath, urlForView, type Route } from "../router";
 import { currentNavType, navigate, useLocationPath } from "../nav";
 import { HTML_EXT, IMG_EXT, PDF_EXT, copyText } from "../util";
 import { toast } from "../toast";
 import { modalConfirm } from "../modal";
 import { onSearchRequest } from "../search";
-import { track } from "../analytics";
 import { AppShell, Icon, Page, Topbar, closeSidebarOnMobile, type PageWidth } from "../components/shell";
 import { FileTree, ancestorsOf } from "../components/FileTree";
 import { Breadcrumbs } from "../components/Breadcrumbs";
@@ -34,7 +27,6 @@ import { HistoryView, historyTitle } from "../components/HistoryView";
 import type { Run } from "../lib/runs";
 import { armGoal, applyGoal, noteScroll, type Goal } from "../lib/scroll";
 import { VersionBanner } from "../components/VersionBanner";
-import { secretsMessage } from "../lib/secrets";
 import { ConflictBanner } from "../components/ConflictBanner";
 import { parseConflict } from "../lib/conflict";
 
@@ -62,6 +54,16 @@ export default function Browser(props: {
 
   const { tree, flatFiles, dirIndex, loaded } = useTree(apiBase, !hub || !!project);
   const heatMap = useHeat(apiBase, hub && !!project && !!config.reads?.enabled);
+  // Folder rules, for the badge on a restricted folder's row. Same shape as
+  // heatMap: one project-wide query, read from cache by the dialog too.
+  const { data: folderData } = useFolders(hub && !!project ? project?.id : undefined);
+  const folderRules = useMemo(() => folderData?.folders || [], [folderData]);
+  // Slash-terminated prefixes are how the hub stores them; the tree keys on
+  // plain paths, so strip it once here rather than per row.
+  const restrictedDirs = useMemo(
+    () => new Set(folderRules.map((r) => r.prefix.replace(/\/$/, ""))),
+    [folderRules],
+  );
   // Dashboard data: the per-device breakdown, plus a fresh heat fetch when
   // a dashboard surface opens (the ambient heat cache may be a minute old).
   const isHome = hub && !!project && !route.path && !route.view;
@@ -195,16 +197,18 @@ export default function Browser(props: {
 
   /* ---- topbar state + actions ---- */
   const [meta, setMeta] = useState<ReactNode>("");
-  const [share, setShare] = useState<{ url: string; copied: boolean } | null>(null);
+  const [shareOpen, setShareOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   useEffect(() => onSearchRequest(() => setPaletteOpen(true)), []);
   const downloadRef = useRef<HTMLAnchorElement>(null);
 
   const panel = props.panel ?? null;
-  // Minting a public link is a write. A read-only member sees no Share
-  // button rather than a button that 403s.
-  const canShare = !panel && hub && !!project && isFile && atLeast(project.perm, "write");
+  // Sharing is a write — a read-only member sees no Share button rather than
+  // one that 403s. It now covers FOLDERS too: the dialog is where a folder's
+  // access is set, and "shares are per-file" was only ever true of public
+  // links, which the dialog says in its own words.
+  const canShare = !panel && hub && !!project && (isFile || isDir) && atLeast(project.perm, "write");
   // The project's live public links, filtered to the open file. One query
   // for the whole project (Settings reads the same cache entry), so opening
   // a file costs no extra request.
@@ -255,37 +259,11 @@ export default function Browser(props: {
     }
   }, [apiBase, path, version]);
 
-  const shareNow = useCallback(async () => {
-    // Shares are per-file; a selected folder has nothing to mint.
-    const post = (confirm: boolean) =>
-      fetch(apiBase + "shares", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(confirm ? { path, confirm: true } : { path }),
-      });
-    try {
-      let r = await post(false);
-      // 409: the hub found credential-shaped strings and minted nothing.
-      // Read the structured body — this is a raw fetch, so it never passes
-      // through errorFor() in api/http.ts, which would flatten it to a toast.
-      if (r.status === 409) {
-        const { findings } = (await r.json()) as { findings?: { rule: string; line: number }[] };
-        if (!(await modalConfirm("This file may contain credentials", secretsMessage(findings), "Share anyway", true)))
-          return; // Cancel mints nothing, and fires no share_created
-        r = await post(true);
-      }
-      if (!r.ok) throw new Error(await r.text());
-      const s = await r.json();
-      // Fired here rather than by the table in api/http.ts, because this is
-      // the one write in the app that goes out as a raw fetch.
-      track("share_created");
-      const copied = await copyText(s.url);
-      setShare({ url: s.url, copied });
-      refreshShares(); // the banner appears (or stays) without a reload
-    } catch (err) {
-      toast("Share failed: " + (err as Error).message, true);
-    }
-  }, [apiBase, path, refreshShares]);
+  /* Opening the dialog IS the action now. The mint, its 409 credential gate
+     and track("share_created") moved into ShareDialog: the gate used to be a
+     modalConfirm, and modal.tsx holds one modal at a time, so it could not
+     have stayed out here once a dialog was already open. */
+  const shareNow = useCallback(() => setShareOpen(true), []);
 
   /* ---- restore ----
      Putting an old version back is a write, so a read-only member sees no
@@ -603,6 +581,7 @@ export default function Browser(props: {
         <FolderListing
           node={dirIndex.get(path)!}
           heatMap={heatMap}
+          folders={folderRules}
           hub={hub && !!project}
           apiBase={apiBase}
           onOpen={openPath}
@@ -792,6 +771,7 @@ export default function Browser(props: {
             onToggle={onToggle}
             currentPath={treePath}
             listingShowing={listingShowing}
+            restricted={restrictedDirs}
             onOpen={openPath}
           />
         }
@@ -810,15 +790,18 @@ export default function Browser(props: {
           {view}
         </Page>
       </AppShell>
-      {share && (
+      {shareOpen && project && (
         <ShareDialog
-          url={share.url}
-          copied={share.copied}
+          project={project}
+          path={path}
+          isDir={isDir}
+          shares={shares || []}
+          onChanged={refreshShares}
+          onOpenFolder={(p) => navigate(urlForPath(p, project.id))}
           onClose={() => {
-            setShare(null);
-            // Create may have handed back an existing link, in which case
-            // shareNow's own invalidation raced a stale cache. Refresh again
-            // so the banner agrees with what the dialog just showed.
+            setShareOpen(false);
+            // The dialog may have minted or revoked; refresh so the banner
+            // agrees with what it just showed.
             refreshShares();
           }}
         />

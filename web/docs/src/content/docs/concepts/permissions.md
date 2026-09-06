@@ -57,8 +57,12 @@ Project permissions apply to the whole project. A **folder rule** gives one
 folder inside it different access — "everyone on the team can write this
 project, except `designs/`, which most people may only read".
 
-Edit them in **Project settings → Folders**. Only project admins (and workspace
-owners) can add or change one.
+Open the folder and press **Share** — the same dialog that shares a file, which
+on a folder is where its access is set. Only project admins (and workspace
+owners) can change it; anyone else sees the state read-only.
+
+A restricted folder is marked in the folder listing, so you can tell one at a
+glance without opening it.
 
 - A rule names a **folder prefix** and the level everyone else gets there, plus
   optional per-person exceptions — the same shape as project permissions, one
