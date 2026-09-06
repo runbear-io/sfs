@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/runbear-io/beardrive/internal/config"
 	"github.com/runbear-io/beardrive/internal/secrets"
@@ -522,5 +523,266 @@ func TestSyncHookModeNoSecretsSaysNothing(t *testing.T) {
 		if strings.Contains(strings.ToLower(got), unwanted) {
 			t.Errorf("a clean mount mentions %q on every turn:\n%s", unwanted, got)
 		}
+	}
+}
+
+// staleMount is mountAt plus dated content: the files a doc references have
+// to be datable, and only the journal can date them (materialize stamps a
+// peer's file with THIS device's mtime), so the ages ride on mtime into
+// Op.Mtime exactly as staleProject does it. No sync here — the hook's own
+// cycle fills both the journal and the materialization cache it reads.
+func staleMount(t *testing.T, parent, name, remote string, files map[string]string, ages map[string]time.Duration) config.Project {
+	t.Helper()
+	proj := mountAt(t, parent, name, remote)
+	dir := filepath.Join(parent, name)
+	now := time.Now()
+	for rel, body := range files {
+		abs := filepath.Join(dir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(abs, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if age, ok := ages[rel]; ok {
+			when := now.Add(age)
+			if err := os.Chtimes(abs, when, when); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	return proj
+}
+
+// hookContext pulls the additionalContext string back out of the hook's one
+// JSON object, so a test asserts on what the agent actually reads.
+func hookContext(t *testing.T, out string) string {
+	t.Helper()
+	var got struct {
+		Out struct {
+			Context string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &got); err != nil {
+		t.Fatalf("hook output is not one JSON object (%v):\n%s", err, out)
+	}
+	return got.Out.Context
+}
+
+// The fourth piece of the turn-start brief: docs whose own references have
+// been written since. It rides in the SAME object as the link formula, and it
+// is computed with no network at all — every mount here has an unreachable
+// remote.
+func TestSyncHookModeReportsStaleDocs(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	root := t.TempDir()
+	root, _ = filepath.EvalSymlinks(root)
+	staleMount(t, root, "wiki", "https://hub.example.com/p/p-12345678", map[string]string{
+		"runbook.md":                  "the syncer lives in [it](internal/syncer/syncer.go)\n",
+		"current.md":                  "see `internal/journal/journal.go`\n",
+		"internal/syncer/syncer.go":   "package syncer\n",
+		"internal/journal/journal.go": "package journal\n",
+	}, map[string]time.Duration{
+		"runbook.md":                  -12 * day,
+		"internal/syncer/syncer.go":   -2 * day, // written after the doc: outgrown
+		"current.md":                  -1 * day,
+		"internal/journal/journal.go": -30 * day, // older than its doc: not
+	})
+
+	ctx := hookContext(t, runHook(t, root))
+	if !strings.Contains(ctx, "outrun") {
+		t.Fatalf("no stale sentence:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "`wiki/runbook.md` (1 file newer, oldest gap 10d)") {
+		t.Errorf("outgrown doc not named with its gap:\n%s", ctx)
+	}
+	if strings.Contains(ctx, "current.md") {
+		t.Errorf("a doc newer than everything it references is not stale:\n%s", ctx)
+	}
+	// The link formula is still the first thing in the same object.
+	if !strings.Contains(ctx, "https://hub.example.com/p-12345678") {
+		t.Errorf("stale sentence replaced the links:\n%s", ctx)
+	}
+}
+
+// Nothing outgrown means no sentence at all, not an empty one — the turn pays
+// for every word here.
+func TestSyncHookModeNoStaleSaysNothing(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	root := t.TempDir()
+	root, _ = filepath.EvalSymlinks(root)
+	staleMount(t, root, "wiki", "https://hub.example.com/p/p-12345678", map[string]string{
+		"runbook.md":                "see [it](internal/syncer/syncer.go)\n",
+		"internal/syncer/syncer.go": "package syncer\n",
+	}, map[string]time.Duration{
+		"runbook.md":                -1 * day,
+		"internal/syncer/syncer.go": -9 * day,
+	})
+
+	ctx := hookContext(t, runHook(t, root))
+	if strings.Contains(ctx, "outrun") {
+		t.Errorf("nothing is outgrown, so there must be no sentence:\n%s", ctx)
+	}
+}
+
+// A fresh mount with no journal yet gets no sentence either, and still emits
+// its links.
+func TestSyncHookModeStaleNoJournal(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	root := t.TempDir()
+	root, _ = filepath.EvalSymlinks(root)
+	mountAt(t, root, "wiki", "https://hub.example.com/p/p-12345678")
+
+	ctx := hookContext(t, runHook(t, root))
+	if strings.Contains(ctx, "outrun") {
+		t.Errorf("empty project reported outgrown docs:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "https://hub.example.com/p-12345678") {
+		t.Errorf("links missing:\n%s", ctx)
+	}
+}
+
+// Judgments, not facts: three named and the rest counted, the shape
+// hookChanged uses at 20.
+func TestSyncHookModeStaleCap(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	root := t.TempDir()
+	root, _ = filepath.EvalSymlinks(root)
+	files := map[string]string{"code.go": "package main\n"}
+	ages := map[string]time.Duration{"code.go": -1 * day}
+	for i := range 5 {
+		rel := fmt.Sprintf("doc%d.md", i)
+		files[rel] = "see [it](code.go)\n"
+		// Staggered so the worst-first order is deterministic.
+		ages[rel] = -time.Duration(10+i) * day
+	}
+	staleMount(t, root, "wiki", "https://hub.example.com/p/p-12345678", files, ages)
+
+	ctx := hookContext(t, runHook(t, root))
+	if n := strings.Count(ctx, ".md` ("); n != hookStaleMax {
+		t.Errorf("named %d outgrown docs, want %d:\n%s", n, hookStaleMax, ctx)
+	}
+	if !strings.Contains(ctx, "+2 more") {
+		t.Errorf("the tail past the cap must be a count:\n%s", ctx)
+	}
+}
+
+// Multi-mount: a mount below the run folder prefixes its doc paths, and a
+// sibling mount's doc never hangs off the wrong prefix.
+func TestSyncHookModeStaleMultipleMounts(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	root := t.TempDir()
+	root, _ = filepath.EvalSymlinks(root)
+	outgrown := map[string]string{
+		"runbook.md": "see [it](code.go)\n",
+		"code.go":    "package main\n",
+	}
+	ages := map[string]time.Duration{"runbook.md": -12 * day, "code.go": -1 * day}
+	staleMount(t, root, "projA", "https://hub.example.com/p/p-aaaaaaaa", outgrown, ages)
+	staleMount(t, root, "projB", "https://hub.example.com/p/p-bbbbbbbb", outgrown, ages)
+
+	ctx := hookContext(t, runHook(t, root))
+	for _, want := range []string{"`projA/runbook.md`", "`projB/runbook.md`"} {
+		if !strings.Contains(ctx, want) {
+			t.Errorf("missing %s — a mount's doc must carry its own prefix:\n%s", want, ctx)
+		}
+	}
+	if strings.Contains(ctx, "`runbook.md`") {
+		t.Errorf("an unprefixed doc path belongs to no project here:\n%s", ctx)
+	}
+}
+
+// A session inside a mount sees paths relative to itself, so its own subpath
+// is stripped and a sibling folder's doc is not its to re-read.
+func TestSyncHookModeStaleInsideMount(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	root := t.TempDir()
+	root, _ = filepath.EvalSymlinks(root)
+	staleMount(t, root, "wiki", "https://hub.example.com/p/p-12345678", map[string]string{
+		"docs/runbook.md": "see [it](../code.go)\n",
+		"other/aside.md":  "see [it](../code.go)\n",
+		"code.go":         "package main\n",
+	}, map[string]time.Duration{
+		"docs/runbook.md": -12 * day,
+		"other/aside.md":  -12 * day,
+		"code.go":         -1 * day,
+	})
+
+	ctx := hookContext(t, runHook(t, filepath.Join(root, "wiki", "docs")))
+	if !strings.Contains(ctx, "`runbook.md`") {
+		t.Errorf("the session's own subpath must be stripped:\n%s", ctx)
+	}
+	if strings.Contains(ctx, "aside.md") {
+		t.Errorf("a sibling folder's doc is outside this session's view:\n%s", ctx)
+	}
+}
+
+// The budget bounds the scan, never the turn: past it the sentence is dropped,
+// the links survive, and the command still exits 0 with one valid JSON object.
+func TestSyncHookModeStaleDegrades(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	root := t.TempDir()
+	root, _ = filepath.EvalSymlinks(root)
+	staleMount(t, root, "wiki", "https://hub.example.com/p/p-12345678", map[string]string{
+		"runbook.md": "see [it](code.go)\n",
+		"code.go":    "package main\n",
+	}, map[string]time.Duration{"runbook.md": -12 * day, "code.go": -1 * day})
+
+	old := hookStaleBudget
+	hookStaleBudget = -time.Second // already expired when the loop starts
+	defer func() { hookStaleBudget = old }()
+
+	ctx := hookContext(t, runHook(t, root)) // runHook fails the test on a non-nil error
+	if strings.Contains(ctx, "outrun") {
+		t.Errorf("an expired budget must drop the sentence:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "https://hub.example.com/p-12345678") {
+		t.Errorf("the budget bounds the stale scan, not the links:\n%s", ctx)
+	}
+}
+
+// AGENTS.md is the team-rules file, and not every platform finds one on its
+// own — Codex never looks below the root→cwd path. So the context names it
+// when it syncs, and says nothing when it does not.
+func TestSyncHookModeRulesPointer(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	root := t.TempDir()
+	root, _ = filepath.EvalSymlinks(root)
+	staleMount(t, root, "wiki", "https://hub.example.com/p/p-12345678", map[string]string{
+		"AGENTS.md": "# how this team works\n",
+	}, nil)
+	staleMount(t, root, "plain", "https://hub.example.com/p/p-99999999", map[string]string{
+		"notes.md": "no rules here\n",
+	}, nil)
+
+	ctx := hookContext(t, runHook(t, root))
+	if n := strings.Count(ctx, "AGENTS.md"); n != 1 {
+		t.Errorf("AGENTS.md named %d times, want exactly 1:\n%s", n, ctx)
+	}
+	if !strings.Contains(ctx, "`wiki/AGENTS.md`") {
+		t.Errorf("the rules pointer must carry the mount's prefix:\n%s", ctx)
+	}
+
+	// From inside the mount the rules sit above the session, so the pointer
+	// has to climb — hookAgentPath would have dropped them entirely.
+	ctx = hookContext(t, runHook(t, filepath.Join(root, "wiki")))
+	if !strings.Contains(ctx, "`AGENTS.md`") {
+		t.Errorf("rules at the session's own root:\n%s", ctx)
+	}
+}
+
+// A session deep inside the mount still gets a path it can actually open.
+func TestSyncHookModeRulesAboveSession(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	root := t.TempDir()
+	root, _ = filepath.EvalSymlinks(root)
+	staleMount(t, root, "wiki", "https://hub.example.com/p/p-12345678", map[string]string{
+		"AGENTS.md":       "# rules\n",
+		"docs/notes/a.md": "hi\n",
+	}, nil)
+
+	ctx := hookContext(t, runHook(t, filepath.Join(root, "wiki", "docs", "notes")))
+	if !strings.Contains(ctx, "`../../AGENTS.md`") {
+		t.Errorf("rules two levels up must be reachable from the session:\n%s", ctx)
 	}
 }

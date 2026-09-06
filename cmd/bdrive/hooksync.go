@@ -14,6 +14,7 @@ import (
 
 	"github.com/runbear-io/beardrive/internal/secrets"
 	"github.com/runbear-io/beardrive/internal/store"
+	"github.com/runbear-io/beardrive/internal/syncer"
 )
 
 // `bdrive sync --hook <label>` is the agent-hook flavor of sync, run by the
@@ -49,12 +50,29 @@ type hookLink struct {
 	// is: the daemon usually scanned the agent's write seconds ago, so this
 	// cycle's own scan sees an unchanged file and finds nothing.
 	secrets map[string][]secrets.Finding
+	// stale is the synced docs this mount's own code has outrun, worst
+	// first, and rules says whether it has an AGENTS.md at its root.
+	stale []staleDoc
+	rules bool
 }
 
 // hookChangedMax caps the changed-file list the turn pays for. Past it the
 // tail is a count — the first cycle on a fresh mount materializes the whole
 // project, and no turn should carry that.
 const hookChangedMax = 20
+
+// hookStaleMax caps the outgrown docs named. Three, where hookChangedMax is
+// 20, because this list is judgments and that one is facts.
+const hookStaleMax = 3
+
+// hookStaleBudget caps what the turn pays for the stale sentence across ALL
+// mounts — staleRefs opens every synced markdown file, and past the budget the
+// sentence is dropped rather than the turn delayed. A var, not a const, so the
+// deadline path is testable.
+var hookStaleBudget = 250 * time.Millisecond
+
+// agentsDoc is the synced team-rules file `internal/templates` seeds.
+const agentsDoc = "AGENTS.md"
 
 // hookSessionID reads the platform's event JSON from stdin — once per run,
 // since stdin can only be consumed once and the sync loop may cover several
@@ -82,11 +100,13 @@ type hookSync struct {
 	base    string
 	paths   []store.InboundEvent
 	secrets map[string][]secrets.Finding
+	stale   []staleDoc
+	rules   bool
 }
 
 // runHookSync syncs one mount and reports its hub base URL, if it has one,
 // plus the peer changes waiting for this turn.
-func runHookSync(cmd *cobra.Command, target, sessionID, label string) (hookSync, bool) {
+func runHookSync(cmd *cobra.Command, target, sessionID, label string, deadline time.Time) (hookSync, bool) {
 	sess, proj, err := openSession(cmd.Context(), target, true)
 	if err != nil {
 		return hookSync{}, false // not a mount / no session: fast no-op
@@ -120,11 +140,48 @@ func runHookSync(cmd *cobra.Command, target, sessionID, label string) (hookSync,
 	// changes without them, so every turn sees the ones still true.
 	found, _ := sess.Store.LoadSecrets(sess.MountID)
 
+	stale, rules := hookStaleDocs(sess, deadline)
+
 	server, projectID, err := splitHubRemote(proj.Remote)
 	if err != nil {
 		return hookSync{}, false // non-hub remote: nothing to link to
 	}
-	return hookSync{base: server + "/" + projectID, paths: paths, secrets: found}, true
+	return hookSync{base: server + "/" + projectID, paths: paths, secrets: found, stale: stale, rules: rules}, true
+}
+
+// hookStaleDocs computes the outgrown docs for one mount, and whether the
+// mount root holds team rules. Local only — the journal dates the paths and the
+// cycle's own materialization cache is the synced set, so nothing here waits on
+// the network or walks the folder a second time.
+//
+// The cache lags a file created between the cycle's scan and this read by one
+// turn, which is the price of not walking; every error is a missing sentence,
+// never a failed turn.
+func hookStaleDocs(sess *syncer.Session, deadline time.Time) ([]staleDoc, bool) {
+	cache, err := sess.Store.LoadCache(sess.MountID)
+	if err != nil {
+		return nil, false
+	}
+	_, rules := cache[agentsDoc]
+	// AllOps sits before the budget check as well as inside the loop: a
+	// pathological journal must drop the sentence at the first opportunity.
+	if staleExpired(deadline) {
+		return nil, rules
+	}
+	ops, err := sess.Store.AllOps()
+	if err != nil || staleExpired(deadline) {
+		return nil, rules
+	}
+	synced := make(map[string]bool, len(cache))
+	for rel := range cache {
+		synced[rel] = true
+	}
+	// Sorted, so the tie-break between equal gaps does not ride on map order.
+	docs, complete := staleDocs(sess.Folder, slices.Sorted(maps.Keys(cache)), synced, staleWriteTimes(ops), deadline)
+	if !complete {
+		return nil, rules
+	}
+	return docs, rules
 }
 
 // hookLinkFor places one mount relative to the folder the hook ran in.
@@ -201,6 +258,12 @@ func emitHookContext(cmd *cobra.Command, links []hookLink) {
 	}
 	if found := hookSecrets(links); found != "" {
 		context += " " + found
+	}
+	if outgrown := hookStale(links); outgrown != "" {
+		context += " " + outgrown
+	}
+	if rules := hookRules(links); rules != "" {
+		context += " " + rules
 	}
 
 	out := map[string]any{
@@ -301,4 +364,72 @@ func hookSecrets(links []hookLink) string {
 		s += fmt.Sprintf(", +%d more", over)
 	}
 	return s + ". They have already synced to the hub and to teammates, so this is not a blocker to work around — tell the user, and suggest rotating the credential and keeping it out of the folder."
+}
+
+// hookStale names the synced docs whose own references have outrun them — the
+// fourth piece of the turn-start brief, and the only one no human ever sees
+// unless they type `bdrive stale`. Advisory like everything else here.
+func hookStale(links []hookLink) string {
+	var parts []string
+	over := 0
+	for _, l := range links {
+		for _, d := range l.stale {
+			p, ok := hookAgentPath(l, d.path)
+			if !ok {
+				continue
+			}
+			if len(parts) >= hookStaleMax {
+				over++
+				continue
+			}
+			parts = append(parts, fmt.Sprintf("`%s` (%s newer, oldest gap %s)",
+				p, plural(len(d.refs), "file"), staleGap(d.refs[0].gap)))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	s := "Docs here that their own code has outrun — re-read before trusting them: " + strings.Join(parts, ", ")
+	if over > 0 {
+		s += fmt.Sprintf(", +%d more", over)
+	}
+	return s + "."
+}
+
+// hookRules points the turn at the project's synced team rules. Only some
+// platforms discover an AGENTS.md natively — Codex never finds one off the
+// root→cwd path, Claude Code and Hermes find it only after deciding to enter
+// the folder — so this sentence is where every platform that has hooks at all
+// gets told, without anyone editing a repo root.
+func hookRules(links []hookLink) string {
+	var parts []string
+	for _, l := range links {
+		if l.rules {
+			parts = append(parts, "`"+hookRulesPath(l)+"`")
+		}
+	}
+	switch len(parts) {
+	case 0:
+		return ""
+	case 1:
+		return "This project's team rules are at " + parts[0] + " — read it before substantive work."
+	default:
+		return "Team rules for the synced folders here are at " + strings.Join(parts, ", ") + " — read them before substantive work."
+	}
+}
+
+// hookRulesPath places the mount root's AGENTS.md for the folder the hook ran
+// in. This is the one place hookAgentPath is deliberately not used: it drops
+// anything outside the session's own subpath, which is right for a sibling
+// folder's doc and wrong for the rules above the session, which the agent can
+// and should still open.
+func hookRulesPath(l hookLink) string {
+	switch {
+	case l.prefix != "":
+		return l.prefix + agentsDoc
+	case l.sub != "":
+		return strings.Repeat("../", strings.Count(l.sub, "/")+1) + agentsDoc
+	default:
+		return agentsDoc
+	}
 }

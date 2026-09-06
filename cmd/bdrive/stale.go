@@ -138,31 +138,8 @@ func runStale(cmd *cobra.Command, folderArg []string, filesOnly bool, limit int)
 		synced[rel] = true
 	}
 
-	var docs []staleDoc
-	for _, rel := range paths {
-		if !isMarkdownPath(rel) {
-			continue
-		}
-		docTime, ok := written[rel]
-		if !ok {
-			continue // never synced: nothing to date it by
-		}
-		var refs []staleRef
-		for _, ref := range staleRefs(filepath.Join(folder, rel), rel, synced) {
-			refTime, ok := written[ref]
-			if !ok || !refTime.After(docTime) {
-				continue
-			}
-			refs = append(refs, staleRef{path: ref, gap: refTime.Sub(docTime)})
-		}
-		if len(refs) == 0 {
-			continue
-		}
-		sort.Slice(refs, func(i, j int) bool { return refs[i].gap > refs[j].gap })
-		docs = append(docs, staleDoc{path: rel, refs: refs})
-	}
-	// Worst first: the doc with the reference that has outrun it furthest.
-	sort.SliceStable(docs, func(i, j int) bool { return docs[i].refs[0].gap > docs[j].refs[0].gap })
+	// No deadline: the command has all the time the user gave it by typing it.
+	docs, _ := staleDocs(folder, paths, synced, written, time.Time{})
 
 	total := 0
 	for _, d := range docs {
@@ -203,6 +180,55 @@ func runStale(cmd *cobra.Command, folderArg []string, filesOnly bool, limit int)
 	// here — it would fail on a clean project — and this is advisory in the
 	// same sense the agent hook's context is: nothing is blocked by it.
 	return nil
+}
+
+// staleDocs pairs each outgrown doc with the references that aged it, worst
+// first. Shared by `bdrive stale` and the agent hook: the caller supplies the
+// synced set (a walk for the command, the cycle's own materialization cache
+// for the hook) and the journal's write times. paths and synced stay separate
+// parameters even though the command builds both from one slice — walk order
+// is the tie-break between equal gaps, and collapsing them would change it.
+//
+// A non-zero deadline cuts the scan short and reports false: staleRefs opens
+// every synced markdown file, and a hook that blocks the turn must drop the
+// sentence rather than the turn.
+func staleDocs(folder string, paths []string, synced map[string]bool, written map[string]time.Time, deadline time.Time) (docs []staleDoc, complete bool) {
+	complete = true
+	for _, rel := range paths {
+		if !isMarkdownPath(rel) {
+			continue
+		}
+		docTime, ok := written[rel]
+		if !ok {
+			continue // never synced: nothing to date it by
+		}
+		if staleExpired(deadline) {
+			complete = false
+			break
+		}
+		var refs []staleRef
+		for _, ref := range staleRefs(filepath.Join(folder, rel), rel, synced) {
+			refTime, ok := written[ref]
+			if !ok || !refTime.After(docTime) {
+				continue
+			}
+			refs = append(refs, staleRef{path: ref, gap: refTime.Sub(docTime)})
+		}
+		if len(refs) == 0 {
+			continue
+		}
+		sort.Slice(refs, func(i, j int) bool { return refs[i].gap > refs[j].gap })
+		docs = append(docs, staleDoc{path: rel, refs: refs})
+	}
+	// Worst first: the doc with the reference that has outrun it furthest.
+	sort.SliceStable(docs, func(i, j int) bool { return docs[i].refs[0].gap > docs[j].refs[0].gap })
+	return docs, complete
+}
+
+// staleExpired reports whether a budget was given and has run out. The zero
+// time means no budget, which is how `bdrive stale` itself calls in.
+func staleExpired(deadline time.Time) bool {
+	return !deadline.IsZero() && time.Now().After(deadline)
 }
 
 // staleWriteTimes dates every path from the journal, newest write wins.
