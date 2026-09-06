@@ -57,6 +57,7 @@ func desktopCmd() *cobra.Command {
 				return err
 			}
 			fmt.Printf("BearDrive Desktop on http://%s\n", ln.Addr())
+			startReadReporter(cmd.Context())
 			return http.Serve(ln, desktopHandler())
 		},
 	}
@@ -142,7 +143,7 @@ var desktopRoutes = []struct {
 	{"PUT /api/p/{project}/folders", routeProxy, ""},
 	{"DELETE /api/p/{project}/folders", routeProxy, ""},
 
-	{"POST /api/p/{project}/reads", routeLocal, "the sync client posts these straight to the hub, never through here; the app's own viewer reads go out via reportRead"},
+	{"POST /api/p/{project}/reads", routeLocal, "the sync client posts these straight to the hub, never through here; the app's own viewer reads go out through desktop_reads.go instead, as human traffic"},
 }
 
 func desktopHandler() http.Handler {
@@ -159,6 +160,10 @@ func desktopHandler() http.Handler {
 		// (canCreate); the create and its uploads are hub proxies below.
 		// Local write routes stay refused through the PermRead resolver.
 		Upload: webapp.UploadConfig{Enabled: true},
+		// Viewer reads: this server keeps no ledger, so they go to the
+		// project's own hub as human traffic (desktop_reads.go). Without it a
+		// person reading in the Mac app was counted nowhere.
+		ReportRead: spoolRead,
 		DesktopMe: func() (string, string) {
 			s, _ := config.LoadSettings()
 			if s.Token == "" {

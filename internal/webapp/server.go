@@ -126,6 +126,14 @@ type Server struct {
 	// /api/config carries desktop:true plus reads.enabled (heat is proxied to
 	// the hub by the desktop command, not served by a local ledger).
 	Desktop bool
+	// ReportRead, when set, is handed every viewer read this server serves.
+	// It exists for the desktop sidecar: that server answers the viewer routes
+	// from local state and keeps no ledger, so a person reading a file in the
+	// Mac app reached no ledger at all while the same file opened in the web
+	// app counted. The hook lets the sidecar forward the read to the project's
+	// hub as human traffic. Nil on a hub, where Reads records it directly.
+	// Must not block: it is called on the request path.
+	ReportRead func(project, path string)
 	// DesktopMe, when set alongside Desktop, supplies the signed-in account
 	// for /api/config `me` — the desktop has no Auth provider, its session
 	// is the device's saved sign-in (settings.json), which the tray can

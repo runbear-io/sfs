@@ -19,7 +19,7 @@ type readReportingRemote struct {
 	reports [][]remote.ReadEvent
 }
 
-func (r *readReportingRemote) ReportReads(_ context.Context, reads []remote.ReadEvent) error {
+func (r *readReportingRemote) ReportReads(_ context.Context, _ string, reads []remote.ReadEvent) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.fail {
