@@ -59,6 +59,15 @@ export function ProjectSettings({
   // Project admins, and only as UX: handleProjectUpdate enforces it too.
   // (Workspace owners resolve to admin server-side, so they still pass.)
   const mayEdit = atLeast(project.perm, "admin");
+  // Why the controls below are dead, in words. Two different groups are short
+  // of two different things and the page used to say neither: a reader saw a
+  // faint chip, and a plain write member saw nothing at all — both just found
+  // the buttons missing, which reads as breakage rather than policy (BEA-190).
+  const gateReason = !atLeast(project.perm, "write")
+    ? "You have read access to this project. Changes you make locally stay on your device."
+    : !mayEdit
+      ? "Only a project admin can rename or delete this project."
+      : null;
 
   const form = useForm<Values>({
     resolver: zodResolver(schema),
@@ -115,6 +124,7 @@ export function ProjectSettings({
         </CardHeader>
         <Separator />
         <CardContent>
+          {gateReason && <p className="ps-gate">{gateReason}</p>}
           <form className="ps-form" onSubmit={save}>
             <div className="ps-field">
               <Label htmlFor="ps-icon-btn">Icon</Label>
@@ -202,21 +212,17 @@ export function ProjectSettings({
               </div>
             </div>
 
-            {mayEdit && (
-              <>
-                <Separator />
-                <div className="ps-actions">
-                  <Button
-                    id="ps-save"
-                    type="submit"
-                    variant="primary"
-                    disabled={!form.formState.isDirty || form.formState.isSubmitting}
-                  >
-                    Save changes
-                  </Button>
-                </div>
-              </>
-            )}
+            <Separator />
+            <div className="ps-actions">
+              <Button
+                id="ps-save"
+                type="submit"
+                variant="primary"
+                disabled={!mayEdit || !form.formState.isDirty || form.formState.isSubmitting}
+              >
+                Save changes
+              </Button>
+            </div>
           </form>
         </CardContent>
       </Card>
@@ -269,43 +275,45 @@ export function ProjectSettings({
         </CardContent>
       </Card>
 
-      {/* Admin-only, and only as UX: handleProjectDelete enforces it too. */}
-      {mayEdit && (
-        <Card className="ps-danger">
-          <CardHeader>
-            <CardTitle>Danger zone</CardTitle>
-          </CardHeader>
-          <Separator />
-          <CardContent>
-            <p>
-              Deleting removes the project from this hub. Its files stay in storage. This can't be
-              undone.
-            </p>
-            <Button
-              variant="danger"
-              onClick={async () => {
-                const typed = await modalPrompt(
-                  `Delete “${project.name}”?`,
-                  "This can't be undone. Type the project name to confirm:",
-                  "",
-                  "Delete project",
-                  { match: project.name, danger: true },
-                );
-                if (typed === null) return;
-                try {
-                  await api("DELETE", "/api/projects/" + project.id);
-                  toast(`Deleted “${project.name}”.`);
-                  await onDeleted();
-                } catch (e) {
-                  toast((e as Error).message, true);
-                }
-              }}
-            >
-              Delete project
-            </Button>
-          </CardContent>
-        </Card>
-      )}
+      {/* Admin-only, and only as UX: handleProjectDelete enforces it too.
+          Disabled rather than removed: an absent control reads as a broken
+          page, a disabled one beside its reason reads as policy (BEA-190). */}
+      <Card className="ps-danger">
+        <CardHeader>
+          <CardTitle>Danger zone</CardTitle>
+        </CardHeader>
+        <Separator />
+        <CardContent>
+          {gateReason && <p className="ps-gate">{gateReason}</p>}
+          <p>
+            Deleting removes the project from this hub. Its files stay in storage. This can't be
+            undone.
+          </p>
+          <Button
+            variant="danger"
+            disabled={!mayEdit}
+            onClick={async () => {
+              const typed = await modalPrompt(
+                `Delete “${project.name}”?`,
+                "This can't be undone. Type the project name to confirm:",
+                "",
+                "Delete project",
+                { match: project.name, danger: true },
+              );
+              if (typed === null) return;
+              try {
+                await api("DELETE", "/api/projects/" + project.id);
+                toast(`Deleted “${project.name}”.`);
+                await onDeleted();
+              } catch (e) {
+                toast((e as Error).message, true);
+              }
+            }}
+          >
+            Delete project
+          </Button>
+        </CardContent>
+      </Card>
     </div>
   );
 }

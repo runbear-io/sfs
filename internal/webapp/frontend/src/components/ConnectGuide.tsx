@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { atLeast } from "../api/types";
 import type { Project } from "../api/types";
 import { copyText } from "../util";
 import { ProjectIcon } from "./shell";
@@ -16,6 +17,12 @@ export const INSTALL_DOC = "https://raw.githubusercontent.com/runbear-io/beardri
 
 export function ConnectGuide({ project, existing }: { project: Project; existing?: boolean }) {
   const origin = window.location.origin;
+  // Read-only members get the same prompt as everyone else, so say what it
+  // will and won't do for them BEFORE they install anything (BEA-190). The
+  // `undefined` guard matters: Project.perm is optional in the type even
+  // though the hub always populates it, and atLeast(undefined, "write") is
+  // false — without it a payload missing perm warns every user.
+  const readOnly = project.perm !== undefined && !atLeast(project.perm, "write");
   // When the creator said they already have a folder, say so in the prompt.
   // Without it an agent reads an empty project and proposes creating a new
   // subfolder — the one recommendation that is wrong for this person. It
@@ -60,6 +67,13 @@ export function ConnectGuide({ project, existing }: { project: Project; existing
             ? "Paste into your coding agent — Claude Code, Cowork, Codex, Gemini CLI, Hermes — in the folder you already have:"
             : "Paste into your coding agent — Claude Code, Cowork, Codex, Gemini CLI, Hermes — in the folder where you want the files:"}
         </p>
+        {readOnly && (
+          <p className="gd-note gd-readonly">
+            You have read access to this project. Setting it up still works and you'll receive the
+            team's changes — but your own edits stay on this device until a project admin grants you
+            write access.
+          </p>
+        )}
         {existing && (
           <p className="gd-note">
             Your files stay exactly where they are. Connecting a folder never moves, renames or
