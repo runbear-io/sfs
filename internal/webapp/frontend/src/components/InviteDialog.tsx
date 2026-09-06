@@ -46,8 +46,14 @@ export function InviteDialog({
   // Post-mint, Copy link keeps the focus for the same reason ShareDialog gives:
   // the dialog exists to hand over a URL.
   const copyRef = useRef<HTMLButtonElement>(null);
+  /* A latch, not just `disabled={busy}`: two clicks dispatched inside ONE task
+     both run before React repaints the button, and a second mint leaves a
+     stray live invite on the org. State is a repaint behind; a ref is not. */
+  const minting = useRef(false);
 
   async function mint() {
+    if (minting.current) return;
+    minting.current = true;
     setBusy(true);
     try {
       const out = await postJSON<{ url: string; expires?: string }>(
@@ -63,6 +69,7 @@ export function InviteDialog({
     } catch (e) {
       toast((e as Error).message, true);
     } finally {
+      minting.current = false;
       setBusy(false);
     }
   }

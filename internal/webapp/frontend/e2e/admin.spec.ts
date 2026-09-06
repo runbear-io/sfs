@@ -239,6 +239,28 @@ test("project settings: an owner mints an invite link scoped to this project", a
   await page.request.delete(`/api/orgs/${orgId}/invites/${tok}`);
 });
 
+test("project settings: a double-clicked Create mints one invite, not two", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const orgId = await defaultOrgId(page);
+  await page.goto(`/${pid}/settings`);
+  const before = await inviteCount(page, orgId);
+  await page.click("#ps-invite");
+  // Both clicks land in ONE task, so the button's disabled attribute has not
+  // repainted between them — this is what the ref latch is for, and what
+  // Playwright's own dblclick (two tasks) would never catch.
+  await page.evaluate(() => {
+    const b = document.querySelector("#invite-create") as HTMLButtonElement;
+    b.click();
+    b.click();
+  });
+  await expect(page.locator(".modal-url")).toContainText(`?p=${pid}`);
+  expect(await inviteCount(page, orgId)).toBe(before + 1);
+
+  const tok = (await page.locator(".modal-url").textContent())!.split("/join/")[1].split("?")[0];
+  await page.request.delete(`/api/orgs/${orgId}/invites/${tok}`);
+});
+
 test("project settings: cancelling the invite dialog mints nothing", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
