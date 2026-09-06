@@ -59,7 +59,10 @@ const (
 // changeEvent is one "something changed" frame. Paths are relative to the
 // project root, exactly as the journal spells them.
 type changeEvent struct {
-	Type    string   `json:"type"` // "change" | "resync"
+	Type string `json:"type"` // "change" | "resync" | "presence"
+	// People is the project's roster, on a "presence" frame only. Display
+	// names and paths — never the account key they are stored under.
+	People  []person `json:"people,omitempty"`
 	Paths   []string `json:"paths,omitempty"`
 	More    bool     `json:"more,omitempty"` // paths were truncated; refetch everything
 	Puts    int      `json:"puts,omitempty"`

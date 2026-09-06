@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 /* Live change notification.
@@ -14,13 +14,26 @@ import { useQueryClient } from "@tanstack/react-query";
    always did. Nothing here is load-bearing. */
 
 type ChangeEvent = {
-  type: "change" | "resync";
+  type: "change" | "resync" | "presence";
   paths?: string[];
   more?: boolean;
+  people?: { name: string; path?: string }[];
 };
 
-export function useProjectEvents(apiBase: string, enabled = true) {
+export function useProjectEvents(
+  apiBase: string,
+  enabled = true,
+  // Presence rides the same stream rather than a second connection: it is the
+  // same fan-out, the same permission, and one EventSource per project is
+  // already one more than zero.
+  onPresence?: (people: { name: string; path?: string }[]) => void,
+) {
   const qc = useQueryClient();
+  // Read through a ref so a caller passing an inline arrow does not tear the
+  // stream down and rebuild it on every render.
+  const onPresenceRef = useRef(onPresence);
+  onPresenceRef.current = onPresence;
+
   useEffect(() => {
     if (!enabled || typeof EventSource === "undefined") return;
     const es = new EventSource(apiBase + "events");
@@ -39,6 +52,11 @@ export function useProjectEvents(apiBase: string, enabled = true) {
         ev = JSON.parse(e.data);
       } catch {
         return; // a frame we can't read is not a reason to tear the stream down
+      }
+      // Presence is not a file change: it invalidates nothing.
+      if (ev.type === "presence") {
+        onPresenceRef.current?.(ev.people ?? []);
+        return;
       }
       invalidateProject();
       // "resync" means frames were dropped and what was missed is unknowable,

@@ -12,6 +12,8 @@ import { getJSON, postJSON } from "../api/http";
 import type { Project, ServerConfig, UndoPlan } from "../api/types";
 import { useHeat, useTree } from "../hooks/useBrowse";
 import { useProjectEvents } from "../hooks/useProjectEvents";
+import { usePresence } from "../hooks/usePresence";
+import { PresenceBar } from "../components/PresenceBar";
 import { fetchBlobText, fileURLFor } from "../hooks/useBlob";
 import { useShares } from "../hooks/useHub";
 import { urlForPath, urlForView, type Route } from "../router";
@@ -65,7 +67,9 @@ export default function Browser(props: {
   // Live updates on top of the polls above: a teammate's change invalidates
   // what it touched as it happens. Same gate as the tree — in hub mode there
   // is nothing to stream until a project is chosen.
-  useProjectEvents(apiBase, !hub || !!project);
+  const live = !hub || !!project;
+  const { people, setPeople } = usePresence(apiBase, route.path ?? "", live);
+  useProjectEvents(apiBase, live, setPeople);
   const heatMap = useHeat(apiBase, hub && !!project && !!config.reads?.enabled);
   // Dashboard data: the per-device breakdown, plus a fresh heat fetch when
   // a dashboard surface opens (the ambient heat cache may be a minute old).
@@ -719,6 +723,7 @@ export default function Browser(props: {
       meta={meta}
       actions={
         <>
+          <PresenceBar people={people} path={path} />
           {canShare && (
             <Button id="share-btn" variant="toolbar" className="icon-only" title="Share" aria-label="Share" onClick={shareNow}>
               <Icon name="share" />

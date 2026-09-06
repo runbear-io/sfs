@@ -141,6 +141,9 @@ type Server struct {
 	evOnce sync.Once
 	ev     *eventHub // live change fan-out (events.go)
 
+	presOnce sync.Once
+	pres     *presenceHub // who is looking at what (presence.go)
+
 	resMu  sync.Mutex
 	grants []grant // outstanding presigned upload reservations (reserve.go)
 
@@ -847,6 +850,9 @@ func (s *Server) Handler() http.Handler {
 		// Reading the change stream is reading the project: it names paths,
 		// so it sits behind the same permission the tree does.
 		mux.HandleFunc("GET "+prefix+"events", resolve(PermRead, s.handleEvents))
+		// Saying "I am reading this" is not a write — a read-only member is
+		// exactly who a teammate most wants to see on a file.
+		mux.HandleFunc("POST "+prefix+"presence", resolve(PermRead, s.handlePresence))
 		mux.HandleFunc("POST "+prefix+"upload/init", resolve(PermWrite, s.handleUploadInit))
 		mux.HandleFunc("PUT "+prefix+"upload/content", resolve(PermWrite, s.handleUploadContent))
 		mux.HandleFunc("POST "+prefix+"upload/commit", resolve(PermWrite, s.handleUploadCommit))

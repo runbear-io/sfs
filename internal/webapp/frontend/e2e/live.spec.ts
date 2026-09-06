@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { login, wikiId } from "./helpers";
+import { login, wikiId, ADMIN, MEMBER } from "./helpers";
 
 // Live change notification (SSE). The Go tests cover both ends of the wire —
 // the hub publishes, the sync client wakes up — so what is left, and what only
@@ -62,4 +62,29 @@ test("the event stream is refused to someone outside the project", async ({ page
   const resp = await anon.get(`/api/p/${pid}/events`);
   expect(resp.status()).toBeGreaterThanOrEqual(400);
   await anon.dispose();
+});
+
+// Presence: two real accounts, two browser contexts, one project. The roster
+// travels on the same stream as changes, so this also proves the two frame
+// types coexist on one connection.
+test("a teammate viewing the project shows up in the presence bar", async ({ browser }) => {
+  const one = await browser.newContext();
+  const two = await browser.newContext();
+  const a = await one.newPage();
+  const b = await two.newPage();
+  try {
+    await login(a, ADMIN);
+    await login(b, MEMBER);
+    const pid = await wikiId(a);
+    await a.goto(`/${pid}/index.md`);
+    await b.goto(`/${pid}/index.md`);
+
+    // Each sees someone other than themselves. The bar renders initials, so
+    // assert on count rather than on a name the seed could rename.
+    await expect(a.locator("#presence span").first()).toBeVisible({ timeout: 15_000 });
+    await expect(b.locator("#presence span").first()).toBeVisible({ timeout: 15_000 });
+  } finally {
+    await one.close();
+    await two.close();
+  }
 });
