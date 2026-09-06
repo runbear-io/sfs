@@ -93,6 +93,14 @@ func desktopHandler() http.Handler {
 	// Hub-backed surfaces: heat and public share links live on the hub, so
 	// these routes forward there with the device token. Everything else is
 	// answered from local state by srv.
+	// Live change notification and presence are hub state, for the same reason
+	// every write is: the desktop never journals locally, so nothing local
+	// would ever publish, and a stream served from here would be a connection
+	// that is open and silent forever. Proxied, the Mac app sees a teammate's
+	// edit land the moment the hub does — including edits made from the app's
+	// own editor, which are hub writes via upload/content.
+	mux.HandleFunc("GET /api/p/{project}/events", proxyProject)
+	mux.HandleFunc("POST /api/p/{project}/presence", originGuard(proxyProject))
 	mux.HandleFunc("GET /api/p/{project}/heat", proxyProject)
 	mux.HandleFunc("GET /api/p/{project}/shares", proxyProject)
 	mux.HandleFunc("POST /api/p/{project}/shares", originGuard(proxyProject))
@@ -647,7 +655,14 @@ func proxyHub(w http.ResponseWriter, r *http.Request, server string) {
 	if token != "" && tokenGoesTo(server) {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	resp, err := initClient.Do(req)
+	// A long-lived stream cannot use initClient: its 10s whole-request timeout
+	// is right for every JSON call here and fatal for a connection whose whole
+	// job is to stay open with nothing to say.
+	client := initClient
+	if streaming(r) {
+		client = streamClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		http.Error(w, "hub unreachable: "+err.Error(), http.StatusBadGateway)
 		return
@@ -655,5 +670,48 @@ func proxyHub(w http.ResponseWriter, r *http.Request, server string) {
 	defer resp.Body.Close()
 	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 	w.WriteHeader(resp.StatusCode)
+	if isEventStream(resp) {
+		// io.Copy alone buffers: an SSE frame is ~100 bytes and the response
+		// writer holds 4 KiB, so events would sit here until something else
+		// filled the buffer — which, on an idle project, is never.
+		copyFlushing(w, resp.Body)
+		return
+	}
 	io.Copy(w, resp.Body)
+}
+
+// streaming reports whether this request is for a long-lived response, which
+// is a property of the ROUTE (the client asks for one) rather than of the
+// answer — the client has to be chosen before the answer exists.
+func streaming(r *http.Request) bool {
+	return strings.HasSuffix(r.URL.Path, "/events") ||
+		strings.Contains(r.Header.Get("Accept"), "text/event-stream")
+}
+
+func isEventStream(resp *http.Response) bool {
+	return strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
+}
+
+// streamClient has no whole-request timeout. Everything else about it matches
+// initClient, redirect policy included: a stream must not carry this device's
+// token off-origin either.
+var streamClient = &http.Client{CheckRedirect: dropTokenOffOrigin}
+
+func copyFlushing(w http.ResponseWriter, r io.Reader) {
+	rc := http.NewResponseController(w)
+	buf := make([]byte, 4096)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return
+			}
+			if ferr := rc.Flush(); ferr != nil {
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
 }
