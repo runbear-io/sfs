@@ -168,7 +168,17 @@ func TestStopRecoversLegacyDaemon(t *testing.T) {
 		<-exited
 	}()
 
-	deadline := time.Now().Add(5 * time.Second)
+	// 30s, where the package's other waits use 10s, because this is the only
+	// one that waits on a REAL CHILD PROCESS: os.Args[0] re-invoked, which
+	// boots Go's whole test framework before it reaches the helper and takes
+	// the flock. It had the shortest deadline in the package for its slowest
+	// operation, and duly flaked on a loaded macOS runner (main and a PR, same
+	// line, both green on re-run with no code change).
+	//
+	// The number is only a ceiling on how long a GENUINE failure takes to
+	// report: the loop returns the moment the lock appears, so a healthy run
+	// pays nothing for the headroom.
+	deadline := time.Now().Add(30 * time.Second)
 	for {
 		if _, ok := Running(vdir); ok {
 			break
