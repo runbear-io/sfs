@@ -47,9 +47,10 @@ seeded hub on :8993 with test accounts — handy for frontend work.
   `static/`, and keep `npm run e2e` green. `frontend/check-dist.sh`
   verifies freshness.
 - **Docs travel with behavior.** Changing CLI commands, flags, or output
-  means updating both `README.md` and `plugin/skills/beardrive/SKILL.md`
-  — the skill is what makes agents beardrive-aware and must match the
-  binary.
+  means updating `README.md`, `INSTALL_FOR_AGENTS.md`, and
+  `web/docs/src/content/docs/` — `INSTALL_FOR_AGENTS.md` is the runbook
+  agents follow to set themselves up, and `web/docs` is the end-user
+  reference published at docs.beardrive.ai.
 
 ## Where to start
 
