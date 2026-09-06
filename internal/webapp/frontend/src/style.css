@@ -465,7 +465,14 @@ button, input, a.btn { font-family: inherit; }
 .onboard { max-width: 560px; margin: var(--hero-top) auto 0; }
 .onboard h1 { font-size: 25px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 8px; color: #f4f6f9; }
 .onboard > p { color: var(--text-dim); margin: 0 0 28px; font-size: 14px; }
-.ob-card { background: var(--bg-side); border: 1px solid var(--border); border-radius: var(--r-card); padding: 20px 22px; margin-bottom: 14px; }
+/* One card shape, two surfaces. The hub stacks these in a column and the
+   desktop Done frame lays them in a row, with different backgrounds and
+   different ways of marking the lead — those are two designs, not an
+   accident, and merging them would be a silent redesign. What was genuinely
+   duplicated is the box itself, so the border and the radius live here once
+   and cannot drift apart. */
+.ob-card, .setup-card { border: 1px solid var(--border); border-radius: var(--r-card); }
+.ob-card { background: var(--bg-side); padding: 20px 22px; margin-bottom: 14px; }
 .ob-card h3 { margin: 0 0 6px; font-size: 14.5px; font-weight: 600; }
 .ob-card p { margin: 0 0 14px; font-size: 13px; color: var(--text-dim); }
 /* The create-here card leads; the agent-paste card follows it. Accent edge
@@ -1338,7 +1345,7 @@ pre.plain { background: var(--code-bg); border: 1px solid var(--border); border-
 .setup-log li.ok { color: var(--add); }
 .setup-log li.ok::before { content: "✓ "; }
 .setup-cards { display: flex; gap: 12px; margin-top: 18px; align-items: stretch; }
-.setup-card { flex: 1; background: var(--bg-raise); border: 1px solid var(--border); border-radius: var(--r-card);
+.setup-card { flex: 1; background: var(--bg-raise);
   padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .setup-card-lead { flex: 1.4; border-color: rgba(245,166,35,.4); box-shadow: 0 0 0 3px var(--glow); }
 .setup-card h3 { font-size: 14px; font-weight: 600; margin: 0; color: var(--text); }
