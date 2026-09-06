@@ -466,3 +466,58 @@ func TestOldClientPushRefusalSaysToUpgrade(t *testing.T) {
 		t.Errorf("the refusal does not name the path: %s", cur.Body)
 	}
 }
+
+// TestMergingAloneChangesNothingForOldClients is the merge-safety question
+// asked as a test: does shipping this break the devices already in the field?
+//
+// It does not. Every gate is behind "this project has folder rules", so until
+// somebody creates one, an old client — no X-Bdrive-Perms header at all — reads
+// and WRITES exactly as before. The write half matters most and the other
+// old-client tests only cover reads.
+func TestMergingAloneChangesNothingForOldClients(t *testing.T) {
+	h, _, c, p := permHub(t) // no folder rules anywhere
+	const dev = "field-device"
+	secRegisterDevice(t, h, p.ID, c["bob"], dev, dev, "darwin")
+
+	// Reads, with no capability header.
+	for _, url := range []string{
+		"/api/p/" + p.ID + "/store/list?prefix=journal/",
+		"/api/p/" + p.ID + "/store/list?prefix=blobs/",
+		"/api/p/" + p.ID + "/store/exists?key=blobs/" + strings.Repeat("a", 64),
+		"/api/p/" + p.ID + "/tree",
+	} {
+		if rec := doAs(t, h, "GET", url, nil, c["bob"]); rec.Code != 200 {
+			t.Errorf("%s: %d %s — an old client broke on a hub with no folder rules", url, rec.Code, rec.Body)
+		}
+	}
+
+	// And the write path, which is the one that would strand a device.
+	body, err := journal.Marshal([]journal.Op{{
+		Seq: 1, Lamport: 1, Time: time.Now().UTC(), Device: dev, User: "bob@x.io",
+		Kind: journal.KindPut, Path: "notes/from-the-field.md",
+		Blob: strings.Repeat("b", 64), Size: 1,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("PUT",
+		"/api/p/"+p.ID+"/store/object?key=journal/"+dev+".jsonl", bytes.NewReader(body))
+	req.AddCookie(c["bob"])
+	req.Header.Set("X-Bdrive-Device", dev)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("an old client could not push to a hub with no folder rules: %d %s", rec.Code, rec.Body)
+	}
+
+	// A READ-ONLY folder still does not strand it: nothing is hidden, so the
+	// capability check does not fire and it keeps syncing — right up until
+	// somebody edits a file inside that folder.
+	if r2 := doAs(t, h, "PUT", "/api/p/"+p.ID+"/folders",
+		map[string]any{"prefix": "locked", "default": PermRead}, c["alice"]); r2.Code != 200 {
+		t.Fatalf("set read-only rule: %d %s", r2.Code, r2.Body)
+	}
+	if r3 := doAs(t, h, "GET", "/api/p/"+p.ID+"/store/list?prefix=journal/", nil, c["bob"]); r3.Code != 200 {
+		t.Fatalf("a read-only folder stranded an old client: %d %s", r3.Code, r3.Body)
+	}
+}
