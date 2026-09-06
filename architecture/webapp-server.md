@@ -166,6 +166,18 @@ classDiagram
         -ch chan of frames
         -lost atomic.Bool
     }
+    class presenceHub {
+        <<internal/webapp, presence.go>>
+        -at per project, per actor entry
+        +mark(project, actor, name, path, now) roster, changed
+        +drop(project, actor) roster, changed
+    }
+    class person {
+        +Name string
+        +Path string
+    }
+    note for presenceHub "POST {prefix}presence, proj(PermRead) — saying &quot;I am reading this&quot; is not a write, and a read-only member is precisely who a teammate most wants to see on a file. NOT persisted and deliberately not a MetaStore repo: presence is true for 15s and then it is a lie, so storing it would only create something to serve staler than the thing it describes. The actor key is an account email and the roster reaches every member of the project, so the key is a MAP KEY ONLY and never serialized — rosterOf emits display name + path, the same pair History already shows them. A claimed path is untrusted text echoed to teammates, so it goes through journal.SafePath. Expiry is LAZY, computed in mark rather than by a sweeper: the only people who need to know a roster shrank are the ones still in it, and they are exactly the ones still heartbeating. rosterOf sorts because Go map order is random and an unstable roster would look like a change on every beat"
+
     class changeEvent {
         +Type change or resync
         +Paths list
@@ -174,6 +186,7 @@ classDiagram
         +Deletes int
         +Source sync or browser
         +Device string
+        +People roster, presence frames only
     }
     note for eventHub "GET {prefix}events, proj(PermRead) — reading the stream names paths, so it sits behind the same permission the tree does, and proj() already walls it by org membership. publish() is called from the FIVE write handlers beside captureChange, never inside it: that one is the PostHog path, whose contract is that &quot;nothing here carries a path or a file name&quot;, and whose signature is counts-only. publish sits on the sync push path, so it never blocks and never errors — it copies the subscriber set under the lock and sends outside it, and a full buffer marks the subscriber lost rather than waiting. Bounded (subBuffer 32, 256/project, 4096/hub) in the ratelimit.go mold"
     note for subscriber "A reader that falls behind is not waited for: the next frame it does receive is preceded by a single {type:resync}, because a client that missed one change and a client that missed fifty both need the same thing — to refetch. The frontend keeps its 15s tree poll underneath all of this, so a dropped frame self-heals regardless"
@@ -510,7 +523,10 @@ classDiagram
     Backend <|-- PutSigner : optional capability
     Backend <|-- Watcher : optional capability
     Server *-- eventHub : live change fan-out
+    Server *-- presenceHub : who is looking at what
     eventHub *-- subscriber
+    presenceHub ..> eventHub : publishes roster on the SAME stream
+    presenceHub ..> person : rosterOf
 
     AuthProvider <|.. BuiltinAuth
     AccountApprover <|.. BuiltinAuth

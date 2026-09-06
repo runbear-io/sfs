@@ -86,16 +86,19 @@ classDiagram
         +useHub
         +useBrowse
         +useProjectEvents (SSE → invalidate)
+        +usePresence (10s heartbeat)
         +useTextAt (any URL) → useBlobText (sha-keyed, immutable)
         +fetchBlobText(url) BlobText
         +fileURLFor(apiBase, path, version) string
     }
+    note for hooks "usePresence beats every 10s with the path you are on and renders the roster the hub pushes back — the roster ARRIVES on useProjectEvents' stream (onPresence), not on the POST, which is used only for first paint so a tab opening into a quiet project still sees who is there. One EventSource carries both frame types: presence invalidates nothing. The path is read through a ref so navigating does not tear the timer down, and the unmount beat sends leave:true as courtesy — the 15s TTL is the real guarantee. Every failure is swallowed: presence is decoration and must never surface an error"
     note for hooks "useProjectEvents is the one non-polling source: an EventSource on {apiBase}events whose frames invalidate exactly what a peer's write touched (tree/history/heat always; render per named path; text wholesale). It is what makes an OPEN file update at all — useTextAt has no refetchInterval, so before this a body fetched once stayed on screen until the reader navigated away. A resync frame, a truncated path list, or an unparseable frame all fall back to invalidating every body rather than guessing. Errors are deliberately silent: EventSource retries itself and the 15s tree poll is still underneath, so a hub restart or a sleeping laptop must not write a log line"
     note for hooks "TanStack Query wrappers over the viewer APIs. useTextAt fetches any URL and sniffs it — the Content-Length cheap-out lives here (HTTP), the byte decision in lib/sniff.ts (pure). A live path must not be cached immutable; a sha can be. fileURLFor is the one definition of a file page's byte URL, so Copy and FileView cannot drift; fetchBlobText is exported for Copy, which must NOT read the shared text cache — TextView stores a string there and SniffView a BlobText"
 
     class components {
         FileView FolderListing FileTree
         HistoryView HistoryRow HistoryFilters DiffView VersionBanner ConflictBanner
+        PresenceBar
         Insights ShareDialog NewProjectDialog
         ShareBanner SharesTable AdminTable
         OrgAdmin HubSettings ProjectSettings
