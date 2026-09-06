@@ -414,3 +414,55 @@ func TestReadOnlyFoldersAloneDoNotMakeAMemberFiltered(t *testing.T) {
 		t.Fatalf("an older device was served a filtered project: %d %s", rec.Code, rec.Body)
 	}
 }
+
+// An OLD client that edits a read-only folder is in a worse spot than a new
+// one, and the refusal should say so. Its journal is append-only, so the
+// refused op rides along in every later push and the project stays pull-only
+// on that machine until the local edit is removed — where a client that knows
+// about /scope simply has the edit reverted and carries on.
+//
+// Not refused up front: it is only projects with something HIDDEN that break
+// the byte-offset contract, and refusing a device over a read-only folder it
+// may never touch is the over-refusal an earlier pass removed.
+func TestOldClientPushRefusalSaysToUpgrade(t *testing.T) {
+	h, _, c, p := folderHub(t) // "locked/" is read-only for bob
+	const dev = "bob-old"
+	secRegisterDevice(t, h, p.ID, c["bob"], dev, dev, "darwin")
+
+	body, err := journal.Marshal([]journal.Op{{
+		Seq: 1, Lamport: 1, Time: time.Now().UTC(), Device: dev, User: "bob@x.io",
+		Kind: journal.KindPut, Path: "locked/x.md", Blob: strings.Repeat("a", 64), Size: 1,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	send := func(hdr map[string]string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("PUT",
+			"/api/p/"+p.ID+"/store/object?key=journal/"+dev+".jsonl", bytes.NewReader(body))
+		req.AddCookie(c["bob"])
+		req.Header.Set("X-Bdrive-Device", dev)
+		for k, v := range hdr {
+			req.Header.Set(k, v)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	old := send(nil)
+	if old.Code != http.StatusForbidden || !strings.Contains(old.Body.String(), "upgrade bdrive") {
+		t.Errorf("an old client's refusal does not say to upgrade: %d %s", old.Code, old.Body)
+	}
+	// A current client is stale or hostile, not out of date — telling it to
+	// upgrade would send its user chasing the wrong thing.
+	cur := send(modern)
+	if cur.Code != http.StatusForbidden {
+		t.Fatalf("a current client was not refused: %d %s", cur.Code, cur.Body)
+	}
+	if strings.Contains(cur.Body.String(), "upgrade") {
+		t.Errorf("a current client was told to upgrade: %s", cur.Body)
+	}
+	if !strings.Contains(cur.Body.String(), "locked/x.md") {
+		t.Errorf("the refusal does not name the path: %s", cur.Body)
+	}
+}

@@ -745,8 +745,20 @@ func (s *Server) opsWithinScope(w http.ResponseWriter, r *http.Request, ops []jo
 		// is their own text, and a device whose push is refused with no way to
 		// tell which file caused it cannot be debugged by the person holding
 		// the laptop.
-		http.Error(w, fmt.Sprintf("you have read-only access to %q in this project", op.Path),
-			http.StatusForbidden)
+		msg := fmt.Sprintf("you have read-only access to %q in this project", op.Path)
+		// A device that knows about folder permissions asks /scope before it
+		// scans and never journals this path, so reaching here means it is
+		// stale or hostile. One that does NOT know is in a worse spot than it
+		// looks: its journal is append-only, so the refused op is in every
+		// later push too, and this project stays pull-only on that machine
+		// until the local edit is removed. A new client would simply have had
+		// the edit reverted. Say which of the two this is, because the fix is
+		// completely different.
+		if r.Header.Get(remote.PermsCapability) == "" {
+			msg += " — and this version of bdrive cannot handle a read-only folder, " +
+				"so it will stay pull-only here: upgrade bdrive"
+		}
+		http.Error(w, msg, http.StatusForbidden)
 		return false
 	}
 	return true
