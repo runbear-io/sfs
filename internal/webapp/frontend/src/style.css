@@ -527,6 +527,10 @@ button, input, a.btn { font-family: inherit; }
 .ps-note { color: var(--text-faint); font-size: 12.5px; margin: 0 0 12px; max-width: 56ch; line-height: 1.55; }
 .ps-people-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 20px 0 8px; }
 .ps-danger p { color: var(--text-dim); font-size: 13px; margin: 0 0 14px; max-width: 52ch; line-height: 1.55; }
+/* The reason a control below is disabled. Louder than .ps-note on purpose:
+   the 11px .ps-chip alone was missed by two reviewers (BEA-190). Selector
+   is p.ps-gate so it outranks `.ps-danger p`, which sets the same props. */
+p.ps-gate { color: var(--text-dim); font-size: 13px; margin: 0 0 14px; max-width: 56ch; line-height: 1.55; border-left: 2px solid var(--accent); padding-left: 11px; }
 .ps-facts { display: grid; grid-template-columns: auto 1fr; gap: 8px 20px; margin: 0; font-size: 13px; }
 .ps-facts dt { color: var(--text-faint); }
 .ps-facts dd { margin: 0; color: var(--text-dim); }

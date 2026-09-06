@@ -345,17 +345,20 @@ test("project settings: danger zone is owner-only", async ({ page }) => {
   await expect(page.locator(".ps-danger .danger-btn")).toHaveText("Delete project");
 });
 
-test("project settings: a member sees no danger zone and cannot edit", async ({ page }) => {
+test("project settings: a member cannot edit or delete", async ({ page }) => {
   await login(page, MEMBER);
   const pid = await wikiId(page);
   await page.goto(`/${pid}/settings`);
   await expect(page.locator(".project-settings h2")).toHaveText("wiki"); // page rendered
-  await expect(page.locator(".ps-danger")).toHaveCount(0);
+  // BEA-190: the danger zone is shown and dead, not removed — see the
+  // "a write member is told they need admin" case for the reason it states.
+  await expect(page.locator(".ps-danger")).toBeVisible();
+  await expect(page.locator(".ps-danger .danger-btn")).toBeDisabled();
   // The General card is shown, disabled — not hidden, and with no way to submit.
   await expect(page.locator("#ps-name")).toBeDisabled();
   await expect(page.locator("#ps-desc")).toBeDisabled();
   await expect(page.locator("#ps-icon-btn")).toBeDisabled();
-  await expect(page.locator("#ps-save")).toHaveCount(0);
+  await expect(page.locator("#ps-save")).toBeDisabled();
   // The way out is a trust answer, so it is not owner-only: a member reading
   // About sees the export fact and the docs link.
   await expect(page.locator(".ps-export")).toContainText("bdrive export");
@@ -453,7 +456,9 @@ test("project settings: People shows the default level and the grants", async ({
   await expect(people.locator(".admin-item", { hasText: "Workspace owner" })).toBeVisible();
 });
 
-test("a read-only member: no Share, no danger zone, People is read-only", async ({ page }) => {
+test("a read-only member: no Share, danger zone disabled, People is read-only", async ({
+  page,
+}) => {
   await login(page, READER);
   const pid = await wikiId(page);
 
@@ -466,13 +471,91 @@ test("a read-only member: no Share, no danger zone, People is read-only", async 
   await page.goto(`/${pid}/settings`);
   await expect(page.locator(".project-settings h2")).toContainText("wiki");
   await expect(page.locator(".ps-chip")).toHaveText("Read-only");
-  await expect(page.locator(".ps-danger")).toHaveCount(0);
+  // BEA-190: shown and disabled, never silently absent — absence reads as a
+  // broken page, a dead button beside its reason reads as policy.
+  await expect(page.locator(".ps-danger")).toBeVisible();
+  await expect(page.locator(".ps-danger button", { hasText: "Delete project" })).toBeDisabled();
   // The People table is shown, disabled — same layout, no controls.
   await expect(page.locator(".ps-people")).toBeVisible();
   await expect(
     page.locator('.ps-people select[aria-label="Default access for workspace members"]'),
   ).toBeDisabled();
   await expect(page.locator(".ps-people button", { hasText: "+ Add" })).toHaveCount(0);
+});
+
+// BEA-190: the product knew these accounts were restricted, changed its UI to
+// match, and never said so. Three levels, because the two are short of two
+// DIFFERENT things and a single sentence for both would be wrong for one.
+const READ_SENTENCE = /You have read access to this project/;
+const ADMIN_SENTENCE = /Only a project admin can rename or delete/;
+
+test("BEA-190 install page: a read-only member is told before they install", async ({ page }) => {
+  await login(page, READER);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/install`);
+
+  const note = page.locator(".gd-readonly");
+  await expect(note).toBeVisible();
+  // Both halves: pull works, push does not. Telling them the CLI is pointless
+  // would be wrong — read-only sync down is a supported use of this page.
+  await expect(note).toContainText(READ_SENTENCE);
+  await expect(note).toContainText(/receive the team's changes/);
+  await expect(note).toContainText(/stay on this device/);
+  // It has to come before the thing they copy.
+  const noteY = (await note.boundingBox())!.y;
+  const codeY = (await page.locator(".gd-code").first().boundingBox())!.y;
+  expect(noteY).toBeLessThan(codeY);
+});
+
+test("BEA-190 install page: a writer sees no new copy", async ({ page }) => {
+  await login(page, MEMBER);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/install`);
+  await expect(page.locator(".gd-code").first()).toBeVisible();
+  await expect(page.locator(".gd-readonly")).toHaveCount(0);
+});
+
+test("BEA-190 settings: a read-only member gets a legible reason, not just a chip", async ({
+  page,
+}) => {
+  await login(page, READER);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/settings`);
+
+  // The state is stated, not only badged.
+  await expect(page.locator(".ps-gate").first()).toContainText(READ_SENTENCE);
+  await expect(page.locator(".ps-gate", { hasText: ADMIN_SENTENCE })).toHaveCount(0);
+  // Every removed control is back, disabled, with the reason in its own card.
+  await expect(page.locator("#ps-save")).toBeDisabled();
+  await expect(page.locator(".ps-danger .ps-gate")).toContainText(READ_SENTENCE);
+});
+
+// The case the report missed: a plain write member is short of admin, saw no
+// chip (the chip is gated on < write) and no buttons either. Deriving the new
+// sentence from perm rather than from mayEdit would leave them with nothing.
+test("BEA-190 settings: a write member is told they need admin", async ({ page }) => {
+  await login(page, MEMBER);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/settings`);
+
+  await expect(page.locator(".ps-gate").first()).toContainText(ADMIN_SENTENCE);
+  await expect(page.locator(".ps-gate", { hasText: READ_SENTENCE })).toHaveCount(0);
+  await expect(page.locator(".ps-chip")).toHaveCount(0); // write, so no Read-only badge
+  await expect(page.locator("#ps-save")).toBeDisabled();
+  await expect(page.locator(".ps-danger button", { hasText: "Delete project" })).toBeDisabled();
+});
+
+test("BEA-190 settings: an admin sees no new copy and live controls", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/settings`);
+
+  await expect(page.locator(".ps-gate")).toHaveCount(0);
+  await expect(page.locator(".ps-danger button", { hasText: "Delete project" })).toBeEnabled();
+  // Save is inert until something is dirty; that is the form, not permission.
+  await expect(page.locator("#ps-save")).toBeDisabled();
+  await page.fill("#ps-name", "wiki renamed");
+  await expect(page.locator("#ps-save")).toBeEnabled();
 });
 
 // BEA-130: reading back a link you can already see is not a write, so the
