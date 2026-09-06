@@ -84,7 +84,13 @@ export function ShareDialog({
   const rules = useMemo(() => folders?.folders || [], [folders]);
   const own = isDir ? rules.find((r) => r.prefix === key) : undefined;
   const governing = ruleFor(rules, key);
-  const link = shares.find((s) => s.path === path);
+  /* The POST answers with the authoritative link, so hold it rather than
+     waiting for the listing to catch up: onChanged() only invalidates a
+     query, and a dialog that still reads "Restricted" after a successful
+     mint tells the user it failed. The listing row wins the moment it
+     arrives — it carries expiry and open counts, which this does not. */
+  const [minted, setMinted] = useState<ShareInfo | null>(null);
+  const link = shares.find((s) => s.path === path) || minted || undefined;
 
   const [busy, setBusy] = useState(false);
   const [addEmail, setAddEmail] = useState("");
@@ -145,6 +151,7 @@ export function ShareDialog({
       }
       if (!r.ok) throw new Error(await r.text());
       const s = (await r.json()) as ShareInfo;
+      setMinted({ token: s.token, url: s.url, path, project: project.id });
       setPending(null);
       // Fired here rather than in api/http.ts: this is the app's one write that
       // goes out as a raw fetch, so the table never sees it.
@@ -167,6 +174,7 @@ export function ShareDialog({
   async function setPublic(next: string) {
     if (next === "public") return mint(false);
     setPending(null);
+    setMinted(null);
     if (!link) return;
     await run(
       () => api("DELETE", `/api/shares/${link.token}`),

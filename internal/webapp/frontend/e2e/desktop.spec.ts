@@ -48,8 +48,14 @@ test("restore is offered on desktop (hub-backed)", async ({ page }) => {
 test("share mints through the hub proxy and lands on the clipboard", async ({ page }) => {
   await page.goto(`/${HUB_ID}/index.md`);
   await page.locator("#share-btn").click();
+  // Minting is a deliberate step now rather than a side effect of opening
+  // Share: the dialog opens Restricted, and choosing "Anyone with the link"
+  // is what mints (ShareDialog.tsx).
+  await page.locator("#share-public").selectOption("public");
   await expect(page.getByText("e2e-share").first()).toBeVisible();
-  // The copy control is the whole point of a share link on desktop.
+  // The copy control is the whole point of a share link on desktop, and
+  // minting still puts the URL on the clipboard — that was the one thing the
+  // old one-click flow gave the user, so the dialog kept it.
   const copied = await page.evaluate(() => navigator.clipboard.readText());
   expect(copied).toContain("/s/e2e-share");
 });
