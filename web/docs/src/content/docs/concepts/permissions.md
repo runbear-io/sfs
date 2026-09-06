@@ -1,6 +1,6 @@
 ---
 title: Project permissions
-description: Four levels per project — none, read, write, admin — plus invite-only projects and what a read-only or revoked device actually does.
+description: Four levels per project — none, read, write, admin — plus per-folder rules, invite-only projects, and what a read-only or revoked device actually does.
 ---
 
 Organizations decide who is in your workspace. **Project permissions** decide
@@ -50,6 +50,78 @@ Set the **default** to `No access` and the project becomes invite-only: only
 the people listed as exceptions (and workspace owners) can see it. Everyone
 else is treated exactly like a non-member — the project does not appear in
 their project list at all.
+
+## Folder rules
+
+Project permissions apply to the whole project. A **folder rule** gives one
+folder inside it different access — "everyone on the team can write this
+project, except `designs/`, which most people may only read".
+
+Open the folder and press **Share** — the same dialog that shares a file, which
+on a folder is where its access is set. Only project admins (and workspace
+owners) can change it; anyone else sees the state read-only.
+
+A restricted folder is marked in the folder listing, so you can tell one at a
+glance without opening it.
+
+- A rule names a **folder prefix** and the level everyone else gets there, plus
+  optional per-person exceptions — the same shape as project permissions, one
+  level down.
+- **The longest matching rule wins.** A rule on `a/b/` governs `a/b/` even if
+  another rule covers `a/`. Rules do not merge: someone granted on `a/` but
+  denied on `a/b/` loses `a/b/`.
+- **Workspace owners are never affected.** They are admin everywhere, so a
+  folder rule can never lock out the people responsible for the workspace.
+- A rule may not grant `admin` — that is a project-wide capability (rename,
+  delete, edit permissions), so it has no meaning over one folder.
+
+### What a read-only folder does on your machine
+
+A read-only folder syncs down like any other, so it is always current. What
+changes is what happens when you edit it:
+
+- Your device never sends the change. Nobody else sees it, and your sync does
+  **not** get stuck.
+- On the next sync the project's version is put back, and your version is kept
+  beside the file as `name (local, not synced).ext`. Nothing you wrote is
+  thrown away.
+- Deleting a read-only file locally has the same shape: the file comes back on
+  the next sync.
+- `bdrive sync` names every file it put back, so this never happens silently.
+
+The same applies in the web UI: uploading to, removing from, restoring into, or
+creating a share link for a read-only folder is refused.
+
+### Hidden folders
+
+Set a folder's access to **No access** and it stops existing for everyone
+outside its exception list:
+
+- It is absent from the file tree, and every viewer URL into it answers *not
+  found* — the same answer as a path that was never there, so nobody can tell
+  the difference.
+- Its history, its read heat, and any share links into it disappear too. A
+  public link minted before the folder was restricted **stops working**.
+- Nothing in it is synced to their devices. The hub filters each device's
+  download to the changes that device is allowed to know about, so the files
+  are never written to that machine's disk at all.
+
+**What is still visible: the folder's name.** Your device syncs a real folder
+on a real disk, so it has to know which paths it must not write to — otherwise
+creating a file that happens to collide with a restricted path would break your
+sync. So project members can see that a restricted folder exists; they cannot
+see what is in it, what the files are called, who changed them, or when.
+
+If the *name* has to be secret too, put it in its own project and set the
+project's default access to `No access`.
+
+### Older devices
+
+A device running a version of `bdrive` from before folder permissions cannot
+sync a project that has a hidden folder — the hub refuses it and tells the
+person to upgrade. This is deliberate: an older device would silently stop
+receiving some of the project rather than fail visibly. Nothing is exposed to
+it either way, and projects with no folder rules are unaffected.
 
 ## What a device does when it is refused
 

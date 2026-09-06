@@ -38,6 +38,10 @@ type Project struct {
 	Default string `json:"default,omitempty"`
 	// Perms are the explicit grants, lowercase email → level.
 	Perms map[string]string `json:"perms,omitempty"`
+	// Folders narrow those levels over individual subtrees (folders.go).
+	// Absent on every project that has never restricted one, which is why no
+	// row needs migrating and a hub without rules behaves exactly as before.
+	Folders []FolderRule `json:"folders,omitempty"`
 }
 
 // level is the project's effective default level for org members.
@@ -110,6 +114,16 @@ func (p Project) clone() Project {
 			c.Perms[k] = v
 		}
 	}
+	// Folders is a slice of structs each holding a map: copying the Project
+	// value shares both the backing array and every Perms map inside it, so a
+	// caller could rewrite a folder grant without SetFolder, its validation,
+	// or a store write — the same hazard the Perms copy above exists for.
+	if p.Folders != nil {
+		c.Folders = make([]FolderRule, len(p.Folders))
+		for i, f := range p.Folders {
+			c.Folders[i] = f.clone()
+		}
+	}
 	return c
 }
 
@@ -134,6 +148,11 @@ type rowScopedProjectRepo interface {
 	// PutPerm writes one grant. An empty level deletes the row (which is
 	// ClearPerm — distinct from PermNone, an explicit "hidden" grant).
 	PutPerm(project, email, level string) error
+	// PutFolder writes one folder rule, replacing that prefix's grants and
+	// leaving every other rule alone.
+	PutFolder(project string, rule FolderRule) error
+	// DeleteFolder removes one rule and its grants.
+	DeleteFolder(project, prefix string) error
 }
 
 // put persists a mutated project's own METADATA, restoring the previous value
@@ -446,6 +465,103 @@ func (db *ProjectDB) ClearPerm(id, email string) error {
 	next := p.clone()
 	delete(next.Perms, e)
 	return db.putPerm(p, next, e, "")
+}
+
+// SetFolder upserts one folder rule (folders.go). The prefix must already be
+// normalized by normPrefix — this is the registry, not the door.
+//
+// There is no last-admin guard here and there does not need to be: a folder
+// rule cannot carry PermAdmin (handleProjectFolderSet refuses it) and
+// pathPermOf returns admin unchanged for anyone who holds it, so no rule can
+// leave a project unadministrable.
+func (db *ProjectDB) SetFolder(id string, rule FolderRule) error {
+	if rule.Prefix == "" || !strings.HasSuffix(rule.Prefix, "/") {
+		return fmt.Errorf("a folder rule needs a normalized prefix")
+	}
+	if rule.Default != "" && (!validLevel(rule.Default) || rule.Default == PermAdmin) {
+		return fmt.Errorf("invalid folder default %q", rule.Default)
+	}
+	for email, level := range rule.Perms {
+		if email == "" {
+			return fmt.Errorf("a folder grant needs an email")
+		}
+		if !validLevel(level) || level == PermAdmin {
+			return fmt.Errorf("invalid folder level %q", level)
+		}
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	db.refresh()
+	p, ok := db.byID[id]
+	if !ok {
+		return fmt.Errorf("no such project %q", id)
+	}
+	next := p.clone()
+	replaced := false
+	for i := range next.Folders {
+		if next.Folders[i].Prefix == rule.Prefix {
+			next.Folders[i] = rule.clone()
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		if len(next.Folders) >= maxFolderRules {
+			return fmt.Errorf("a project may hold at most %d folder rules", maxFolderRules)
+		}
+		next.Folders = append(next.Folders, rule.clone())
+	}
+	return db.putFolder(p, next, rule, false)
+}
+
+// ClearFolder removes one rule, reverting its subtree to the project level.
+func (db *ProjectDB) ClearFolder(id, prefix string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	db.refresh()
+	p, ok := db.byID[id]
+	if !ok {
+		return fmt.Errorf("no such project %q", id)
+	}
+	next := p.clone()
+	kept := next.Folders[:0]
+	found := false
+	for _, f := range next.Folders {
+		if f.Prefix == prefix {
+			found = true
+			continue
+		}
+		kept = append(kept, f)
+	}
+	if !found {
+		return fmt.Errorf("this project has no rule for %q", prefix)
+	}
+	next.Folders = kept
+	return db.putFolder(p, next, FolderRule{Prefix: prefix}, true)
+}
+
+// putFolder persists ONE folder-rule change, with the same rollback and for
+// the same reason as putPerm: a metadata write must never carry a permission
+// set, or a rename by a second hub process resurrects a rule an admin removed
+// (see rowScopedProjectRepo). A repo that cannot scope the write falls back to
+// the whole record, which is correct for the single-process file backend.
+func (db *ProjectDB) putFolder(prev, next Project, rule FolderRule, remove bool) error {
+	db.byID[next.ID] = next
+	var err error
+	if rs, ok := db.repo.(rowScopedProjectRepo); ok {
+		if remove {
+			err = rs.DeleteFolder(next.ID, rule.Prefix)
+		} else {
+			err = rs.PutFolder(next.ID, rule)
+		}
+	} else {
+		err = db.repo.Put(next)
+	}
+	if err != nil {
+		db.byID[prev.ID] = prev
+		return err
+	}
+	return nil
 }
 
 // dropPerm removes a grant with no last-admin guard. That guard stops a

@@ -46,7 +46,7 @@ func TestHubForbiddenIsSentinel(t *testing.T) {
 		}
 	}
 	if rr, ok := be.(ReadReporter); ok {
-		if err := rr.ReportReads(ctx, []ReadEvent{{Path: "a.md"}}); !errors.Is(err, ErrForbidden) {
+		if err := rr.ReportReads(ctx, ReadKindAgent, []ReadEvent{{Path: "a.md"}}); !errors.Is(err, ErrForbidden) {
 			t.Errorf("ReportReads: %v does not wrap ErrForbidden", err)
 		}
 	}

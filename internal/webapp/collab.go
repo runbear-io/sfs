@@ -230,6 +230,15 @@ func (s *Server) handleCollabStream(v *volume, w http.ResponseWriter, r *http.Re
 		http.Error(w, "collab needs a valid path", http.StatusBadRequest)
 		return
 	}
+	// The folder gate, not just the project one. A member with project write
+	// but read on this folder could otherwise join the room and type: their
+	// keystrokes would relay to every co-editor and then fail to persist,
+	// because the snapshot goes through upload/content, which runs the same
+	// check. Better to refuse the session than to show people text that is
+	// never going to survive.
+	if !s.writablePath(w, r, path) {
+		return
+	}
 	rc := http.NewResponseController(w)
 	key := roomKey(projectID(r), path)
 	room := s.collab().room(key)
@@ -304,6 +313,9 @@ func (s *Server) handleCollabPost(v *volume, w http.ResponseWriter, r *http.Requ
 	path := r.URL.Query().Get("path")
 	if path == "" || !journal.SafePath(path) {
 		http.Error(w, "collab needs a valid path", http.StatusBadRequest)
+		return
+	}
+	if !s.writablePath(w, r, path) {
 		return
 	}
 	var req struct {

@@ -118,6 +118,27 @@ export async function api<T = unknown>(
   return r.status === 204 ? ({} as T) : r.json();
 }
 
+/* The desktop sidecar's own POSTs, in one place instead of three.
+   X-Bdrive-Desktop is the sidecar's CSRF guard (cmd/bdrive/desktop.go
+   `guarded`): it forces a preflight the server never approves, so a random
+   web page cannot fire one of these at loopback.
+
+   Deliberately NOT routed through api(): its 401 handler sends the window to
+   /auth/login, and the sidecar registers no /auth/* routes at all — a 401
+   from a proxied hub call would navigate the app to a 404 on loopback. The
+   caller gets the raw Response and reads the body, which is what all three
+   call sites already did by hand. What they gain is the product-event table:
+   the invite this posts was going unmeasured. */
+export async function desktopPost(path: string, body?: unknown): Promise<Response> {
+  const r = await fetch(path, {
+    method: "POST",
+    headers: { "X-Bdrive-Desktop": "1", "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (r.ok) trackWrite("POST", path);
+  return r;
+}
+
 export async function postJSON<T>(url: string, body?: unknown): Promise<T> {
   const r = await fetch(url, {
     method: "POST",

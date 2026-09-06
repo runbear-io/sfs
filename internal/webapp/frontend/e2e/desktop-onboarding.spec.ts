@@ -80,7 +80,10 @@ test("connecting reaches the success screen with the agent prompt", async ({ pag
   // The invite card asks the hub and reports what it says (this harness hub
   // serves no orgs, so the honest answer is an error, not a fake link).
   await page.locator("#setup-invite").click();
-  await expect(page.locator(".setup-err")).toBeVisible();
+  // The invite card's own error, not any .setup-err on the frame: a run
+  // that could not start the daemon renders a second one, and this used to
+  // resolve to both and fail on strict mode.
+  await expect(page.locator("#setup-invite-err")).toBeVisible();
 
   // The prompt a teammate pastes into their agent is on the clipboard.
   await page.locator("#setup-copy-prompt").click();

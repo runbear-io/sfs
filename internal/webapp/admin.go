@@ -81,7 +81,19 @@ func (s *Server) handleOrgShares(w http.ResponseWriter, r *http.Request) {
 		// permission check, since there is no reason to scan for a project
 		// the caller cannot see.
 		opens := s.Reads.ShareOpens(p.ID)
+		// And project access is not access to every FOLDER in the project, for
+		// the same reason one line up: the row carries the public token, so
+		// listing a link into a folder this member cannot read hands them the
+		// file the rule exists to withhold — and /s/ answers to the link's
+		// CREATOR, not to whoever presents it, so the token works.
+		//
+		// This route is not behind proj(), so the filter is built from the
+		// project in hand rather than from the request context.
+		vis := s.visibilityFor(r, p)
 		for _, sh := range s.Shares.List(p.ID) {
+			if !vis.canRead(sh.Path) {
+				continue
+			}
 			j := shareJSON(r, sh, opens)
 			j["project_name"] = p.Name
 			out = append(out, j)

@@ -266,6 +266,19 @@ func printCycle(res *syncer.Result) {
 	if res.Pruned > 0 {
 		fmt.Printf("  pruned:         %d path(s) removed from the hub (kept on disk)\n", res.Pruned)
 	}
+	// Named, not counted. A reverted edit is the one outcome where the user's
+	// own change did not survive the cycle, so "which file?" is the first
+	// thing they need — and the copy beside it is where their bytes went.
+	if n := len(res.Reverted); n > 0 {
+		fmt.Printf("  read-only:      %d file(s) reverted — you may read these folders but not change them\n", n)
+		for i, rel := range res.Reverted {
+			if i == 5 {
+				fmt.Printf("                  ... and %d more\n", n-i)
+				break
+			}
+			fmt.Printf("                  %s (your version kept beside it)\n", safeField(rel, 200))
+		}
+	}
 	fmt.Printf("  files updated:  %d\n", res.Materialized)
 	switch {
 	case res.NoAccess:

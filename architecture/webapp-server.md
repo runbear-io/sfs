@@ -30,10 +30,19 @@ classDiagram
         +TrustProxy bool
         +Desktop bool
         +DesktopMe func() (email, name)
+        +ReportRead func(project, path)
         -vols per-project volume cache
         -grants reservation ledger
+        -routes what Handler registered
         +Handler() http.Handler
     }
+    class recordingMux {
+        <<http.ServeMux wrapper>>
+        +HandleFunc / Handle record then delegate
+        +APIRoutes() []string
+    }
+    note for recordingMux "Exists for one caller: cmd/bdrive/desktop.go must classify every per-project route this hub serves, because a route it does not know falls through to local state and answers plausibly and WRONGLY. That has shipped twice. Recording beats parsing server.go: the per-project block builds eight patterns at runtime by concatenating a prefix, so a source scanner would silently miss exactly the routes it is meant to police."
+    note for Server "ReportRead is the desktop's read seam, dead on a hub. The sidecar keeps no ReadLedger and answers the viewer routes locally, so a person reading in the Mac app reached no ledger at all while the same file in the web app counted. The hook hands each viewer read to the sidecar, which forwards it to the project's own hub as HUMAN traffic — routing it through the agent report route instead would have filed a person's browsing as a device's."
     note for Server "Desktop marks the loopback sidecar posture (`bdrive desktop`), NOT a hub: the server fronts this machine's own volume stores. It is set in exactly one production place — cmd/bdrive/desktop.go — so on a deployed hub it stays false and both branches below are dead code, leaving /api/config byte-identical to a hub without it. DesktopMe supplies `me` from the device's saved sign-in (settings.json), a func because the tray can change it at runtime; the desktop has no AuthProvider"
     note for Server "clientIP is a METHOD now, not a package func: X-Forwarded-For is honored when the PEER is loopback/private (the operator's own proxy) or TrustProxy is set, and then only its LAST hop. Every caller that gates on an IP — the auth rate limiter, /s/*, device rows, share telemetry — goes through it, so a client-supplied header cannot forge the identity a limiter counts"
 
@@ -304,6 +313,7 @@ classDiagram
         +Get +Create +Update +Rename +List
         +SetCreator +SetDefault +SetTemplate
         +SetPerm +ClearPerm
+        +SetFolder +ClearFolder
         -refresh re-reads the store on reads AND mutators
     }
     class Project {
@@ -312,6 +322,13 @@ classDiagram
         +Creator string
         +Template string
         +Default string
+        +Perms map email→level
+        +Folders FolderRule slice
+        +ruleFor(path) longest prefix
+    }
+    class FolderRule {
+        +Prefix slash-terminated
+        +Default level, "" inherits
         +Perms map email→level
     }
     class seedTemplate {
@@ -323,6 +340,7 @@ classDiagram
         CheckWrite / RecordUsage
     }
     note for Project "Default == &quot;&quot; means write — the historical behavior, so an upgraded hub needs no migration. SetPerm/ClearPerm refuse to drop the last explicit admin."
+    note for FolderRule "folders.go — the same four levels one level down, as an exception list rather than an ACL tree: longest matching prefix wins outright and rules never merge. May not carry admin (a project-wide capability). Stored in its own tables so a metadata write never carries it."
 
     class projectPerm {
         <<resolver>>
@@ -331,8 +349,26 @@ classDiagram
         explicit grant → that level
         org member → project Default
         otherwise → none
+        projectPermFor(p, email) for public callers
     }
     note for projectPerm "The Desktop arm is FIRST in both projectPerm and projectPermOf: the desktop viewer is read-only for everyone, and reusing this ladder rather than adding a second gate is what keeps every local write route refused by the machinery that already guards the hub. It cannot widen a hub — Desktop is false there"
+    class folderLevel {
+        <<resolver, one level down>>
+        base none → none, always
+        longest matching rule
+        rule grant → that level
+        rule Default → that level
+        no rule → base
+    }
+    class pathFilter {
+        <<per-request read visibility>>
+        resolved once, not per path
+        +canRead(path)
+        +visibleSHA / visibleSHAs
+        +tag scopeTag for cache keys
+    }
+    note for folderLevel "A rule may narrow OR widen a subtree of a project you can see — a read-only project with one writable drop-box is a real shape — but base none returns none unconditionally, so it can never open a project you cannot see. That arm is unreachable over HTTP today because proj() answers first; it exists because the filtered fold and the blob gate are NOT behind that gate."
+    note for pathFilter "Deliberately not a cached per-reader fold: no cache, no eviction, no memory per scope. Single-path routes pay one comparison; listing routes already iterate. Hidden paths answer 404, never 403 — a 403 confirms the file is there."
     note for projectPerm "perms.go — the single authorization ladder. proj(level, h) in server.go is the one choke point: every per-project route declares its level at registration."
     note for projectPerm "Both escape hatches are closed: a project with no org, or naming an org that no longer exists, resolves to none instead of falling through to a default, and org membership is checked BEFORE an explicit grant — so a grant left behind by a removed member is no longer a way back in"
 
@@ -395,9 +431,20 @@ classDiagram
         &lt;&lt;shares.go, the .md branch&gt;&gt;
         body contains language-mermaid?
         → module script tag, else ""
-        sharedMarkdownShell verb 2 of 4
+        sharedMarkdownShell verb 3 of 5
     }
     note for mermaidTag "A share page is a zero-JavaScript document and stays one unless the document it renders actually has a diagram — the server already holds the rendered HTML, so it can decide. The tag is a MODULE, which only loads because frontend() now sets Access-Control-Allow-Origin on real assets: under this page's `sandbox allow-scripts` the origin is opaque, so a module and every import() it makes are fetched with Origin: null. The CSP itself is unchanged, and no allow-same-origin was added — the sandbox is what keeps shared content off the hub's origin"
+
+    class openGraph {
+        &lt;&lt;og.go&gt;&gt;
+        ogMeta(title, desc, image, type, url) → meta block
+        titleTag(s) → &lt;title&gt;
+        Server.shellTitle(upath) → a name, or empty for today
+        shareDescription(pairs, body) → fm or 1st para, ≤200
+        shareImage(body) → 1st absolute http(s) img
+        sharedMarkdownShell verb 2 of 5
+    }
+    note for openGraph "Unfurlers run no JavaScript, so both injections are server-side; frontend/ and static/ are untouched, which is why go build still needs no Node. The asymmetry is the point: the SPA shell is served with NO session to anyone holding a URL, so it gets name-derived tags only (basename + project name, no storage access — shellTitle reads the URL and one registry entry, behind a projectIDRe guard so a non-project URL never reaches the mutex). Content-derived tags (description, image) live on the markdown share page alone, where the bytes are already public. og:image insists on an absolute http(s) src because RenderMarkdown does no src rewriting, so a relative one is already broken on the live page. .html and binary shares are byte-identical to before — the hub still never injects into raw HTML. An unresolvable project id falls back to the untouched shell, so the tag is not an existence oracle"
 
     class DeviceRegistry {
         -repo DeviceRepo
@@ -502,6 +549,7 @@ classDiagram
     Server o-- DeviceRegistry
     Server o-- ShareDB
     Server o-- ReadLedger
+    Server ..> recordingMux : Handler registers through it
     Server o-- QuotaProvider
     Server *-- reservations : holds before it charges
     reservations *-- grant
@@ -570,9 +618,17 @@ classDiagram
     seedTemplate ..> ProjectDB : SetTemplate records it once
     Server *-- projectPerm : gates every per-project route
     projectPerm ..> Project : Perms + Default
+    folderLevel ..> FolderRule : longest prefix
+    folderLevel ..> projectPerm : base level
+    pathFilter ..> folderLevel : per path
+    Server *-- pathFilter : filters every read surface
     projectPerm ..> Directory : org role
     ShareDB ..> Share
     ShareDB ..> mermaidTag : markdown shares only
+    ShareDB ..> openGraph : ogMeta + shareDescription/shareImage (.md branch)
+    Server ..> openGraph : shellTitle + titleTag, templated into the SPA shell
+    openGraph ..> ProjectDB : Get(id) for the project name
+    openGraph ..> FrontmatterPair : description key
     ShareDB ..> markdownRender : RenderMarkdown (table stays)
     Server ..> markdownRender : RenderMarkdownPairs (viewer)
     markdownRender ..> FrontmatterPair
@@ -657,6 +713,8 @@ classDiagram
         <<optional interface>>
         +PutMeta(p)
         +PutPerm(project, email, level)
+        +PutFolder(project, rule)
+        +DeleteFolder(project, prefix)
     }
     class rowScopedOrgRepo {
         <<optional interface>>
@@ -694,7 +752,7 @@ classDiagram
         +addColumns(cols, guarded) ALTER
         +device_rows keyed (user, id)
     }
-    note for sqlMetaStore "ProjectRepo.Put is transactional over projects + project_perms (same shape as orgs + org_members), and is now the FALLBACK path — a single grant goes through PutPerm."
+    note for sqlMetaStore "ProjectRepo.Put is transactional over projects + project_perms + project_folders + project_folder_perms, and is the FALLBACK path — a single grant goes through PutPerm, a single rule through PutFolder. project_folders is a GUARDED TABLE: recreating it empty reads as &quot;nothing is restricted&quot;, so migrate refuses when the recorded schema version says it should exist. Compile-time assertions keep both backends satisfying rowScopedProjectRepo, which is reached by type assertion and would otherwise degrade silently."
     note for sqlMetaStore "addColumns takes a second, GUARDED set. Probing the live columns and re-adding a missing one is how a running hub gains a field on restart, but on a security column (projects.default_level) it is also how a downgrade silently re-creates it EMPTY — every project back to its default visibility. A guarded column missing from a non-empty table past schema version 0 is now a hard startup error. device_rows is the new (account, device) primary key, copied once from the old id-keyed devices table, which is left in place"
 
     MetaStore <|.. fileMetaStore

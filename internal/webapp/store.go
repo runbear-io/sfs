@@ -41,6 +41,19 @@ var (
 	manifestKeyRe = regexp.MustCompile(`^manifests/[0-9a-f]{64}$`)
 )
 
+// fileShaKey reports whether a store key is addressed by the FILE's sha256 —
+// blobs/ and manifests/ both are, and both must therefore answer the same
+// question about the same content. chunks/ is not: its key is the chunk's own
+// hash, which no op ever names.
+func fileShaKey(key string) (string, bool) {
+	for _, p := range []string{"blobs/", "manifests/"} {
+		if sha, ok := strings.CutPrefix(key, p); ok {
+			return sha, true
+		}
+	}
+	return "", false
+}
+
 func validStoreKey(key string) bool {
 	return blobKeyRe.MatchString(key) || journalKeyRe.MatchString(key) ||
 		chunkKeyRe.MatchString(key) || manifestKeyRe.MatchString(key)
@@ -75,6 +88,34 @@ func storeSource(v *volume, w http.ResponseWriter) *RemoteSource {
 		return nil
 	}
 	return rs
+}
+
+// understandsFilteredJournals refuses a device too old to sync a project whose
+// journals are filtered per account.
+//
+// Confidentiality does not depend on this — filtering happens here, so an old
+// client is served the same filtered bytes as a new one. Correctness does: a
+// filtered journal changes LENGTH when a rule changes, in both directions, and
+// syncer.pull skips a journal that did not grow and otherwise resumes from a
+// byte offset. An old client therefore stops reading a peer entirely after a
+// revocation, silently and forever, or resumes mid-stream after a grant.
+//
+// Refusing is the only honest answer: serving it anyway trades a loud failure
+// the user can act on ("upgrade bdrive") for a quiet one nobody can see. Only
+// projects that actually have rules are affected, so no existing deployment
+// changes until someone restricts a folder.
+func (s *Server) understandsFilteredJournals(w http.ResponseWriter, r *http.Request) bool {
+	// Gated on whether THIS caller is actually filtered, not on whether the
+	// project has rules: an org owner (and any project admin) sees every op
+	// either way, so there is no offset for them to get wrong and refusing
+	// them would break an administrator's device over somebody else's folder.
+	if !s.visibility(r).hides() || r.Header.Get(remote.PermsCapability) != "" {
+		return true
+	}
+	// A browser never reaches /store/*; this is always a device.
+	http.Error(w, "this project uses folder permissions, which this version of bdrive "+
+		"cannot sync correctly — upgrade bdrive and run `bdrive sync`", http.StatusForbidden)
+	return false
 }
 
 func (s *Server) storeKey(w http.ResponseWriter, r *http.Request) (string, bool) {
@@ -202,6 +243,9 @@ func (s *Server) handleStoreList(v *volume, w http.ResponseWriter, r *http.Reque
 	if rs == nil {
 		return
 	}
+	if !s.understandsFilteredJournals(w, r) {
+		return
+	}
 	s.refreshDevice(r)
 	prefix := r.URL.Query().Get("prefix")
 	if prefix != "" &&
@@ -218,6 +262,16 @@ func (s *Server) handleStoreList(v *volume, w http.ResponseWriter, r *http.Reque
 		storageErr(w, http.StatusBadGateway, "storage is temporarily unavailable", err)
 		return
 	}
+	objs, err = s.visibleObjects(r, rs, objs)
+	if err != nil {
+		storageErr(w, http.StatusBadGateway, "storage is temporarily unavailable", err)
+		return
+	}
+	// No scope tag here. It was added on the theory that a device should
+	// notice its view moved from the listing it already fetches — but the
+	// client learns its scope from /api/p/<id>/scope before every scan
+	// (loadScope), so it never read this one. A field nothing consumes, with a
+	// comment calling it load-bearing, is worse than no field.
 	writeStoreJSON(w, r, map[string]any{"objects": objs})
 }
 
@@ -239,9 +293,106 @@ func writeStoreJSON(w http.ResponseWriter, r *http.Request, v any) {
 	json.NewEncoder(gz).Encode(v)
 }
 
+// visibleObjects rewrites a store listing for one account: journals are
+// reported at their FILTERED length, and blobs the account may not read are
+// dropped entirely.
+//
+// The size is the load-bearing part. syncer.pull skips a journal whose listed
+// size did not grow and then resumes parsing at a BYTE OFFSET into what it
+// already holds — so a filtered body served against the stored size makes
+// every device re-download every journal forever, and a stored size against a
+// filtered body makes it resume mid-stream. The two must be computed from the
+// same bytes, which is why this calls the same filter the GET does.
+func (s *Server) visibleObjects(r *http.Request, rs *RemoteSource, objs []remote.Object) ([]remote.Object, error) {
+	f := s.visibility(r)
+	if !f.hides() {
+		return objs, nil
+	}
+	var shas, chunks map[string]bool
+	out := make([]remote.Object, 0, len(objs))
+	for _, o := range objs {
+		switch {
+		case strings.HasPrefix(o.Key, "journal/"):
+			data, err := s.filteredJournal(r.Context(), rs, o, f)
+			if err != nil {
+				return nil, err
+			}
+			// A journal with nothing left in it is not listed at all: an
+			// entry of size zero is a peer this device would create a local
+			// file for and re-fetch on every cycle forever.
+			if len(data) == 0 {
+				continue
+			}
+			o.Size = int64(len(data))
+			out = append(out, o)
+		case strings.HasPrefix(o.Key, "chunks/"):
+			// A chunk's key is its own hash, so it is in no visible-sha set.
+			// Dropping them all was safe but wrong: `bdrive export` enumerates
+			// chunks/, so a filtered member's archive kept the manifest of
+			// every large file and none of its content — an archive that
+			// silently cannot reconstruct what it claims to hold.
+			//
+			// So the set is built the only way that is both complete and
+			// leak-free: read the manifests of the shas this account may see
+			// and take the chunks they name. Listing all of them instead would
+			// have leaked roughly how much hidden content exists, and listing
+			// none breaks export. This costs one manifest fetch per visible
+			// large file, on a listing only `export` ever asks for — the
+			// syncer reaches chunks through a manifest, never a listing.
+			if chunks == nil {
+				var err error
+				if chunks, err = f.visibleChunks(r.Context(), rs); err != nil {
+					return nil, err
+				}
+			}
+			if sha, ok := strings.CutPrefix(o.Key, "chunks/"); ok && chunks[sha] {
+				out = append(out, o)
+			}
+		case strings.HasPrefix(o.Key, "blobs/"), strings.HasPrefix(o.Key, "manifests/"):
+			if shas == nil {
+				var err error
+				if shas, err = f.visibleSHAs(r.Context(), rs); err != nil {
+					return nil, err
+				}
+			}
+			if sha, keyed := fileShaKey(o.Key); keyed && shas[sha] {
+				out = append(out, o)
+			}
+		default:
+			out = append(out, o)
+		}
+	}
+	return out, nil
+}
+
+// filteredJournal fetches one journal and drops what this account may not
+// read. Cached on the RemoteSource keyed by the object's identity AND the
+// scope that filtered it, so the LIST and the GET of one sync cycle do not
+// fetch and re-filter the same object twice.
+func (s *Server) filteredJournal(ctx context.Context, rs *RemoteSource, o remote.Object, f pathFilter) ([]byte, error) {
+	if data, ok := rs.cachedFilter(o, f.tag); ok {
+		return data, nil
+	}
+	rc, err := rs.Backend.Get(ctx, o.Key)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		return nil, err
+	}
+	data := filterJournal(raw, f)
+	rs.putFilter(o, f.tag, data)
+	return data, nil
+}
+
 func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Request) {
 	rs := storeSource(v, w)
 	if rs == nil {
+		return
+	}
+	if !s.understandsFilteredJournals(w, r) {
 		return
 	}
 	s.refreshDevice(r)
@@ -253,10 +404,42 @@ func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Reques
 	// serve content that does not hash to the key it is stored under.
 	var rc io.ReadCloser
 	var err error
-	if blob, isBlob := strings.CutPrefix(key, "blobs/"); isBlob {
-		rc, err = rs.OpenBlob(r.Context(), blob)
-	} else {
-		rc, err = rs.Backend.Get(r.Context(), key)
+	switch f := s.visibility(r); {
+	case strings.HasPrefix(key, "journal/") && f.hides():
+		// The whole confidentiality claim on the sync wire: a device converges
+		// from the ops it is given, so the ops it may not see never leave here.
+		// Served from the same filter the listing sized, or the client resumes
+		// at an offset that means nothing.
+		data, ferr := s.filteredJournal(r.Context(), rs, remote.Object{Key: key}, f)
+		if ferr != nil {
+			storageErr(w, http.StatusNotFound, "no such object", ferr)
+			return
+		}
+		rc, err = io.NopCloser(bytes.NewReader(data)), nil
+	default:
+		// blobs/ AND manifests/ are both keyed by the FILE's sha, so both are
+		// gated on the same set. Missing the manifest was a full disclosure of
+		// any hidden file over the chunking threshold: the manifest names its
+		// chunks, and the chunks are the content.
+		//
+		// chunks/ is NOT gated, and cannot be: a chunk's key is its own hash,
+		// never an Op.Blob, so it is not in any visible-sha set and gating it
+		// would make every large file unfetchable for a filtered account. It
+		// is safe because a chunk sha is reachable only through a manifest —
+		// which is gated — and chunks are kept out of the listing above, so
+		// there is nothing to enumerate.
+		if sha, keyed := fileShaKey(key); keyed && !f.visibleSHA(r.Context(), rs, sha) {
+			// Defence in depth: a filtered journal means an honest client
+			// never asks for this. Answering it anyway would make content
+			// addressing the way around a folder rule.
+			http.Error(w, "no such object", http.StatusNotFound)
+			return
+		}
+		if blob, isBlob := strings.CutPrefix(key, "blobs/"); isBlob {
+			rc, err = rs.OpenBlob(r.Context(), blob)
+		} else {
+			rc, err = rs.Backend.Get(r.Context(), key)
+		}
 	}
 	if err != nil {
 		// Fixed message: os.Open's error names the hub's absolute storage
@@ -306,10 +489,22 @@ func (s *Server) handleStoreExists(v *volume, w http.ResponseWriter, r *http.Req
 	if rs == nil {
 		return
 	}
+	if !s.understandsFilteredJournals(w, r) {
+		return
+	}
 	s.refreshDevice(r)
 	key, ok := s.storeKey(w, r)
 	if !ok {
 		return
+	}
+	// "Does this content exist?" is a read of the fact, so it answers no for
+	// content this account may not fetch — otherwise a member confirms what is
+	// in a hidden folder one sha at a time.
+	if sha, keyed := fileShaKey(key); keyed {
+		if f := s.visibility(r); !f.visibleSHA(r.Context(), rs, sha) {
+			writeJSON(w, map[string]any{"exists": false})
+			return
+		}
 	}
 	exists, err := rs.Backend.Exists(r.Context(), key)
 	if err != nil {
@@ -515,6 +710,60 @@ func (s *Server) opsNameTheirAuthor(w http.ResponseWriter, r *http.Request, ops 
 	return true
 }
 
+// opsWithinScope refuses a journal whose ops name a folder this account may
+// not write. Folder rules narrow the project level over a subtree (folders.go);
+// proj() has already established the caller may write the PROJECT.
+func (s *Server) opsWithinScope(w http.ResponseWriter, r *http.Request, ops []journal.Op, held map[int64]string) bool {
+	p, ok := projectFromCtx(r)
+	if !ok || len(p.Folders) == 0 {
+		return true
+	}
+	base := s.projectPermOf(r, p)
+	if base == PermAdmin {
+		return true
+	}
+	email := normEmail(s.requestUser(r).Email)
+	for _, op := range ops {
+		// Only what this push ADDS. See the call site: the body repeats the
+		// device's whole history every cycle, and judging that history against
+		// today's rules bricks a member whose access was narrowed after they
+		// wrote something.
+		//
+		// Keyed on the PATH the hub already holds under that Seq, not on the
+		// Seq alone: journalKeepsItsOps refuses truncation but not
+		// rewriting-in-place, so "Seq 1 is already stored" does not mean "this
+		// op is already stored" — and a device could otherwise re-point an old
+		// Seq at a restricted path and walk past this gate. Same Seq AND same
+		// path is the same claim about the same file; anything else is new.
+		if was, ok := held[op.Seq]; ok && was == op.Path {
+			continue
+		}
+		if atLeast(folderLevel(p, email, op.Path, base), PermWrite) {
+			continue
+		}
+		// The path is named back deliberately: the caller wrote this op, so it
+		// is their own text, and a device whose push is refused with no way to
+		// tell which file caused it cannot be debugged by the person holding
+		// the laptop.
+		msg := fmt.Sprintf("you have read-only access to %q in this project", op.Path)
+		// A device that knows about folder permissions asks /scope before it
+		// scans and never journals this path, so reaching here means it is
+		// stale or hostile. One that does NOT know is in a worse spot than it
+		// looks: its journal is append-only, so the refused op is in every
+		// later push too, and this project stays pull-only on that machine
+		// until the local edit is removed. A new client would simply have had
+		// the edit reverted. Say which of the two this is, because the fix is
+		// completely different.
+		if r.Header.Get(remote.PermsCapability) == "" {
+			msg += " — and this version of bdrive cannot handle a read-only folder, " +
+				"so it will stay pull-only here: upgrade bdrive"
+		}
+		http.Error(w, msg, http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
 // journalKeepsItsOps reports whether an incoming journal body still carries
 // every op the hub already holds under key, matched on the per-device sequence
 // number — the append-only rule the data model states and that /store/object, a
@@ -554,40 +803,48 @@ func (s *Server) opsNameTheirAuthor(w http.ResponseWriter, r *http.Request, ops 
 // is 0 for a first push and for a stored journal that would not parse — the
 // latter over-counts one push, which is the right price for not reading the
 // object twice.
-func journalKeepsItsOps(ctx context.Context, be remote.Backend, key string, ops []journal.Op) (ok bool, storedMax int64, err error) {
+func journalKeepsItsOps(ctx context.Context, be remote.Backend, key string, ops []journal.Op) (ok bool, storedMax int64, held map[int64]string, err error) {
 	switch have, err := be.Exists(ctx, key); {
 	case err != nil:
-		return false, 0, err
+		return false, 0, nil, err
 	case !have:
-		return true, 0, nil
+		return true, 0, nil, nil
 	}
 	rc, err := be.Get(ctx, key)
 	if err != nil {
-		return false, 0, err
+		return false, 0, nil, err
 	}
 	defer rc.Close()
 	data, err := io.ReadAll(rc)
 	if err != nil {
-		return false, 0, err
+		return false, 0, nil, err
 	}
 	stored, err := journal.Parse(data)
 	if err != nil {
 		log.Printf("beardrive: %s is not parseable, its ops cannot be protected from a rewrite: %v", key, err)
-		return true, 0, nil
+		return true, 0, nil, nil
 	}
 	seen := make(map[int64]bool, len(ops))
 	for _, op := range ops {
 		seen[op.Seq] = true
 	}
+	held = make(map[int64]string, len(stored))
 	for _, op := range stored {
 		if !seen[op.Seq] {
-			return false, 0, nil
+			return false, 0, nil, nil
 		}
 		if op.Seq > storedMax {
 			storedMax = op.Seq
 		}
+		// Seq → the path the hub already holds under it. This function
+		// deliberately refuses TRUNCATION and not rewriting-in-place (see
+		// above), so a Seq alone says nothing about WHICH op it is — and
+		// "already stored, do not re-judge" has to mean the same op, not the
+		// same number, or re-pointing an old Seq at a restricted path walks
+		// straight past the folder gate.
+		held[op.Seq] = op.Path
 	}
-	return true, storedMax, nil
+	return true, storedMax, held, nil
 }
 
 // storePutBody hands back the plaintext of a PUT body, inflating it when the
@@ -709,16 +966,38 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var storedMax int64
+	var heldPaths map[int64]string
 	if strings.HasPrefix(key, "journal/") {
 		var ok bool
 		var err error
-		switch ok, storedMax, err = journalKeepsItsOps(r.Context(), rs.Backend, key, ops); {
+		switch ok, storedMax, heldPaths, err = journalKeepsItsOps(r.Context(), rs.Backend, key, ops); {
 		case err != nil:
 			storageErr(w, http.StatusBadGateway, "could not read the stored journal", err)
 			return
 		case !ok:
 			http.Error(w, "a journal is append-only; this body drops ops the hub already holds",
 				http.StatusConflict)
+			return
+		}
+		// The folder gate for the sync wire, and the only write door a device
+		// has: a blob is content-addressed and inert until an op names it, and
+		// handleStoreSign has no path in its request to gate on. So "may this
+		// account write this folder?" is answered exactly here.
+		//
+		// It runs HERE, after storedMax, because it must judge only the ops
+		// this push ADDS. push sends the whole journal file every cycle — it
+		// is one append-only object — so a member who had access to a folder,
+		// wrote there, and then lost it would have every later push refused
+		// over ops the hub itself already holds. Their sync would be dead for
+		// the entire project, permanently, with no recovery but editing their
+		// journal by hand. Ops the hub already stored were authorized when they
+		// were written and are already served (filtered) to everyone; re-sending
+		// them is the protocol, not a new write.
+		//
+		// That is also what distinguishes this from opsNameTheirAuthor above,
+		// which may safely re-check everything: authorship does not change over
+		// time. Scope does.
+		if !s.opsWithinScope(w, r, ops, heldPaths) {
 			return
 		}
 	}

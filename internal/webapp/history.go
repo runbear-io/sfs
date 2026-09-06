@@ -235,10 +235,17 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 		}
 		chain = chainSegments(buildMoveIndex(ops), path)
 	}
+	// Resolved once, not per op: history walks every op in the project.
+	vis := s.visibility(r)
 	matched := make([]timed, 0, len(all))
 	for i, sop := range all {
 		op := sop.Op
 		switch {
+		// Before every other filter. History is a per-path audit feed, so an
+		// unfiltered row leaks the path, who changed it and when — the same
+		// three facts the tree would have leaked.
+		case !vis.canRead(op.Path):
+			continue
 		case path != "" && !inSegments(chain, op.Path, op.Time):
 			continue
 		case path == "" && prefix != "" && !strings.HasPrefix(op.Path, strings.TrimSuffix(prefix, "/")+"/"):
@@ -315,6 +322,15 @@ func (s *Server) handleBlob(v *volume, w http.ResponseWriter, r *http.Request) {
 	sha := r.URL.Query().Get("sha")
 	if !blobRe.MatchString(sha) {
 		http.Error(w, "invalid sha", http.StatusBadRequest)
+		return
+	}
+	// Content addressing means this door names bytes, not a path — so the
+	// question "may you read this?" has to be asked of every path that
+	// references them. Answered before the fetch, and answered as a 404: a
+	// past version of a hidden file is exactly as absent as one that never
+	// existed.
+	if !s.visibility(r).visibleSHA(r.Context(), rs, sha) {
+		http.Error(w, "no such version", http.StatusNotFound)
 		return
 	}
 	rc, err := rs.OpenBlob(r.Context(), sha)

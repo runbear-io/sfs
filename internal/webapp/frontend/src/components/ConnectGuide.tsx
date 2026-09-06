@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Project } from "../api/types";
+import { agentPrompt } from "../lib/prompt";
 import { copyText } from "../util";
 import { ProjectIcon } from "./shell";
 import { projColor } from "./ProjectNav";
@@ -12,33 +13,20 @@ import { projColor } from "./ProjectNav";
    installed, no Homebrew, sign-in, wrong folder — so the page itself
    stays to one line of prose; detail lives in the collapsed sections. */
 
-export const INSTALL_DOC = "https://raw.githubusercontent.com/runbear-io/beardrive/main/INSTALL_FOR_AGENTS.md";
+export { INSTALL_DOC, agentPrompt } from "../lib/prompt";
 
 export function ConnectGuide({ project, existing }: { project: Project; existing?: boolean }) {
   const origin = window.location.origin;
-  // When the creator said they already have a folder, say so in the prompt.
-  // Without it an agent reads an empty project and proposes creating a new
-  // subfolder — the one recommendation that is wrong for this person. It
-  // still asks which folder: that question is the runbook's hard gate and
-  // nothing here may weaken it.
-  const ask = existing
-    ? '. I already have a folder of notes — ask me which one to sync (the project is named "'
-    : '. Ask me which folder to sync (the project is named "';
-  const prompt =
-    "Follow " +
-    INSTALL_DOC +
-    "\nto set up BearDrive project " +
-    project.id +
-    " on " +
-    origin +
-    ask +
-    project.name +
-    '").';
+  const prompt = agentPrompt(origin, { project, existing });
+  // Two commands, not three. INSTALL_FOR_AGENTS.md is headed "Do not run a
+  // login command" — init --server signs the device in itself, so a separate
+  // login is an extra permission prompt for something init does anyway. The
+  // page linking to that doc should not print the thing it forbids.
   const manual =
     "brew install runbear-io/tap/beardrive" +
-    "\nbdrive login " +
+    "\nbdrive init --server " +
     origin +
-    "\nbdrive init --project " +
+    " --project " +
     project.id;
 
   return (

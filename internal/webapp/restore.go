@@ -42,6 +42,9 @@ func (s *Server) handleRestore(v *volume, w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if !s.writablePath(w, r, p) {
+		return
+	}
 	if !blobRe.MatchString(req.SHA) {
 		http.Error(w, "sha must be 64 lowercase hex chars", http.StatusBadRequest)
 		return
@@ -68,6 +71,20 @@ func (s *Server) handleRestore(v *volume, w http.ResponseWriter, r *http.Request
 		}
 	}
 	if found == nil {
+		http.Error(w, "no such version of that file", http.StatusNotFound)
+		return
+	}
+	// The chain includes the paths this file lived at BEFORE it moved, and one
+	// of those can be inside a folder this account may not read: a file moved
+	// out of a hidden folder carries its hidden history with it. Restoring
+	// such a version would paste content the caller was never allowed to see
+	// onto a path they can.
+	//
+	// Defence in depth rather than a live hole: reaching it needs the version's
+	// sha, and every door that would reveal one (history, /blob, /render?sha=)
+	// already filters it out — so there is no way to LEARN the sha, only to
+	// already know it. Same 404 as a version that does not exist.
+	if !s.visibility(r).canRead(found.Path) {
 		http.Error(w, "no such version of that file", http.StatusNotFound)
 		return
 	}

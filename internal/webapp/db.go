@@ -200,7 +200,22 @@ func checkProject(p Project) error {
 		p.Creator, p.Template, p.Default); err != nil {
 		return err
 	}
-	return storableMap(p.Perms)
+	if err := storableMap(p.Perms); err != nil {
+		return err
+	}
+	// Folder rules reach the store through normPrefix, which already refuses
+	// control bytes — this is the same belt-and-braces check the grants above
+	// get, at the boundary where a NUL stops being a validation question and
+	// starts being a Postgres error on a text column.
+	for _, f := range p.Folders {
+		if err := storable(f.Prefix, f.Default); err != nil {
+			return err
+		}
+		if err := storableMap(f.Perms); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func checkOrg(o Org) error {

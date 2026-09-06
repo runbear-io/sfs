@@ -1,0 +1,449 @@
+package webapp
+
+import (
+	"encoding/json"
+	"net/http"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// Phase 2 of docs/folder-permissions-prd.md: a hidden folder stops answering on
+// every browser surface. Same principal as Phase 1 — BOB, a full member of the
+// org and of the project, holding the project default — now denied read on
+// "vault/".
+//
+// Note what Phase 2 does NOT do: the folder still syncs to bob's disk. That is
+// Phase 3, and until it lands the hub says so in the UI and the docs.
+
+// hiddenHub seeds a project with a real file inside a folder bob cannot read.
+// Seeding as alice matters: a test where the file does not exist measures
+// absence and reports it as authorization.
+func hiddenHub(t *testing.T) (http.Handler, *Server, map[string]*http.Cookie, Project, string) {
+	t.Helper()
+	h, srv, cookies, p := permHub(t)
+	if rec := doAs(t, h, "PUT", "/api/p/"+p.ID+"/upload/content?path=vault/secret.md",
+		[]byte("# the secret\n"), cookies["alice"]); rec.Code != 200 {
+		t.Fatalf("seed vault/secret.md: %d %s", rec.Code, rec.Body)
+	}
+	if rec := doAs(t, h, "PUT", "/api/p/"+p.ID+"/upload/content?path=notes/open.md",
+		[]byte("# open\n"), cookies["alice"]); rec.Code != 200 {
+		t.Fatalf("seed notes/open.md: %d %s", rec.Code, rec.Body)
+	}
+	sha := shaOfSeeded(t, h, p.ID, cookies["alice"], "vault/secret.md")
+	rule := map[string]any{"prefix": "vault", "default": PermNone,
+		"perms": map[string]string{"carol@x.io": PermRead}}
+	if rec := doAs(t, h, "PUT", "/api/p/"+p.ID+"/folders", rule, cookies["alice"]); rec.Code != 200 {
+		t.Fatalf("set hidden rule: %d %s", rec.Code, rec.Body)
+	}
+	return h, srv, cookies, p, sha
+}
+
+// TestSec_Folder_HiddenFolderIsNotReadableThroughAnyViewerDoor.
+//
+// 404, never 403: a 403 confirms the file is there, which is most of what a
+// hidden folder is hiding. The same rule the project level already applies.
+func TestSec_Folder_HiddenFolderIsNotReadableThroughAnyViewerDoor(t *testing.T) {
+	h, _, c, p, sha := hiddenHub(t)
+	base := "/api/p/" + p.ID + "/"
+
+	for _, url := range []string{
+		base + "file?path=vault/secret.md",
+		base + "download?path=vault/secret.md",
+		base + "render?path=vault/secret.md",
+		base + "resolve?path=vault/secret.md",
+		base + "blob?sha=" + sha,
+		base + "render?sha=" + sha,
+	} {
+		rec := doAs(t, h, "GET", url, nil, c["bob"])
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s: %d %s — want 404", url, rec.Code, rec.Body)
+		}
+		if strings.Contains(rec.Body.String(), "the secret") {
+			t.Errorf("%s served the hidden content", url)
+		}
+	}
+
+	// Carol is on the folder's list, so every one of those still works for
+	// her. Without this the suite passes against a hub that hides everything.
+	for _, url := range []string{
+		base + "file?path=vault/secret.md",
+		base + "blob?sha=" + sha,
+	} {
+		if rec := doAs(t, h, "GET", url, nil, c["carol"]); rec.Code != 200 {
+			t.Errorf("carol, who is granted the folder, got %d on %s: %s", rec.Code, url, rec.Body)
+		}
+	}
+	// And bob keeps the rest of the project.
+	if rec := doAs(t, h, "GET", base+"file?path=notes/open.md", nil, c["bob"]); rec.Code != 200 {
+		t.Errorf("bob lost a file outside the rule: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// The tree is the listing every other surface is navigated from: a hidden
+// folder must not appear in it at all, not even as an empty directory.
+func TestSec_Folder_HiddenFolderIsAbsentFromTheTree(t *testing.T) {
+	h, _, c, p, _ := hiddenHub(t)
+	rec := doAs(t, h, "GET", "/api/p/"+p.ID+"/tree", nil, c["bob"])
+	if rec.Code != 200 {
+		t.Fatalf("tree: %d %s", rec.Code, rec.Body)
+	}
+	if strings.Contains(rec.Body.String(), "vault") || strings.Contains(rec.Body.String(), "secret.md") {
+		t.Fatalf("the tree named a hidden folder: %s", rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "open.md") {
+		t.Fatalf("the tree lost a visible file: %s", rec.Body)
+	}
+	if body := doAs(t, h, "GET", "/api/p/"+p.ID+"/tree", nil, c["carol"]).Body.String(); !strings.Contains(body, "secret.md") {
+		t.Fatalf("carol, who is granted the folder, cannot see it in the tree: %s", body)
+	}
+}
+
+// History is a per-path audit feed: an unfiltered row leaks the path, who
+// changed it and when — the same three facts the tree would have leaked.
+func TestSec_Folder_HistoryHidesTheFolder(t *testing.T) {
+	h, _, c, p, _ := hiddenHub(t)
+	for _, url := range []string{
+		"/api/p/" + p.ID + "/history",
+		"/api/p/" + p.ID + "/history?prefix=vault",
+		"/api/p/" + p.ID + "/history?path=vault/secret.md",
+	} {
+		rec := doAs(t, h, "GET", url, nil, c["bob"])
+		if rec.Code != 200 {
+			t.Fatalf("%s: %d %s", url, rec.Code, rec.Body)
+		}
+		if strings.Contains(rec.Body.String(), "vault/secret.md") {
+			t.Errorf("%s leaked a hidden path: %s", url, rec.Body)
+		}
+	}
+	// The visible half of the feed is intact.
+	if body := doAs(t, h, "GET", "/api/p/"+p.ID+"/history", nil, c["bob"]).Body.String(); !strings.Contains(body, "notes/open.md") {
+		t.Fatalf("history lost the visible file: %s", body)
+	}
+}
+
+// Read heat is per-path and drives the Dashboard quadrant. Hidden paths must
+// not appear, and a member must not be able to CONFIRM a hidden path exists by
+// reporting a read of it and watching the count come back.
+func TestSec_Folder_HeatHidesTheFolderAndRefusesReportsAboutIt(t *testing.T) {
+	h, srv, c, p, _ := hiddenHub(t)
+	// permHub does not wire a ledger, and a skipped test is not coverage: the
+	// heat surface is a §Surfaces row like any other, so give it one.
+	ledger, err := OpenReadLedger(filepath.Join(t.TempDir(), "reads.json"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Reads = ledger
+
+	// Alice, who may read the folder, opens the file: a real hidden-path read
+	// in the ledger, so the filter has something to hide rather than an empty
+	// map that would pass either way.
+	if rec := doAs(t, h, "GET", "/api/p/"+p.ID+"/file?path=vault/secret.md", nil, c["alice"]); rec.Code != 200 {
+		t.Fatalf("alice could not read the file: %d %s", rec.Code, rec.Body)
+	}
+	if rec := doAs(t, h, "GET", "/api/p/"+p.ID+"/file?path=notes/open.md", nil, c["alice"]); rec.Code != 200 {
+		t.Fatalf("alice could not read the open file: %d %s", rec.Code, rec.Body)
+	}
+	// Control: the hidden path really is in the ledger, so a failure below is
+	// the filter and not an empty ledger.
+	if body := doAs(t, h, "GET", "/api/p/"+p.ID+"/heat", nil, c["alice"]).Body.String(); !strings.Contains(body, "vault/secret.md") {
+		t.Fatalf("control: the hidden read was never recorded: %s", body)
+	}
+
+	heat := doAs(t, h, "GET", "/api/p/"+p.ID+"/heat", nil, c["bob"])
+	if heat.Code != 200 {
+		t.Fatalf("heat: %d %s", heat.Code, heat.Body)
+	}
+	if strings.Contains(heat.Body.String(), "vault") {
+		t.Errorf("heat named a hidden folder to bob: %s", heat.Body)
+	}
+	if !strings.Contains(heat.Body.String(), "notes/open.md") {
+		t.Errorf("heat lost the visible file: %s", heat.Body)
+	}
+
+	// A member must not be able to CONFIRM a hidden path exists by reporting a
+	// read of it and watching the count come back.
+	rec := doAs(t, h, "POST", "/api/p/"+p.ID+"/reads",
+		map[string]any{"reads": []map[string]any{{"path": "vault/secret.md"}}}, c["bob"])
+	if rec.Code == 200 && !strings.Contains(rec.Body.String(), `"accepted":0`) {
+		t.Errorf("a read report about a hidden path was accepted: %s", rec.Body)
+	}
+}
+
+// A share row carries the path it publishes, so listing one for a folder this
+// account cannot read hands over the name AND the fact that it is public.
+func TestSec_Folder_ShareListHidesLinksIntoTheFolder(t *testing.T) {
+	h, srv, c, p, _ := hiddenHub(t)
+	if srv.Shares == nil {
+		t.Skip("sharing is off in this fixture")
+	}
+	if rec := doAs(t, h, "POST", "/api/p/"+p.ID+"/shares",
+		map[string]any{"path": "vault/secret.md"}, c["alice"]); rec.Code != 200 {
+		t.Fatalf("alice could not mint the link: %d %s", rec.Code, rec.Body)
+	}
+	rec := doAs(t, h, "GET", "/api/p/"+p.ID+"/shares", nil, c["bob"])
+	if rec.Code == 200 && strings.Contains(rec.Body.String(), "vault") {
+		t.Fatalf("the share list named a hidden folder: %s", rec.Body)
+	}
+}
+
+// The loudest version of the leak: a link minted BEFORE the folder was
+// restricted keeps serving the contents to the whole internet. Restricting a
+// folder has to take its links with it.
+func TestSec_Folder_ARestrictedFolderKillsItsOlderShareLinks(t *testing.T) {
+	h, srv, c, p := permHub(t)
+	if srv.Shares == nil {
+		t.Skip("sharing is off in this fixture")
+	}
+	if rec := doAs(t, h, "PUT", "/api/p/"+p.ID+"/upload/content?path=vault/secret.md",
+		[]byte("# the secret\n"), c["bob"]); rec.Code != 200 {
+		t.Fatalf("seed: %d %s", rec.Code, rec.Body)
+	}
+	// bob mints it while the folder is still open to him.
+	rec := doAs(t, h, "POST", "/api/p/"+p.ID+"/shares",
+		map[string]any{"path": "vault/secret.md"}, c["bob"])
+	if rec.Code != 200 {
+		t.Fatalf("mint: %d %s", rec.Code, rec.Body)
+	}
+	var out struct {
+		URL   string `json:"url"`
+		Token string `json:"token"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	token := out.Token
+	if token == "" {
+		if i := strings.LastIndex(out.URL, "/s/"); i >= 0 {
+			token = out.URL[i+3:]
+		}
+	}
+	if token == "" {
+		t.Fatalf("no share token in %s", rec.Body)
+	}
+	// Control: the link works.
+	if got := doAs(t, h, "GET", "/s/"+token, nil, nil); got.Code != 200 {
+		t.Fatalf("control: the fresh link does not serve: %d %s", got.Code, got.Body)
+	}
+	// Alice restricts the folder away from bob.
+	rule := map[string]any{"prefix": "vault", "default": PermNone}
+	if r2 := doAs(t, h, "PUT", "/api/p/"+p.ID+"/folders", rule, c["alice"]); r2.Code != 200 {
+		t.Fatalf("restrict: %d %s", r2.Code, r2.Body)
+	}
+	got := doAs(t, h, "GET", "/s/"+token, nil, nil)
+	if got.Code == 200 {
+		t.Fatalf("a public link kept serving a folder that was restricted: %s", got.Body)
+	}
+	// Same 404 and the same words as a bogus token: a stranger holding a dead
+	// link must not be distinguishable from a stranger guessing one.
+	if got.Code != http.StatusNotFound {
+		t.Errorf("dead link answered %d, want the ordinary 404", got.Code)
+	}
+}
+
+// TestSec_Folder_OrgShareAuditHidesLinksIntoAHiddenFolder.
+//
+// The org-wide share audit walks every project the caller can read and was
+// gated on the PROJECT level only. A share row carries the public /s/ token,
+// and /s/ answers to the link's creator rather than to whoever presents it —
+// so a member denied a folder could read the token out of this list and fetch
+// the contents through a door that never asks who they are.
+//
+// The route is not behind proj(), so the per-request filter every other read
+// surface uses was inert here.
+func TestSec_Folder_OrgShareAuditHidesLinksIntoAHiddenFolder(t *testing.T) {
+	h, srv, c, p, _ := hiddenHub(t)
+	if srv.Shares == nil {
+		t.Skip("sharing is off in this fixture")
+	}
+	// Alice, who may read the folder, publishes a file inside it.
+	rec := doAs(t, h, "POST", "/api/p/"+p.ID+"/shares",
+		map[string]any{"path": "vault/secret.md"}, c["alice"])
+	if rec.Code != 200 {
+		t.Fatalf("mint: %d %s", rec.Code, rec.Body)
+	}
+	// ...and one outside it, so the control is a filter and not an empty list.
+	if r2 := doAs(t, h, "POST", "/api/p/"+p.ID+"/shares",
+		map[string]any{"path": "notes/open.md"}, c["alice"]); r2.Code != 200 {
+		t.Fatalf("mint open: %d %s", r2.Code, r2.Body)
+	}
+
+	audit := doAs(t, h, "GET", "/api/orgs/"+p.Org+"/shares", nil, c["bob"])
+	if audit.Code != 200 {
+		t.Fatalf("org share audit: %d %s", audit.Code, audit.Body)
+	}
+	if strings.Contains(audit.Body.String(), "vault") {
+		t.Fatalf("the org share audit handed bob a link into a hidden folder: %s", audit.Body)
+	}
+	if !strings.Contains(audit.Body.String(), "notes/open.md") {
+		t.Fatalf("the audit lost a link bob may see: %s", audit.Body)
+	}
+	// Carol is on the folder's list and still sees both.
+	if body := doAs(t, h, "GET", "/api/orgs/"+p.Org+"/shares", nil, c["carol"]).Body.String(); !strings.Contains(body, "vault") {
+		t.Fatalf("carol, who is granted the folder, lost her link: %s", body)
+	}
+}
+
+// TestSec_Folder_ResolveDoesNotLeakMovesInsideAHiddenFolder.
+//
+// /resolve is the "where did this file go?" door and it does NOT go through
+// lookup, so it needed the filter of its own. A LIVE path inside a hidden
+// folder 404s here by accident — the handler only answers about paths that
+// moved — which is exactly why the Phase 2 sweep passed over it. A MOVED one
+// answered with the new name.
+func TestSec_Folder_ResolveDoesNotLeakMovesInsideAHiddenFolder(t *testing.T) {
+	h, _, c, p, _ := hiddenHub(t)
+	base := "/api/p/" + p.ID + "/"
+
+	// Alice moves a file within the hidden folder: put(new) + delete(old).
+	if rec := doAs(t, h, "PUT", base+"upload/content?path=vault/renamed.md",
+		[]byte("# the secret\n"), c["alice"]); rec.Code != 200 {
+		t.Fatalf("seed the move target: %d %s", rec.Code, rec.Body)
+	}
+	if rec := doAs(t, h, "POST", base+"remove",
+		map[string]any{"path": "vault/secret.md"}, c["alice"]); rec.Code != 200 {
+		t.Fatalf("remove the move source: %d %s", rec.Code, rec.Body)
+	}
+
+	// Control: the move is resolvable for someone who may read the folder.
+	got := doAs(t, h, "GET", base+"resolve?path=vault/secret.md", nil, c["carol"])
+	if got.Code != 200 || !strings.Contains(got.Body.String(), "vault/renamed.md") {
+		t.Fatalf("control: carol cannot resolve a move she may see: %d %s", got.Code, got.Body)
+	}
+
+	got = doAs(t, h, "GET", base+"resolve?path=vault/secret.md", nil, c["bob"])
+	if got.Code != http.StatusNotFound {
+		t.Fatalf("resolve answered a denied member: %d %s", got.Code, got.Body)
+	}
+	if strings.Contains(got.Body.String(), "renamed") {
+		t.Fatalf("resolve leaked a file name from inside a hidden folder: %s", got.Body)
+	}
+}
+
+// TestSec_Folder_FolderHintDoesNotEnumerateHiddenFilenames.
+//
+// handleShareCreate answers "share links are per-file; X is a folder — try a
+// file inside it, e.g. Y" and Y came from the UNFILTERED snapshot.
+//
+// The sharp version is the hidden folder itself: a rule on "vault/" does not
+// match the bare path "vault", and correctly so — a FILE named "vault" is not
+// inside the folder — so the write gate lets the request through and the hint
+// names a file from inside. One POST per folder, and the names come out.
+func TestSec_Folder_FolderHintDoesNotEnumerateHiddenFilenames(t *testing.T) {
+	h, _, c, p, _ := hiddenHub(t)
+	rec := doAs(t, h, "POST", "/api/p/"+p.ID+"/shares",
+		map[string]any{"path": "vault"}, c["bob"])
+	if strings.Contains(rec.Body.String(), "secret.md") {
+		t.Fatalf("the folder hint enumerated a hidden filename: %d %s", rec.Code, rec.Body)
+	}
+	// The same hint still works for a folder the caller can actually read —
+	// otherwise this "fix" is just breaking the message.
+	rec = doAs(t, h, "POST", "/api/p/"+p.ID+"/shares",
+		map[string]any{"path": "notes"}, c["bob"])
+	if !strings.Contains(rec.Body.String(), "open.md") {
+		t.Fatalf("the folder hint stopped working for a visible folder: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// A file moved OUT of a hidden folder carries its hidden history with it, and
+// restore resolves a version through that move chain. Restoring one would
+// paste content the caller was never allowed to see onto a path they can.
+//
+// Defence in depth, not a live hole: it needs the version's sha, and history,
+// /blob and /render?sha= all filter it out — so there is no way to learn one,
+// only to already know it. Pinned anyway, because "unreachable today" is a
+// property of the other three doors, not of this one.
+func TestSec_Folder_RestoreRefusesAVersionFromItsHiddenPast(t *testing.T) {
+	h, _, c, p, v1SHA := hiddenHub(t)
+	base := "/api/p/" + p.ID + "/"
+
+	// A real move needs the SAME blob at both ends — put(new, B) then
+	// delete(old whose content was B) is what buildMoveIndex recognises. An
+	// upload of different content plus a remove is two unrelated ops, and a
+	// test built that way passes whatever this handler does.
+	//
+	// So: a second version inside the hidden folder, then that version moved
+	// out. v1SHA is now a version that exists ONLY in the hidden past.
+	if rec := doAs(t, h, "PUT", base+"upload/content?path=vault/secret.md",
+		[]byte("# v2\n"), c["alice"]); rec.Code != 200 {
+		t.Fatalf("seed v2: %d %s", rec.Code, rec.Body)
+	}
+	if rec := doAs(t, h, "PUT", base+"upload/content?path=notes/moved.md",
+		[]byte("# v2\n"), c["alice"]); rec.Code != 200 {
+		t.Fatalf("seed the move target: %d %s", rec.Code, rec.Body)
+	}
+	if rec := doAs(t, h, "POST", base+"remove",
+		map[string]any{"path": "vault/secret.md"}, c["alice"]); rec.Code != 200 {
+		t.Fatalf("remove the source: %d %s", rec.Code, rec.Body)
+	}
+	// Control: the move really is one, so restore CAN reach the hidden past.
+	// Carol may read the folder, so for her the version resolves and restores.
+	if rec := doAs(t, h, "POST", base+"restore",
+		map[string]any{"path": "notes/moved.md", "sha": v1SHA}, c["carol"]); rec.Code != 200 {
+		t.Fatalf("control: the move chain does not reach the hidden past, so this test "+
+			"would pass whatever the handler does: %d %s", rec.Code, rec.Body)
+	}
+
+	// bob may write notes/moved.md, and hiddenSHA is a version that only ever
+	// existed at vault/secret.md.
+	// Put it back to v2 so bob's attempt is the one that matters.
+	if rec := doAs(t, h, "PUT", base+"upload/content?path=notes/moved.md",
+		[]byte("# v2\n"), c["alice"]); rec.Code != 200 {
+		t.Fatalf("reset: %d %s", rec.Code, rec.Body)
+	}
+	rec := doAs(t, h, "POST", base+"restore",
+		map[string]any{"path": "notes/moved.md", "sha": v1SHA}, c["bob"])
+	if rec.Code == 200 {
+		t.Fatalf("bob restored a version that only ever existed inside a hidden folder: %s", rec.Body)
+	}
+	if body := doAs(t, h, "GET", base+"file?path=notes/moved.md", nil, c["bob"]).Body.String(); strings.Contains(body, "the secret") {
+		t.Fatalf("the hidden content landed on a visible path: %s", body)
+	}
+}
+
+// TestSec_Folder_RunCardDoesNotLeakHiddenPathsAnAgentRead.
+//
+// The run card joins a run's writes to its reads: /heat?session=&device=
+// answers with the paths that agent session read. History publishes each op's
+// session id, so a run that WROTE a visible file hands its session to every
+// project member — and this route then answered with every path it read,
+// including inside folders the asker cannot see.
+//
+// The ingest filter cannot prevent this: the reporting device legitimately
+// could read the file. Only the query side can.
+func TestSec_Folder_RunCardDoesNotLeakHiddenPathsAnAgentRead(t *testing.T) {
+	h, srv, c, p, _ := hiddenHub(t)
+	ledger, err := OpenReadLedger(filepath.Join(t.TempDir(), "reads.json"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Reads = ledger
+	ledger.WithSessions(OpenSessionReadRepo(filepath.Join(t.TempDir(), "sessions.json")), 0)
+
+	const dev = "carol-laptop"
+	const session = "claude-session-abc"
+	secRegisterDevice(t, h, p.ID, c["carol"], dev, dev, "darwin")
+
+	// Carol's agent reads one file in the hidden folder and one outside it.
+	rec := sec12agDo(t, h, "POST", "/api/p/"+p.ID+"/reads", map[string]any{
+		"reads": []map[string]any{
+			{"path": "vault/secret.md", "session": session},
+			{"path": "notes/open.md", "session": session},
+		},
+	}, c["carol"], map[string]string{"X-Bdrive-Device": dev})
+	if rec.Code != 200 {
+		t.Fatalf("report: %d %s", rec.Code, rec.Body)
+	}
+
+	// Control: carol's own run card names both, or this measures an empty map.
+	url := "/api/p/" + p.ID + "/heat?session=" + session + "&device=" + dev
+	if body := doAs(t, h, "GET", url, nil, c["carol"]).Body.String(); !strings.Contains(body, "vault/secret.md") {
+		t.Fatalf("control: the hidden read was never recorded: %s", body)
+	}
+
+	got := doAs(t, h, "GET", url, nil, c["bob"])
+	if strings.Contains(got.Body.String(), "vault") {
+		t.Fatalf("the run card leaked a path inside a hidden folder: %s", got.Body)
+	}
+	if !strings.Contains(got.Body.String(), "notes/open.md") {
+		t.Fatalf("the run card lost the path bob may see: %s", got.Body)
+	}
+}

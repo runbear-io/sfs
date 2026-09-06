@@ -323,8 +323,66 @@ func (r *fileProjectRepo) PutMeta(p Project) error {
 	if _, err := r.reload(); err != nil {
 		return err
 	}
-	p.Perms = r.byID[p.ID].Perms
+	// Folders is preserved for exactly the reason Perms is: a rename carries
+	// the writer's whole in-memory Project, so without this a stale process
+	// renaming a project resurrects every folder rule an admin removed.
+	p.Perms, p.Folders = r.byID[p.ID].Perms, r.byID[p.ID].Folders
 	r.byID[p.ID] = p
+	return r.write()
+}
+
+// PutFolder writes one folder rule, leaving the project's other rules and its
+// project-level grants exactly as they are on disk.
+func (r *fileProjectRepo) PutFolder(project string, rule FolderRule) error {
+	if err := storable(project, rule.Prefix); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, err := r.reload(); err != nil {
+		return err
+	}
+	p, ok := r.byID[project]
+	if !ok {
+		return fmt.Errorf("no such project %q", project)
+	}
+	p = p.clone()
+	replaced := false
+	for i := range p.Folders {
+		if p.Folders[i].Prefix == rule.Prefix {
+			p.Folders[i] = rule.clone()
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		p.Folders = append(p.Folders, rule.clone())
+	}
+	r.byID[project] = p
+	return r.write()
+}
+
+// DeleteFolder removes one rule. A prefix with no rule is not an error: the
+// caller's intent (this prefix carries no rule) already holds.
+func (r *fileProjectRepo) DeleteFolder(project, prefix string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, err := r.reload(); err != nil {
+		return err
+	}
+	p, ok := r.byID[project]
+	if !ok {
+		return fmt.Errorf("no such project %q", project)
+	}
+	p = p.clone()
+	kept := p.Folders[:0]
+	for _, f := range p.Folders {
+		if f.Prefix != prefix {
+			kept = append(kept, f)
+		}
+	}
+	p.Folders = kept
+	r.byID[project] = p
 	return r.write()
 }
 

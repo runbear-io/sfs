@@ -449,6 +449,26 @@ its first admin, and **org owners are implicitly admin on every project in
 their org**, so nobody can lock them out. Grants are org members only, and
 a project always keeps at least one admin.
 
+A **folder rule** (open the folder and press **Share**) gives one folder inside a
+project different access from the rest of it — "everyone can write this
+project, except `designs/`, which most people may only read". A rule names a
+folder prefix, the level everyone else gets there, and optional per-person
+exceptions; the longest matching rule wins, rules never merge, and org owners
+are unaffected because they are admin everywhere. Editing a read-only folder
+locally is not lost and does not wedge sync: the project's version is put back
+on the next cycle and your version is kept beside it as `name (local, not
+synced).ext`, which `bdrive sync` names.
+
+A folder set to **no access** stops existing for everyone outside its list: no
+tree entry, 404 on every viewer URL, no history, no heat, no share links (older
+ones stop working), and **nothing synced to their disks** — the hub filters each
+device's download to the ops it may know about. What stays visible is the
+folder's *name*: a device syncs a real filesystem and has to know which paths it
+must not write, or a colliding local file would wedge its sync. If the name must
+be secret too, use a separate project. A `bdrive` older than folder permissions
+is refused on such a project (with an upgrade message) rather than silently
+missing part of it.
+
 Two things follow on the **device** side, because a refusal is not the same
 as being offline (see `bdrive status`):
 

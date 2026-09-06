@@ -47,8 +47,11 @@ test("guide: manual fallback has the full command list and the docs link", async
     els.map((e) => e.textContent).join("\n"),
   );
   expect(manual).toContain("brew install runbear-io/tap/beardrive");
-  expect(manual).toContain("bdrive login http://localhost:8993");
-  expect(manual).toContain(`bdrive init --project ${pid}`);
+  // Two commands, not three. INSTALL_FOR_AGENTS.md is headed "Do not run a
+  // login command" — init --server signs the device in itself — so the page
+  // that links to that doc must not print the thing it forbids.
+  expect(manual).toContain(`bdrive init --server http://localhost:8993 --project ${pid}`);
+  expect(manual).not.toContain("bdrive login");
   expect(manual).not.toContain("bdrive hooks install"); // init registers hooks itself
   await expect(page.locator('.gd-manual a[href="https://docs.beardrive.ai/manual/install/"]')).toHaveCount(1);
   // BEA-142: the prose above those three commands must not claim there is one,

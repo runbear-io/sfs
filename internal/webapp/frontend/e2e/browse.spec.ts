@@ -245,8 +245,13 @@ test("share mints a public link that serves the file, revoke kills it", async ({
   const pid = await wikiId(page);
   await page.goto(`/${pid}/guide.md`);
   await page.click("#share-btn");
+  // Opening it publishes nothing: the dialog shows state, the select changes it.
+  await expect(page.locator(".modal-url")).toHaveCount(0);
+  await page.selectOption("#share-public", "public");
   // BEA-32: the modal hands over the URL and nothing destructive — Revoke is
   // the banner's, and two of them for one link is what this asserts away.
+  // It survives the redesign because revoking is the select going back to
+  // Restricted, not a second Revoke button.
   await expect(page.locator(".modal .ai-del")).toHaveCount(0);
   const url = await page.locator(".modal-url").textContent();
   expect(url).toContain("/s/");
@@ -299,6 +304,7 @@ test("share on a file holding a key asks before it mints, and Cancel mints nothi
 
   // Cancel: the dialog names the finding, and no link exists afterwards.
   await page.click("#share-btn");
+  await page.selectOption("#share-public", "public");
   const dialog = page.locator(".modal", { hasText: "This file may contain credentials" });
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText("an AWS access key (line 3)");
@@ -308,12 +314,14 @@ test("share on a file holding a key asks before it mints, and Cancel mints nothi
   // …and it must never echo the thing it found.
   await expect(dialog).not.toContainText("AKIA");
   await dialog.locator("button:has-text('Cancel')").click();
+  // The dialog is still open, and still shows no link: nothing was minted.
+  await expect(page.locator(".modal")).toBeVisible();
   await expect(page.locator(".modal-url")).toHaveCount(0);
   const before = await (await page.request.get(`/api/p/${pid}/shares`)).json();
   expect(before.shares.filter((s: { path: string }) => s.path === "deploy.md")).toHaveLength(0);
 
-  // Share anyway: the same click, carried through.
-  await page.click("#share-btn");
+  // Share anyway: the same choice, carried through.
+  await page.selectOption("#share-public", "public");
   await page.locator(".modal button:has-text('Share anyway')").click();
   const url = (await page.locator(".modal-url").textContent())!;
   expect(url).toContain("/s/");
@@ -321,7 +329,8 @@ test("share on a file holding a key asks before it mints, and Cancel mints nothi
   expect(publicRes.status()).toBe(200);
   await page.click(".modal button:has-text('Done')");
 
-  // Already public: a second Share hands back the same link without asking.
+  // Already public: opening it shows the live link, with no scan — nothing is
+  // being minted, so there is nothing to warn about.
   await page.reload();
   await page.click("#share-btn");
   await expect(page.locator(".modal", { hasText: "This file may contain credentials" })).toHaveCount(0);
@@ -338,6 +347,7 @@ test("share dialog sets an expiry on the link it just minted", async ({ page }) 
   const pid = await wikiId(page);
   await page.goto(`/${pid}/index.md`);
   await page.click("#share-btn");
+  await page.selectOption("#share-public", "public");
   const url = (await page.locator(".modal-url").textContent())!;
   await expect(page.locator(".modal-expiry-note")).toHaveText("no expiry");
 
@@ -435,6 +445,7 @@ test("public link: the file page says it is shared, and revokes without a reload
   await expect(page.locator(".share-banner")).toHaveCount(0);
 
   await page.click("#share-btn");
+  await page.selectOption("#share-public", "public");
   const url = (await page.locator(".modal-url").textContent())!;
   await page.click(".modal button:has-text('Done')");
 

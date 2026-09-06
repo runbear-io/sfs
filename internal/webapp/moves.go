@@ -343,12 +343,22 @@ func (s *Server) handleResolve(v *volume, w http.ResponseWriter, r *http.Request
 		storageErr(w, http.StatusBadGateway, "content temporarily unavailable", err)
 		return
 	}
-	if _, live := snap.files[p]; !live {
-		if to, ok := resolveForward(snap.moves, snap.files, p); ok {
+	// This door does not go through lookup, so it needs the folder filter
+	// itself. A live path inside a hidden folder happens to 404 here already
+	// (this handler only answers about paths that MOVED), but a moved one does
+	// not: /resolve?path=vault/old.md would answer "vault/new.md" and hand a
+	// denied member a file name from inside the folder — and, via
+	// resolveFolder, the folder's new name too.
+	//
+	// Both ends are checked. The source, because answering at all confirms
+	// that path once existed; the target, because it is what the answer names.
+	vis := s.visibility(r)
+	if _, live := snap.files[p]; !live && vis.canRead(p) {
+		if to, ok := resolveForward(snap.moves, snap.files, p); ok && vis.canRead(to) {
 			writeJSON(w, map[string]string{"to": to, "kind": "file"})
 			return
 		}
-		if to, ok := resolveFolder(snap.moves, snap.files, p); ok {
+		if to, ok := resolveFolder(snap.moves, snap.files, p); ok && vis.canRead(to) {
 			writeJSON(w, map[string]string{"to": to, "kind": "folder"})
 			return
 		}

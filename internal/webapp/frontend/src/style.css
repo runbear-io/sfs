@@ -465,7 +465,14 @@ button, input, a.btn { font-family: inherit; }
 .onboard { max-width: 560px; margin: var(--hero-top) auto 0; }
 .onboard h1 { font-size: 25px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 8px; color: #f4f6f9; }
 .onboard > p { color: var(--text-dim); margin: 0 0 28px; font-size: 14px; }
-.ob-card { background: var(--bg-side); border: 1px solid var(--border); border-radius: var(--r-card); padding: 20px 22px; margin-bottom: 14px; }
+/* One card shape, two surfaces. The hub stacks these in a column and the
+   desktop Done frame lays them in a row, with different backgrounds and
+   different ways of marking the lead — those are two designs, not an
+   accident, and merging them would be a silent redesign. What was genuinely
+   duplicated is the box itself, so the border and the radius live here once
+   and cannot drift apart. */
+.ob-card, .setup-card { border: 1px solid var(--border); border-radius: var(--r-card); }
+.ob-card { background: var(--bg-side); padding: 20px 22px; margin-bottom: 14px; }
 .ob-card h3 { margin: 0 0 6px; font-size: 14.5px; font-weight: 600; }
 .ob-card p { margin: 0 0 14px; font-size: 13px; color: var(--text-dim); }
 /* The create-here card leads; the agent-paste card follows it. Accent edge
@@ -656,6 +663,14 @@ a.ai-main:hover { color: var(--accent); }
    an ordinary file with an alarming name, so the row says so before the
    reader has to guess from the suffix. */
 .dl-conflict { flex: none; font-size: 10.5px; line-height: 1; letter-spacing: .02em; text-transform: uppercase; padding: 3px 6px; border-radius: 999px; border: 1px solid var(--accent-dim); background: var(--glow); color: var(--accent-bright); white-space: nowrap; }
+/* Same pill as .dl-conflict, in the muted palette: a restricted folder is a
+   statement of fact, not a warning — the conflict tag earns the accent colour
+   because something needs looking at. */
+/* The tree's version: a glyph, because a 28px row already carries chevron,
+   guides, icon and label. Same fact, a tenth of the width. */
+.trestricted { flex: none; display: inline-flex; align-items: center; margin-left: 5px; color: var(--text-faint); }
+.trestricted svg { width: 11px; height: 11px; }
+.dl-restricted { flex: none; font-size: 10.5px; line-height: 1; letter-spacing: .02em; text-transform: uppercase; padding: 3px 6px; border-radius: 999px; border: 1px solid var(--border-2); background: var(--surface); color: var(--text-dim); white-space: nowrap; }
 .heatdot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
 .heatdot.lvl1 { opacity: .3; }
 .heatdot.lvl2 { opacity: .55; }
@@ -1241,6 +1256,38 @@ pre.plain { background: var(--code-bg); border: 1px solid var(--border); border-
 .filecard .name { font-size: 1.2em; color: var(--text); margin-bottom: .3em; }
 .filecard .btn { margin-top: 14px; }
 
+/* ---- Share dialog (components/ShareDialog.tsx) ----
+   Wider than the 460px house modal: it carries two sections and a row of
+   email + level + button, which the narrow width wraps into a column. */
+.modal-wide { width: min(600px, calc(100vw - 40px)); }
+.sd-head {
+  font-size: 12.5px; font-weight: 600; color: var(--text-dim);
+  margin: 18px 0 8px; letter-spacing: .01em;
+}
+.sd-head:first-of-type { margin-top: 4px; }
+/* .modal scrolls as a WHOLE (there is no sticky footer), so a folder with a
+   dozen exceptions would push Copy link / Done out of view. Scroll the list
+   instead and the actions stay put. */
+.modal .admin-list { max-height: 220px; overflow-y: auto; }
+.sd-avatar {
+  width: 22px; height: 22px; flex: none; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: #fff; font-size: 10.5px; font-weight: 700;
+}
+.sd-add { gap: 8px; }
+.sd-add-input {
+  flex: 1; min-width: 0; height: 28px; padding: 0 9px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 6px; color: var(--text); font: inherit; font-size: 12.5px;
+}
+.sd-warn { margin: 14px 0 6px; font-size: 13.5px; color: var(--text); }
+.modal .ps-row { margin-bottom: 10px; }
+.modal .ps-note { margin-bottom: 12px; }
+@media (max-width: 640px) {
+  .sd-add { flex-wrap: wrap; }
+  .sd-add-input { flex: 0 0 100%; height: 44px; }
+}
+
 /* ---- desktop onboarding (components/Setup.tsx, storyboard frames 2, 5-9) --
    Same vocabulary as .onboard above: one column, hero spacing, house tokens.
    The tree preview is the screen's argument, so it gets the honey accent. */
@@ -1298,7 +1345,7 @@ pre.plain { background: var(--code-bg); border: 1px solid var(--border); border-
 .setup-log li.ok { color: var(--add); }
 .setup-log li.ok::before { content: "✓ "; }
 .setup-cards { display: flex; gap: 12px; margin-top: 18px; align-items: stretch; }
-.setup-card { flex: 1; background: var(--bg-raise); border: 1px solid var(--border); border-radius: var(--r-card);
+.setup-card { flex: 1; background: var(--bg-raise);
   padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .setup-card-lead { flex: 1.4; border-color: rgba(245,166,35,.4); box-shadow: 0 0 0 3px var(--glow); }
 .setup-card h3 { font-size: 14px; font-weight: 600; margin: 0; color: var(--text); }

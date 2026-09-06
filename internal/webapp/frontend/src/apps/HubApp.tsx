@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { postJSON } from "../api/http";
+import { desktopPost, postJSON } from "../api/http";
 import type { InviteAccepted, Project, ProjectCreated, ServerConfig } from "../api/types";
 import { useFetchProjects, useOrgs, usePending, usePermissions, useProjects, useHubRefresh } from "../hooks/useHub";
 import { decodePath, parseRoute, projectByName, urlForPath, urlForView } from "../router";
@@ -196,7 +196,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   const qc = useQueryClient();
   const desktopAuth = (path: string, waitMsg?: string) => {
     if (waitMsg) toast(waitMsg);
-    void fetch(path, { method: "POST", headers: { "X-Bdrive-Desktop": "1" } })
+    void desktopPost(path)
       .catch(() => {})
       .finally(() => qc.invalidateQueries({ queryKey: ["config"] }));
   };
@@ -264,15 +264,11 @@ export default function HubApp({ config }: { config: ServerConfig }) {
         topbar={<Topbar />}
       >
         <Page>
-          <EmptyState
-            onNew={newProject}
-            canCreate={canCreate}
-            signIn={
-              config.desktop && !config.me
-                ? () => desktopAuth("/api/desktop/login", "Finish signing in in your browser…")
-                : undefined
-            }
-          />
+          {/* No desktop sign-in branch here: on desktop, zero projects is
+              onboarding and the redirect above already took it to /setup,
+              whose Welcome frame owns that button. This block is hub-only in
+              practice, and the branch that pretended otherwise was dead. */}
+          <EmptyState onNew={newProject} canCreate={canCreate} />
         </Page>
         {newProjectDialog}
       </AppShell>

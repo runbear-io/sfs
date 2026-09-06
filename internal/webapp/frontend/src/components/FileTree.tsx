@@ -32,9 +32,16 @@ export function FileTree(props: {
   onToggle: (path: string) => void;
   currentPath: string;
   listingShowing: boolean; // current view is a folder listing
+  /* Prefixes of folders carrying an access rule. The tree is the ONLY place a
+     top-level folder appears — the project root renders the connect guide and
+     the dashboard, not a listing — so without a mark here a restricted
+     top-level folder has nowhere to announce itself. A glyph, not the listing's
+     text pill: these rows are 28px and already carry chevron, guides, icon and
+     label. */
+  restricted: Set<string>;
   onOpen: (path: string) => void;
 }) {
-  const { root, expanded, onToggle, currentPath, listingShowing, onOpen } = props;
+  const { root, expanded, onToggle, currentPath, listingShowing, restricted, onOpen } = props;
   const scrollRef = useRef<HTMLElement>(null);
 
   const rows = useMemo(() => flatten(root, expanded), [root, expanded]);
@@ -114,6 +121,16 @@ export function FileTree(props: {
                 <Icon name={n.dir ? "folder" : "doc"} />
               </span>
               <span className="label">{n.name}</span>
+              {n.dir && restricted.has(n.path) && (
+                <span
+                  className="trestricted"
+                  role="img"
+                  aria-label={n.name + " is a restricted folder"}
+                  title="Restricted — not everyone in the workspace has the same access here"
+                >
+                  <Icon name="lock" />
+                </span>
+              )}
             </div>
           );
         })}
