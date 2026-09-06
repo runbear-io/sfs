@@ -30,6 +30,9 @@
     "react-hook-form": "^7.82.0",
     "sonner": "^2.0.7",
     "tailwind-merge": "^3.6.0",
+    "y-codemirror.next": "^0.3.6",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.32",
     "zod": "^4.4.3"
   },
   "devDependencies": {

@@ -157,6 +157,9 @@ type Server struct {
 	presOnce sync.Once
 	pres     *presenceHub // who is looking at what (presence.go)
 
+	colOnce sync.Once
+	col     *collabHub // per-document editing relay (collab.go)
+
 	resMu  sync.Mutex
 	grants []grant // outstanding presigned upload reservations (reserve.go)
 
@@ -866,6 +869,10 @@ func (s *Server) Handler() http.Handler {
 		// Saying "I am reading this" is not a write — a read-only member is
 		// exactly who a teammate most wants to see on a file.
 		mux.HandleFunc("POST "+prefix+"presence", resolve(PermRead, s.handlePresence))
+		// Co-editing is a write channel: a read-only member has nothing to
+		// send on it, so both halves need write rather than read.
+		mux.HandleFunc("GET "+prefix+"collab", resolve(PermWrite, s.handleCollabStream))
+		mux.HandleFunc("POST "+prefix+"collab", resolve(PermWrite, s.handleCollabPost))
 		mux.HandleFunc("POST "+prefix+"upload/init", resolve(PermWrite, s.handleUploadInit))
 		mux.HandleFunc("PUT "+prefix+"upload/content", resolve(PermWrite, s.handleUploadContent))
 		mux.HandleFunc("POST "+prefix+"upload/commit", resolve(PermWrite, s.handleUploadCommit))

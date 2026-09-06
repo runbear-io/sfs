@@ -25,6 +25,7 @@ import { hasMermaid, renderMermaid } from "../lib/mermaid";
 import { secretsBadge, type SecretFinding } from "../lib/secrets";
 import { Icon } from "./shell";
 import { Editor, type SaveState } from "./Editor";
+import type { CollabStatus } from "../lib/collab";
 
 export function FileView(props: {
   apiBase: string;
@@ -185,7 +186,10 @@ function EditView(props: Parameters<typeof FileView>[0]) {
   const fileURL = fileURLFor(apiBase, path);
   const { data, error } = useTextAt(fileURL, ["text", fileURL], true, false);
   const [state, setState] = useState<SaveState>("clean");
-  // A peer's write that arrived while this buffer was open. Advisory only.
+  const [collab, setCollab] = useState<CollabStatus>("connecting");
+  // A peer's write that arrived while this buffer was open. Advisory only —
+  // and only interesting when it did NOT come through the shared document:
+  // a co-editor's keystrokes are already in the buffer.
   const [peerWrote, setPeerWrote] = useState(false);
   const mine = useRef(false);
 
@@ -206,7 +210,7 @@ function EditView(props: Parameters<typeof FileView>[0]) {
 
   useEffect(() => {
     onMeta(
-      <span id="editor-state" data-state={state}>
+      <span id="editor-state" data-state={state} data-collab={collab}>
         {state === "saving"
           ? "saving…"
           : state === "dirty"
@@ -245,6 +249,7 @@ function EditView(props: Parameters<typeof FileView>[0]) {
           mine.current = true;
         }}
         onStateChange={setState}
+        onCollab={setCollab}
       />
     </>
   );

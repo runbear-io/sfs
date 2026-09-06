@@ -1345,3 +1345,31 @@ pre.plain { background: var(--code-bg); border: 1px solid var(--border); border-
   color: var(--text-dim);
   font-size: 13px;
 }
+
+/* Remote cursors and selections (y-codemirror.next). Each peer gets a colour
+   from awareness; these only place and size the marks. */
+.cm-host .cm-ySelection { opacity: 0.35; }
+.cm-host .cm-ySelectionCaret {
+  position: relative;
+  border-left: 1px solid currentColor;
+  border-right: 1px solid currentColor;
+  margin-left: -1px;
+  margin-right: -1px;
+  box-sizing: border-box;
+}
+.cm-host .cm-ySelectionInfo {
+  position: absolute;
+  top: -1.05em;
+  left: -1px;
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 0 4px;
+  border-radius: 3px 3px 3px 0;
+  color: #fff;
+  white-space: nowrap;
+  opacity: 0; /* named only on hover: a live label over every keystroke is noise */
+  transition: opacity 120ms;
+  pointer-events: none;
+  user-select: none;
+}
+.cm-host .cm-ySelectionCaret:hover .cm-ySelectionInfo { opacity: 1; }
