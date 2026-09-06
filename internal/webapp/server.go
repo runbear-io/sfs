@@ -925,6 +925,12 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) frontend(static fs.FS) http.HandlerFunc {
 	files := http.FileServerFS(static)
 	index, _ := fs.ReadFile(static, "index.html")
+	// Split the shell around its hardcoded title once, so a per-URL <title>
+	// and og:* block can be spliced into the head without editing (or
+	// rebuilding) frontend/. If the marker is ever gone, `marked` is false
+	// and every request degrades to today's untouched bytes rather than to a
+	// mangled page.
+	pre, post, marked := strings.Cut(string(index), "<title>BearDrive</title>")
 	return func(w http.ResponseWriter, r *http.Request) {
 		upath := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
 		// This document carries the session cookie and drives share creation,
@@ -1000,7 +1006,21 @@ func (s *Server) frontend(static fs.FS) http.HandlerFunc {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(index)
+		// Name the page for unfurlers and crawlers, which never run the JS
+		// that would otherwise set it. Name-derived only: this document is
+		// served with no session, so nothing from inside a file goes in it.
+		// Cache-Control is no-cache here (set above), so varying the head per
+		// URL cannot be cached across URLs; assets/* returned long ago.
+		title := ""
+		if marked {
+			title = s.shellTitle(upath)
+		}
+		if title == "" {
+			w.Write(index)
+			return
+		}
+		io.WriteString(w, pre+titleTag(title)+
+			ogMeta(title, "", "", "website", requestBaseURL(r)+r.URL.EscapedPath())+post)
 	}
 }
 

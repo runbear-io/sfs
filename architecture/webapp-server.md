@@ -337,9 +337,20 @@ classDiagram
         &lt;&lt;shares.go, the .md branch&gt;&gt;
         body contains language-mermaid?
         → module script tag, else ""
-        sharedMarkdownShell verb 2 of 4
+        sharedMarkdownShell verb 3 of 5
     }
     note for mermaidTag "A share page is a zero-JavaScript document and stays one unless the document it renders actually has a diagram — the server already holds the rendered HTML, so it can decide. The tag is a MODULE, which only loads because frontend() now sets Access-Control-Allow-Origin on real assets: under this page's `sandbox allow-scripts` the origin is opaque, so a module and every import() it makes are fetched with Origin: null. The CSP itself is unchanged, and no allow-same-origin was added — the sandbox is what keeps shared content off the hub's origin"
+
+    class openGraph {
+        &lt;&lt;og.go&gt;&gt;
+        ogMeta(title, desc, image, type, url) → meta block
+        titleTag(s) → &lt;title&gt;
+        Server.shellTitle(upath) → a name, or empty for today
+        shareDescription(pairs, body) → fm or 1st para, ≤200
+        shareImage(body) → 1st absolute http(s) img
+        sharedMarkdownShell verb 2 of 5
+    }
+    note for openGraph "Unfurlers run no JavaScript, so both injections are server-side; frontend/ and static/ are untouched, which is why go build still needs no Node. The asymmetry is the point: the SPA shell is served with NO session to anyone holding a URL, so it gets name-derived tags only (basename + project name, no storage access — shellTitle reads the URL and one registry entry, behind a projectIDRe guard so a non-project URL never reaches the mutex). Content-derived tags (description, image) live on the markdown share page alone, where the bytes are already public. og:image insists on an absolute http(s) src because RenderMarkdown does no src rewriting, so a relative one is already broken on the live page. .html and binary shares are byte-identical to before — the hub still never injects into raw HTML. An unresolvable project id falls back to the untouched shell, so the tag is not an existence oracle"
 
     class DeviceRegistry {
         -repo DeviceRepo
@@ -506,6 +517,10 @@ classDiagram
     projectPerm ..> Directory : org role
     ShareDB ..> Share
     ShareDB ..> mermaidTag : markdown shares only
+    ShareDB ..> openGraph : ogMeta + shareDescription/shareImage (.md branch)
+    Server ..> openGraph : shellTitle + titleTag, templated into the SPA shell
+    openGraph ..> ProjectDB : Get(id) for the project name
+    openGraph ..> FrontmatterPair : description key
     ShareDB ..> markdownRender : RenderMarkdown (table stays)
     Server ..> markdownRender : RenderMarkdownPairs (viewer)
     markdownRender ..> FrontmatterPair

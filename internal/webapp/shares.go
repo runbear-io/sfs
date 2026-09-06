@@ -609,7 +609,14 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(cw, sharedMarkdownShell, html.EscapeString(path.Base(sp)), mermaidTag(body), updatedStamp(fi.Time), body)
+		// A share page IS the public copy, so this is the one surface whose
+		// card may describe the content itself, not just name it.
+		base := path.Base(sp)
+		fmPairs, _ := frontmatterPairs(src)
+		og := ogMeta(base, shareDescription(fmPairs, body), shareImage(body),
+			"article", requestBaseURL(r)+r.URL.EscapedPath())
+		fmt.Fprintf(cw, sharedMarkdownShell, html.EscapeString(base), og,
+			mermaidTag(body), updatedStamp(fi.Time), body)
 	case ".html", ".htm":
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		io.Copy(cw, rc)
@@ -649,10 +656,11 @@ func mermaidTag(body string) string {
 }
 
 // sharedMarkdownShell wraps rendered markdown in a minimal readable page.
-// Verbs, in order: title, mermaid script tag (usually empty), updated stamp,
-// body.
+// Verbs, in order: title, Open Graph block, mermaid script tag (usually
+// empty), updated stamp, body. The order is positional and getting it wrong
+// is silent, not a compile error — keep this comment truthful.
 const sharedMarkdownShell = `<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>%s</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>%s</title>%s
 <style>
 body{font:16px/1.7 -apple-system,BlinkMacSystemFont,"SF Pro Text","Inter","Segoe UI",sans-serif;color:#24292f;
 max-width:720px;margin:0 auto;padding:52px 24px 96px}
