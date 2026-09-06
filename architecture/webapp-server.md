@@ -30,10 +30,19 @@ classDiagram
         +TrustProxy bool
         +Desktop bool
         +DesktopMe func() (email, name)
+        +ReportRead func(project, path)
         -vols per-project volume cache
         -grants reservation ledger
+        -routes what Handler registered
         +Handler() http.Handler
     }
+    class recordingMux {
+        <<http.ServeMux wrapper>>
+        +HandleFunc / Handle record then delegate
+        +APIRoutes() []string
+    }
+    note for recordingMux "Exists for one caller: cmd/bdrive/desktop.go must classify every per-project route this hub serves, because a route it does not know falls through to local state and answers plausibly and WRONGLY. That has shipped twice. Recording beats parsing server.go: the per-project block builds eight patterns at runtime by concatenating a prefix, so a source scanner would silently miss exactly the routes it is meant to police."
+    note for Server "ReportRead is the desktop's read seam, dead on a hub. The sidecar keeps no ReadLedger and answers the viewer routes locally, so a person reading in the Mac app reached no ledger at all while the same file in the web app counted. The hook hands each viewer read to the sidecar, which forwards it to the project's own hub as HUMAN traffic — routing it through the agent report route instead would have filed a person's browsing as a device's."
     note for Server "Desktop marks the loopback sidecar posture (`bdrive desktop`), NOT a hub: the server fronts this machine's own volume stores. It is set in exactly one production place — cmd/bdrive/desktop.go — so on a deployed hub it stays false and both branches below are dead code, leaving /api/config byte-identical to a hub without it. DesktopMe supplies `me` from the device's saved sign-in (settings.json), a func because the tray can change it at runtime; the desktop has no AuthProvider"
     note for Server "clientIP is a METHOD now, not a package func: X-Forwarded-For is honored when the PEER is loopback/private (the operator's own proxy) or TrustProxy is set, and then only its LAST hop. Every caller that gates on an IP — the auth rate limiter, /s/*, device rows, share telemetry — goes through it, so a client-supplied header cannot forge the identity a limiter counts"
 
@@ -482,6 +491,7 @@ classDiagram
     Server o-- DeviceRegistry
     Server o-- ShareDB
     Server o-- ReadLedger
+    Server ..> recordingMux : Handler registers through it
     Server o-- QuotaProvider
     Server *-- reservations : holds before it charges
     reservations *-- grant

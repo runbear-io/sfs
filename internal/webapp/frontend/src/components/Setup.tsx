@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { getJSON } from "../api/http";
+import { desktopPost, getJSON } from "../api/http";
 import { navigate } from "../nav";
-import { GuideCode, INSTALL_DOC } from "./ConnectGuide";
+import { GuideCode } from "./ConnectGuide";
+import { agentPrompt } from "../lib/prompt";
 
 // The desktop app's onboarding (storyboard 2026-08-21, frames 2 and 5-9):
 // welcome → connect a shared folder inside the user's own project → first
@@ -14,13 +15,6 @@ import { GuideCode, INSTALL_DOC } from "./ConnectGuide";
 // file is the view over /api/desktop/{inspect,init,init/status}.
 
 export type SetupStep = "welcome" | "connect" | "syncing" | "done";
-
-const post = (path: string, body?: unknown) =>
-  fetch(path, {
-    method: "POST",
-    headers: { "X-Bdrive-Desktop": "1", "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
 
 type Inspect = {
   path: string;
@@ -136,7 +130,7 @@ function Connect({ onStarted }: { onStarted: (name: string) => void }) {
   }, [root, name, prime]);
 
   const choose = useCallback(async () => {
-    const r = await post("/api/desktop/choose-folder");
+    const r = await desktopPost("/api/desktop/choose-folder");
     if (!r.ok) return;
     const out = (await r.json()) as { path?: string; canceled?: boolean };
     if (out.path) {
@@ -148,7 +142,7 @@ function Connect({ onStarted }: { onStarted: (name: string) => void }) {
   const start = useCallback(async () => {
     setBusy(true);
     setErr("");
-    const r = await post("/api/desktop/init", { root, name, hooks });
+    const r = await desktopPost("/api/desktop/init", { root, name, hooks });
     setBusy(false);
     if (!r.ok) {
       setErr((await r.text()).trim() || "could not connect that folder");
@@ -311,10 +305,7 @@ function Done({ st }: { st: InitStatus }) {
   const [inviting, setInviting] = useState(false);
   const [inviteErr, setInviteErr] = useState("");
   const name = st.name || "team";
-  const prompt =
-    `Follow ${INSTALL_DOC}\nto set up the shared ${name}/ folder in my project on ` +
-    window.location.origin +
-    ". Ask me which folder to sync.";
+  const prompt = agentPrompt(window.location.origin, { folder: name });
   const copy = async (what: string, text: string) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -332,7 +323,7 @@ function Done({ st }: { st: InitStatus }) {
       const orgs = await getJSON<{ orgs: { id: string }[] }>("/api/orgs");
       const org = orgs.orgs[0]?.id;
       if (!org) throw new Error("no organization on this hub");
-      const r = await post(`/api/orgs/${org}/invites`, {});
+      const r = await desktopPost(`/api/orgs/${org}/invites`, {});
       if (!r.ok) throw new Error((await r.text()).trim());
       const out = (await r.json()) as { url: string };
       await navigator.clipboard.writeText(out.url);
@@ -373,7 +364,14 @@ function Done({ st }: { st: InitStatus }) {
           <Button id="setup-invite" disabled={inviting} onClick={invite}>
             {copied === "invite" ? "Copied" : inviting ? "…" : "Copy invite link"}
           </Button>
-          {inviteErr && <p className="setup-err">{inviteErr}</p>}
+          {/* Its own id: the Done frame can show a second .setup-err (the
+              daemon-start warning), and a spec asserting on the class alone
+              resolved to both under load. */}
+          {inviteErr && (
+            <p className="setup-err" id="setup-invite-err">
+              {inviteErr}
+            </p>
+          )}
         </div>
       </div>
     </div>

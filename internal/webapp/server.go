@@ -90,6 +90,9 @@ type Server struct {
 	// Reads, when set, aggregates read telemetry (viewer, share, and agent
 	// reads) for the heat API. Nil means read tracking is off.
 	Reads *ReadLedger
+	// routes is what Handler registered, filled in by Handler itself. Read
+	// through APIRoutes; see recordingMux for why it is captured at all.
+	routes []string
 	// Dir, when set, walls projects off by organization membership and owns
 	// every org read and write the hub performs. LocalDirectory is the
 	// built-in implementation; a managed deployment supplies its own so that
@@ -123,6 +126,14 @@ type Server struct {
 	// /api/config carries desktop:true plus reads.enabled (heat is proxied to
 	// the hub by the desktop command, not served by a local ledger).
 	Desktop bool
+	// ReportRead, when set, is handed every viewer read this server serves.
+	// It exists for the desktop sidecar: that server answers the viewer routes
+	// from local state and keeps no ledger, so a person reading a file in the
+	// Mac app reached no ledger at all while the same file opened in the web
+	// app counted. The hook lets the sidecar forward the read to the project's
+	// hub as human traffic. Nil on a hub, where Reads records it directly.
+	// Must not block: it is called on the request path.
+	ReportRead func(project, path string)
 	// DesktopMe, when set alongside Desktop, supplies the signed-in account
 	// for /api/config `me` — the desktop has no Auth provider, its session
 	// is the device's saved sign-in (settings.json), which the tray can
@@ -785,13 +796,49 @@ func (r *RemoteSource) Open(ctx context.Context, _ string, fi FileInfo) (io.Read
 	return r.OpenBlob(ctx, fi.Blob)
 }
 
+// recordingMux is an http.ServeMux that remembers what was registered on it.
+//
+// It exists for one caller: the desktop sidecar (cmd/bdrive/desktop.go) must
+// classify every per-project route this hub serves, because a route it does
+// not know about falls through to local state and answers plausibly and
+// WRONGLY — an empty grants list, a project with no folder rules. That has
+// shipped twice. The classification is only enforceable against a list of
+// what the hub actually registers, and http.ServeMux exposes no way to ask.
+//
+// Recording beats parsing this file: the per-project block below builds eight
+// patterns at runtime by concatenating a prefix, so a source scanner would
+// silently miss exactly the routes it is meant to police.
+type recordingMux struct {
+	*http.ServeMux
+	pats []string
+}
+
+func (m *recordingMux) HandleFunc(pat string, h func(http.ResponseWriter, *http.Request)) {
+	m.pats = append(m.pats, pat)
+	m.ServeMux.HandleFunc(pat, h)
+}
+
+func (m *recordingMux) Handle(pat string, h http.Handler) {
+	m.pats = append(m.pats, pat)
+	m.ServeMux.Handle(pat, h)
+}
+
+// APIRoutes returns every pattern Handler registers, in registration order.
+// A zero Server is enough: registration builds closures and never calls a
+// handler, and every provider-dependent block is nil-guarded.
+func APIRoutes() []string {
+	var s Server
+	s.Handler()
+	return s.routes
+}
+
 // Handler returns the HTTP handler: /api/* plus the embedded frontend.
 func (s *Server) Handler() http.Handler {
 	static, err := fs.Sub(staticFiles, "static")
 	if err != nil {
 		panic(err) // embedded FS; cannot fail at runtime
 	}
-	mux := http.NewServeMux()
+	mux := &recordingMux{ServeMux: http.NewServeMux()}
 
 	// One account-removal path, one cleanup. Everything downstream of it is
 	// keyed by email, so removal has to take the org role, the project grants
@@ -929,8 +976,12 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("GET /", s.frontend(static))
 	if s.Auth != nil {
-		s.Auth.Register(mux)
+		// The provider registers /auth/* on the concrete mux: those routes are
+		// not per-project, so recording them would only add noise to the one
+		// consumer of the list.
+		s.Auth.Register(mux.ServeMux)
 	}
+	s.routes = mux.pats
 	return s.rateLimitAuth(s.authGate(mux))
 }
 

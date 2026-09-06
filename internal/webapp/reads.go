@@ -657,11 +657,16 @@ func projectID(r *http.Request) string {
 // recordRead counts a human read of path for the request's project. No-op
 // outside hub mode (no project id) or when read tracking is off.
 func (s *Server) recordRead(r *http.Request, path string) {
-	if s.Reads == nil {
-		return
-	}
 	project := projectID(r)
 	if project == "" {
+		return
+	}
+	// The sidecar has no ledger of its own and forwards to the project's hub.
+	// Before the hook, a person reading in the Mac app was counted nowhere.
+	if s.ReportRead != nil {
+		s.ReportRead(project, path)
+	}
+	if s.Reads == nil {
 		return
 	}
 	actor := s.requestUser(r).Email
@@ -819,12 +824,20 @@ func (s *Server) handleReadReport(v *volume, w http.ResponseWriter, r *http.Requ
 		http.Error(w, "read tracking is not enabled on this server", http.StatusNotFound)
 		return
 	}
-	device := deviceID(r)
-	if device == "" {
-		http.Error(w, "agent read reports need a device identity", http.StatusBadRequest)
-		return
-	}
 	var req struct {
+		// Kind is "agent" (the default, and what every client before the
+		// desktop app meant) or "human". A human read is a PERSON reading in a
+		// viewer, which on a hub the viewer routes record directly — but the
+		// Mac app answers those routes from local state, so its reads reached
+		// no ledger at all and the dashboard under-reported anyone browsing
+		// there. Routing them through the agent path instead would have been
+		// worse than the gap: they would have been filed as device traffic.
+		//
+		// This grants nothing new. A human read's actor is resolved from the
+		// caller's own token below, never from this body, and any member can
+		// already produce one on any path they can read by opening it —
+		// Record's debounce bounds the volume identically either way.
+		Kind  string `json:"kind,omitempty"`
 		Reads []struct {
 			Path string `json:"path"`
 			// Session is the agent session the read happened in — a CLIENT
@@ -845,6 +858,22 @@ func (s *Server) handleReadReport(v *volume, w http.ResponseWriter, r *http.Requ
 		http.Error(w, "too many reads in one report", http.StatusBadRequest)
 		return
 	}
+	human := req.Kind == ReadKindHuman
+	// The actor: a validated device for agent traffic, the authenticated
+	// account for a person. Both come from the hub's own answer about this
+	// request — neither is ever read out of the body.
+	device := deviceID(r)
+	actor, kind := device, ReadKindAgent
+	if human {
+		actor, kind = normEmail(s.requestUser(r).Email), ReadKindHuman
+		if actor == "" {
+			http.Error(w, "a human read report needs a signed-in account", http.StatusBadRequest)
+			return
+		}
+	} else if device == "" {
+		http.Error(w, "agent read reports need a device identity", http.StatusBadRequest)
+		return
+	}
 	// The device id becomes the actor these buckets are keyed by, and /heat
 	// reports agent actors — so an unvalidated header would let any member
 	// plant any string (an id from another org, or an account email) and have
@@ -852,7 +881,10 @@ func (s *Server) handleReadReport(v *volume, w http.ResponseWriter, r *http.Requ
 	// deliberately does NOT observe the device: registering the id it is about
 	// to judge is what made the round-2 check a one-request speed bump. Only
 	// /store/* traffic registers a device.
-	mine := s.ownsDevice(r, device)
+	// Only meaningful for agent traffic: the device id becomes the actor there,
+	// so an unvalidated one would let any member plant any string. A human
+	// read is keyed by the account, which needs no such check.
+	mine := human || s.ownsDevice(r, device)
 	// A reported path is a claim about a file, and the heat map is what the
 	// Dashboard's reads-x-staleness quadrant is built from — the view an
 	// operator reads to decide what is stale. Any member with PermRead could
@@ -893,7 +925,7 @@ func (s *Server) handleReadReport(v *volume, w http.ResponseWriter, r *http.Requ
 			// exists by reporting it and watching the count come back.
 			continue
 		}
-		s.Reads.Record(project, e.Path, ReadKindAgent, device)
+		s.Reads.Record(project, e.Path, kind, actor)
 		// The session id is the one field here the hub cannot vouch for: it
 		// arrives in the body, so any member could report reads naming a
 		// teammate's session and paint files onto that teammate's run card.
@@ -901,7 +933,7 @@ func (s *Server) handleReadReport(v *volume, w http.ResponseWriter, r *http.Requ
 		// validated — and the query side requires BOTH session and device, so
 		// a forged row can only ever be found under the forger's own device,
 		// which MayActAs guarantees is never someone else's.
-		if sess := trimText(e.Session, 128); sess != "" && journal.SafeText(sess) {
+		if sess := trimText(e.Session, 128); !human && sess != "" && journal.SafeText(sess) {
 			s.Reads.RecordSession(project, sess, device, e.Path)
 		}
 		n++

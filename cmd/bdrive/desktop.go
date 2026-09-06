@@ -57,6 +57,7 @@ func desktopCmd() *cobra.Command {
 				return err
 			}
 			fmt.Printf("BearDrive Desktop on http://%s\n", ln.Addr())
+			startReadReporter(cmd.Context())
 			return http.Serve(ln, desktopHandler())
 		},
 	}
@@ -67,6 +68,84 @@ func desktopCmd() *cobra.Command {
 // desktopHandler builds the full handler: the hub-mode webapp over the local
 // volume stores, with GET /api/p/<id>/heat intercepted and proxied to the
 // project's own hub.
+// routeMode says where the desktop answers a per-project hub route.
+type routeMode int
+
+const (
+	// routeLocal falls through to the embedded webapp.Server and is answered
+	// from this machine's own state. Requires a written reason.
+	routeLocal routeMode = iota
+	// routeProxy forwards to the project's own hub with the device token.
+	routeProxy
+)
+
+// desktopRoutes classifies every per-project route the hub serves, and the
+// routeProxy rows are THE registration — desktopHandler ranges over this table
+// rather than repeating it, so "classified as proxied" and "actually proxied"
+// cannot drift apart.
+//
+// It exists because the desktop mux falls through to a local server, which
+// makes forgetting a route invisible: the local registry answers plausibly and
+// WRONGLY. That has shipped twice — an empty grants list (/permissions), then
+// a project whose folder rules all vanished (/folders, /scope). Neither looked
+// like a failure from the app.
+//
+// TestDesktopRoutesClassified fails when the hub grows a per-project route
+// that is not listed here, so the next person gets a red build instead of a
+// quiet wrong answer. It cannot tell you a routeLocal call was WRONG, only
+// that somebody made it — but both misses so far were nobody deciding at all.
+var desktopRoutes = []struct {
+	pattern string
+	mode    routeMode
+	why     string // required for routeLocal: why local is the right answer
+}{
+	// Browsing and history are the whole point of the app: they read this
+	// machine's working folder and volume store, and keep working offline.
+	{"GET /api/projects/{project}", routeLocal, "name and created come from mounts.json; the level is PermRead by design"},
+	{"GET /api/p/{project}/tree", routeLocal, "the local working folder"},
+	{"GET /api/p/{project}/resolve", routeLocal, "wikilink resolution over the local tree"},
+	{"GET /api/p/{project}/file", routeLocal, "local bytes"},
+	{"GET /api/p/{project}/download", routeLocal, "local bytes"},
+	{"GET /api/p/{project}/render", routeLocal, "local bytes, rendered here"},
+	{"GET /api/p/{project}/history", routeLocal, "replayed from the local volume store's journals"},
+	{"GET /api/p/{project}/blob", routeLocal, "old versions come from local blobs"},
+	{"GET /api/p/{project}/store/list", routeLocal, "the local volume store"},
+	{"GET /api/p/{project}/store/object", routeLocal, "the local volume store"},
+	{"GET /api/p/{project}/store/exists", routeLocal, "the local volume store"},
+
+	// Writes never happen locally: one journal, one writer, and the daemon is
+	// it. These reach the hub, which journals under this account and applies
+	// its real permission; the local RemoteSource picks the change up on
+	// refresh like any other peer edit.
+	{"PUT /api/p/{project}/store/object", routeLocal, "refused, deliberately: the daemon is the volume store's only writer"},
+	{"POST /api/p/{project}/store/sign", routeLocal, "refused: the local backend presigns nothing, and a device syncing this Mac talks to its hub directly"},
+	{"POST /api/p/{project}/restore", routeProxy, ""},
+	{"POST /api/p/{project}/remove", routeProxy, ""},
+	{"POST /api/p/{project}/undo-run", routeProxy, ""},
+	{"PATCH /api/projects/{project}", routeProxy, ""},
+	{"DELETE /api/projects/{project}", routeProxy, ""},
+	{"POST /api/p/{project}/upload/init", routeProxy, ""},
+	{"PUT /api/p/{project}/upload/content", routeProxy, ""},
+	{"POST /api/p/{project}/upload/commit", routeProxy, ""},
+
+	// Hub-owned metadata. Every one of these is a list the local registry
+	// would answer as empty, which reads as "nothing to see" rather than as a
+	// failure — the exact shape of both misses so far.
+	{"GET /api/p/{project}/heat", routeProxy, ""},
+	{"GET /api/p/{project}/shares", routeProxy, ""},
+	{"POST /api/p/{project}/shares", routeProxy, ""},
+	{"GET /api/p/{project}/permissions", routeProxy, ""},
+	{"PUT /api/p/{project}/permissions", routeProxy, ""},
+	{"PUT /api/p/{project}/permissions/{email}", routeProxy, ""},
+	{"DELETE /api/p/{project}/permissions/{email}", routeProxy, ""},
+	{"GET /api/p/{project}/scope", routeProxy, ""},
+	{"GET /api/p/{project}/folders", routeProxy, ""},
+	{"PUT /api/p/{project}/folders", routeProxy, ""},
+	{"DELETE /api/p/{project}/folders", routeProxy, ""},
+
+	{"POST /api/p/{project}/reads", routeLocal, "the sync client posts these straight to the hub, never through here; the app's own viewer reads go out through desktop_reads.go instead, as human traffic"},
+}
+
 func desktopHandler() http.Handler {
 	// Sign-ins from here are the app's, not the CLI's: the hub records
 	// "<host> (BearDrive Desktop)" for the device.
@@ -81,6 +160,10 @@ func desktopHandler() http.Handler {
 		// (canCreate); the create and its uploads are hub proxies below.
 		// Local write routes stay refused through the PermRead resolver.
 		Upload: webapp.UploadConfig{Enabled: true},
+		// Viewer reads: this server keeps no ledger, so they go to the
+		// project's own hub as human traffic (desktop_reads.go). Without it a
+		// person reading in the Mac app was counted nowhere.
+		ReportRead: spoolRead,
 		DesktopMe: func() (string, string) {
 			s, _ := config.LoadSettings()
 			if s.Token == "" {
@@ -90,56 +173,24 @@ func desktopHandler() http.Handler {
 		},
 	}
 	mux := http.NewServeMux()
-	// Hub-backed surfaces: heat and public share links live on the hub, so
-	// these routes forward there with the device token. Everything else is
-	// answered from local state by srv.
-	mux.HandleFunc("GET /api/p/{project}/heat", proxyProject)
-	mux.HandleFunc("GET /api/p/{project}/shares", proxyProject)
-	mux.HandleFunc("POST /api/p/{project}/shares", originGuard(proxyProject))
-	// Restore/remove/undo-run are writes, so the desktop never performs them
-	// locally (one journal, one writer): they proxy to the project's hub,
-	// which journals the op under this account and enforces its real
-	// permission. The local RemoteSource picks the change up on refresh like
-	// any other peer edit.
-	mux.HandleFunc("POST /api/p/{project}/restore", originGuard(proxyProject))
-	mux.HandleFunc("POST /api/p/{project}/remove", originGuard(proxyProject))
-	mux.HandleFunc("POST /api/p/{project}/undo-run", originGuard(proxyProject))
-	// The permission surface: the local registry has no grants, so answering
-	// locally showed an empty (wrong) list — the hub owns the truth, for
-	// reads AND edits. The GET also carries `me`, the account's real level,
-	// which the frontend uses as project.perm on desktop.
-	mux.HandleFunc("GET /api/p/{project}/permissions", proxyProject)
-	mux.HandleFunc("PUT /api/p/{project}/permissions", originGuard(proxyProject))
-	mux.HandleFunc("PUT /api/p/{project}/permissions/{email}", originGuard(proxyProject))
-	mux.HandleFunc("DELETE /api/p/{project}/permissions/{email}", originGuard(proxyProject))
-	// Folder rules, for exactly the reason above one level down: a desktop
-	// Project is built from mounts.json with an ID and a Name and nothing
-	// else (desktopProjects.Load), so it carries no rules at all. Answered
-	// locally, /folders reports "nothing is restricted" for a project the hub
-	// really does restrict — the lock never appears in the tree or the
-	// listing — and /scope tells the device it may write everywhere. Both are
-	// plausible, both are wrong, and neither looks like a failure.
-	//
-	// The edits proxy for the same reason the permission edits do: the local
-	// resolver hard-returns PermRead (webapp/perms.go), so handleProjectFolderSet's
-	// admin gate would 403 every rule change made from the app.
-	mux.HandleFunc("GET /api/p/{project}/scope", proxyProject)
-	mux.HandleFunc("GET /api/p/{project}/folders", proxyProject)
-	mux.HandleFunc("PUT /api/p/{project}/folders", originGuard(proxyProject))
-	mux.HandleFunc("DELETE /api/p/{project}/folders", originGuard(proxyProject))
-	// Project metadata edits and deletion are hub writes like everything
-	// else; the hub's admin gate is the gate.
-	mux.HandleFunc("PATCH /api/projects/{project}", originGuard(proxyProject))
-	mux.HandleFunc("DELETE /api/projects/{project}", originGuard(proxyProject))
+	// Every per-project hub route is classified in desktopRoutes below, and the
+	// proxies are registered FROM it — see the table for why that matters.
+	for _, rt := range desktopRoutes {
+		if rt.mode != routeProxy {
+			continue // falls through to srv, answered from this machine
+		}
+		h := http.HandlerFunc(proxyProject)
+		if !strings.HasPrefix(rt.pattern, "GET ") {
+			h = originGuard(h) // every proxied write, exactly as before
+		}
+		mux.HandleFunc(rt.pattern, h)
+	}
 	// Project creation and its template seeding are hub writes (2026-08-20
 	// owner decision): create goes to the signed-in hub, uploads go to the
 	// project's hub — for a just-created project that's the default-hub
 	// fallback in proxyProject. Known gap: the new project has no local
 	// folder until `bdrive init` links one, so the app can't browse it yet.
 	mux.HandleFunc("POST /api/projects", originGuard(proxyDefaultHub))
-	mux.HandleFunc("POST /api/p/{project}/upload/init", originGuard(proxyProject))
-	mux.HandleFunc("PUT /api/p/{project}/upload/content", originGuard(proxyProject))
-	mux.HandleFunc("POST /api/p/{project}/upload/commit", originGuard(proxyProject))
 	// Orgs live on the hub: the local registry has none, so the empty list the
 	// local handler returns would hide the user's real org (and with it the
 	// invite link the onboarding success screen offers). But the app must keep

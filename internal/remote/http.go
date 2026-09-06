@@ -531,10 +531,15 @@ func (b *httpBackend) putViaServer(ctx context.Context, plan putPlan, key string
 	return nil
 }
 
-// ReportReads sends the device's queued agent reads to the hub's read
-// ledger, where they count as agent traffic (actor = this device).
-func (b *httpBackend) ReportReads(ctx context.Context, reads []ReadEvent) error {
-	body, err := json.Marshal(map[string]any{"reads": reads})
+// ReportReads sends queued reads to the hub's read ledger. An empty or
+// "agent" kind counts as device traffic (actor = this device); "human" is a
+// person reading in a viewer and the hub keys it by the signed-in account.
+func (b *httpBackend) ReportReads(ctx context.Context, kind string, reads []ReadEvent) error {
+	payload := map[string]any{"reads": reads}
+	if kind != "" {
+		payload["kind"] = kind
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}

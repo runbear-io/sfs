@@ -33,6 +33,24 @@ function GithubMark() {
 // The org entry is a plain link to org.manage_url: this hub's own org page
 // when it owns its orgs, the identity provider's page when it does not. The
 // server decides; nothing here branches on the answer.
+/* The star ask is a link that sits there, never a banner that interrupts: it
+   is dim, one click, and identical on every render, so it reads as social
+   proof rather than as a request. Anything dismissible would need dismissal
+   state and would still have interrupted once.
+
+   One component because both footers below render it identically — signed in
+   and signed out were byte-identical copies. */
+function StarOnGitHub() {
+  return (
+    <a className="gh-star" href={REPO_URL} target="_blank" rel="noreferrer">
+      <GithubMark />
+      <span>Star on GitHub</span>
+      <span className="ext" aria-hidden="true">↗</span>
+      <span className="sr-only"> (opens in a new tab)</span>
+    </a>
+  );
+}
+
 export function AccountBar({
   me,
   org,
@@ -61,17 +79,7 @@ export function AccountBar({
   const billingLink = billing ? linkProps(billing.url) : null;
   return (
     <footer id="accountbar">
-      {/* The star ask is a link that sits there, never a banner that
-          interrupts: it is dim, one click, and identical on every render, so
-          it reads as social proof rather than as a request. Anything
-          dismissible would need dismissal state and would still have
-          interrupted once. */}
-      <a className="gh-star" href={REPO_URL} target="_blank" rel="noreferrer">
-        <GithubMark />
-        <span>Star on GitHub</span>
-        <span className="ext" aria-hidden="true">↗</span>
-        <span className="sr-only"> (opens in a new tab)</span>
-      </a>
+      <StarOnGitHub />
       <DropdownMenu modal={false} open={menuOpen} onOpenChange={setMenuOpen}>
         <DropdownMenuTrigger asChild>
           <button id="account-btn" className={orgActive ? "active" : undefined} aria-label="Account menu">
@@ -166,12 +174,7 @@ export function AccountBar({
 export function SignedOutBar({ onSignIn }: { onSignIn: () => void }) {
   return (
     <footer id="accountbar">
-      <a className="gh-star" href={REPO_URL} target="_blank" rel="noreferrer">
-        <GithubMark />
-        <span>Star on GitHub</span>
-        <span className="ext" aria-hidden="true">↗</span>
-        <span className="sr-only"> (opens in a new tab)</span>
-      </a>
+      <StarOnGitHub />
       <button id="account-btn" onClick={onSignIn} aria-label="Sign in">
         <span className="avatar" style={{ background: "var(--hover)" }} aria-hidden="true">?</span>
         <span className="acct">

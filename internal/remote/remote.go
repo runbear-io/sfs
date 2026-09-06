@@ -112,8 +112,19 @@ var ErrNoScope = errors.New("this server does not report project scope")
 // mold: backends that sync through a hub report the device's agent reads so
 // the heat view can split human from agent traffic. Object-store backends
 // simply don't implement it — there is no hub to tell.
+// The read kinds a client may report. They mirror internal/webapp's own
+// constants; duplicated rather than imported because remote must not depend
+// on the server package it talks to.
+const (
+	ReadKindAgent = "agent"
+	ReadKindHuman = "human"
+)
+
 type ReadReporter interface {
-	ReportReads(ctx context.Context, reads []ReadEvent) error
+	// ReportReads sends queued reads. kind is "" or "agent" for device
+	// traffic (the actor is this device) and "human" for a person reading in
+	// a viewer (the actor is the signed-in account, resolved by the hub).
+	ReportReads(ctx context.Context, kind string, reads []ReadEvent) error
 }
 
 // Open creates a backend from a remote URL.

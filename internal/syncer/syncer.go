@@ -743,7 +743,9 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 			for i, e := range evs {
 				reads[i] = remote.ReadEvent{Path: e.Path, Session: e.Session, Time: e.Time}
 			}
-			if rr.ReportReads(ctx, reads) == nil {
+			// Agent traffic: these are the paths bdrive read-log spooled for a
+			// coding agent on this device, so the device is the actor.
+			if rr.ReportReads(ctx, remote.ReadKindAgent, reads) == nil {
 				s.Store.ClearPendingReads()
 			}
 		}
