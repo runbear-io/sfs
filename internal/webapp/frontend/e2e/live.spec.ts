@@ -3,50 +3,65 @@ import { login, wikiId, ADMIN, MEMBER } from "./helpers";
 
 // Live change notification (SSE). The Go tests cover both ends of the wire —
 // the hub publishes, the sync client wakes up — so what is left, and what only
-// a browser can check, is that a frame actually reaches TanStack Query and
-// invalidates the right thing.
+// a browser can check, is that a frame reaches TanStack Query and invalidates
+// the right thing.
 //
-// Every assertion here is deliberately time-bounded well under the 15s tree
-// poll. A test that waited 20s would pass on the poll alone and prove nothing.
+// Every assertion is time-bounded well under the 15s tree poll: a test that
+// waited 20s would pass on the poll alone and prove nothing.
+//
+// These specs OWN the paths they touch. The harness is one hub with mutable
+// state shared by every spec (workers: 1), so writing to a seeded file would
+// both break the next repeat of this file and quietly change what browse.spec
+// asserts about index.md.
 
 type SPAWindow = Window & { __spa?: number };
+
+// A path nothing else in the suite reads, and a fresh one per test run where
+// the test is about something APPEARING.
+const OWNED = "live-spec-open.md";
+const fresh = () => `live-spec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.md`;
 
 test("an open file updates when a peer writes it, with no reload", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
-  await page.goto(`/${pid}/index.md`);
-  await expect(page.locator("#content h1")).toHaveText("Wiki");
 
-  // Mark the document. If this survives, the page never reloaded — the update
-  // came through the stream rather than a navigation.
+  // Establish the "before" ourselves rather than relying on the seed, so the
+  // test is identical on its first run and its fiftieth.
+  await page.request.put(`/api/p/${pid}/upload/content?path=${OWNED}`, {
+    data: "# Before\n\nThe reader opens this.\n",
+  });
+  await page.goto(`/${pid}/${OWNED}`);
+  await expect(page.locator("#content h1")).toHaveText("Before");
+
+  // Mark the document. If the mark survives, the page never reloaded — the
+  // update arrived on the stream rather than through a navigation.
   await page.evaluate(() => ((window as SPAWindow).__spa = 1));
 
-  // A peer writes the file the reader is looking at.
-  await page.request.put(`/api/p/${pid}/upload/content?path=index.md`, {
-    data: "# Wiki rewritten\n\nA teammate changed this while you were reading.\n",
+  await page.request.put(`/api/p/${pid}/upload/content?path=${OWNED}`, {
+    data: "# After\n\nA teammate changed this while you were reading.\n",
   });
 
-  // This is the assertion that would have failed before events existed: file
-  // CONTENT has no refetch interval, so an open body previously stayed on
-  // screen until the reader navigated away — forever, not for 15 seconds.
-  await expect(page.locator("#content h1")).toHaveText("Wiki rewritten", { timeout: 10_000 });
+  // The assertion that would have failed before events existed: file CONTENT
+  // has no refetch interval, so an open body previously stayed on screen until
+  // the reader navigated away — indefinitely, not for 15 seconds.
+  await expect(page.locator("#content h1")).toHaveText("After", { timeout: 10_000 });
   expect(await page.evaluate(() => (window as SPAWindow).__spa)).toBe(1);
 });
 
 test("a peer's new file appears in the tree without waiting for the poll", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
+  const path = `notes/${fresh()}`; // must not exist yet, or "appears" proves nothing
+
   await page.goto(`/${pid}/notes`);
+  await expect(page.locator(`#tree .row[data-path="${path}"]`)).toHaveCount(0);
   await page.evaluate(() => ((window as SPAWindow).__spa = 1));
 
-  await page.request.put(
-    `/api/p/${pid}/upload/content?path=${encodeURIComponent("notes/live-arrival.md")}`,
-    { data: "# Live\n" },
-  );
-
-  await expect(page.locator('#tree .row[data-path="notes/live-arrival.md"]')).toBeVisible({
-    timeout: 10_000,
+  await page.request.put(`/api/p/${pid}/upload/content?path=${encodeURIComponent(path)}`, {
+    data: "# Live\n",
   });
+
+  await expect(page.locator(`#tree .row[data-path="${path}"]`)).toBeVisible({ timeout: 10_000 });
   expect(await page.evaluate(() => (window as SPAWindow).__spa)).toBe(1);
 });
 
@@ -76,11 +91,11 @@ test("a teammate viewing the project shows up in the presence bar", async ({ bro
     await login(a, ADMIN);
     await login(b, MEMBER);
     const pid = await wikiId(a);
-    await a.goto(`/${pid}/index.md`);
-    await b.goto(`/${pid}/index.md`);
+    await a.goto(`/${pid}/${OWNED}`);
+    await b.goto(`/${pid}/${OWNED}`);
 
-    // Each sees someone other than themselves. The bar renders initials, so
-    // assert on count rather than on a name the seed could rename.
+    // Each sees somebody. Assert on the bar rendering at all, not on a name
+    // the seed is free to change.
     await expect(a.locator("#presence span").first()).toBeVisible({ timeout: 15_000 });
     await expect(b.locator("#presence span").first()).toBeVisible({ timeout: 15_000 });
   } finally {
