@@ -121,16 +121,21 @@ list in .bdrive/config.json is never pruned against either.`,
 				// contract is one object, so they are emitted together after
 				// the loop.
 				sessionID := hookSessionID(cmd)
+				// One budget for the stale scan across every mount, not one
+				// each: the turn pays it once however many projects are here.
+				deadline := time.Now().Add(hookStaleBudget)
 				var links []hookLink
 				for _, target := range targets {
 					proj, ok, err := config.LoadProject(target)
 					if err != nil || !ok || syncBlocked(proj) != "" {
 						continue
 					}
-					if h, ok := runHookSync(cmd, target, sessionID, hookLabel); ok {
+					if h, ok := runHookSync(cmd, target, sessionID, hookLabel, deadline); ok {
 						link := hookLinkFor(folder, target, h.base)
 						link.paths = h.paths
 						link.secrets = h.secrets
+						link.stale = h.stale
+						link.rules = h.rules
 						links = append(links, link)
 					}
 				}

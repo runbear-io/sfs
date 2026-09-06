@@ -106,6 +106,22 @@ the list, and the agent hears nothing.
 The list is capped, so the first turn after joining a project names some of
 what arrived rather than the whole project.
 
+The same context carries two more sentences, both computed locally — a hook
+that blocks the turn never waits on the network:
+
+- **The docs your own code has outrun.** The `bdrive stale`
+  verdict ([CLI reference](/reference/cli/)), narrowed to the three worst:
+  *"Docs here that their own code has outrun — re-read before trusting them:
+  `runbook.md` (2 files newer, oldest gap 13d)."* A doc goes stale when what it
+  describes moves, not when it gets old, so this is the one thing that stops an
+  agent quoting a runbook the code left behind. It runs under a wall-clock
+  budget; on a large project the sentence is dropped rather than the turn
+  delayed.
+- **Where the team rules are.** When the mount root holds an `AGENTS.md`, the
+  context names it — which is how the Codex row in the table above stops
+  mattering. A platform that has hooks at all is told the file exists, whether
+  or not it would ever have discovered it.
+
 ## What belongs in shared memory
 
 Good candidates are the things that are expensive to rediscover and cheap to

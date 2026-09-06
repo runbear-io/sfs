@@ -30,7 +30,11 @@ Three hooks, three jobs:
 
 - **Pull**, before the agent answers, so it never reads a stale file. This one
   blocks — it is the only place BearDrive makes you wait, and it is why the
-  whole thing works.
+  whole thing works. It also hands back the turn's brief: hub links for the
+  synced folders, what teammates changed since the last turn, credential-shaped
+  files, the docs this project's code has outrun, and the project's `AGENTS.md`
+  if it syncs ([Shared agent memory](/guides/shared-agent-memory/)). All of it
+  is local; none of it can fail the turn.
 - **Push**, after an edit, so teammates see the change within seconds rather
   than whenever a daemon tick lands.
 - **Read tracking**, on the agent's read-shaped tools, queued locally and sent
