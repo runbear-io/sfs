@@ -199,6 +199,11 @@ async function defaultOrgId(page: import("@playwright/test").Page) {
   return out.orgs.find((o: { name: string }) => o.name === "default").id;
 }
 
+async function inviteCount(page: import("@playwright/test").Page, orgId: string) {
+  const out = await (await page.request.get(`/api/orgs/${orgId}/invites`)).json();
+  return out.invites.length;
+}
+
 test("project settings: an owner mints an invite link scoped to this project", async ({
   page,
   context,
@@ -206,16 +211,67 @@ test("project settings: an owner mints an invite link scoped to this project", a
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await login(page);
   const pid = await wikiId(page);
+  const orgId = await defaultOrgId(page);
   await page.goto(`/${pid}/settings`);
+
+  // Opening the dialog mints nothing: the POST waits on the confirmation.
+  const before = await inviteCount(page, orgId);
   await page.click("#ps-invite");
-  await expectToast(page, "Invite link copied");
-  const link = await page.evaluate(() => navigator.clipboard.readText());
-  expect(link).toContain("/join/");
-  expect(link).toContain(`?p=${pid}`);
+  await expect(page.locator(".modal")).toBeVisible();
+  expect(await inviteCount(page, orgId)).toBe(before);
+
+  await page.click("#invite-create");
+  // The link is ON THE PAGE, which is the whole fix — the clipboard is a
+  // convenience checked second, not the only copy of it.
+  const shown = page.locator(".modal-url");
+  await expect(shown).toContainText("/join/");
+  await expect(shown).toContainText(`?p=${pid}`);
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+    await shown.textContent(),
+  );
+
+  // One confirmation mints exactly one invite, however often Copy is pressed.
+  await page.dblclick(".modal-actions button");
+  expect(await inviteCount(page, orgId)).toBe(before + 1);
 
   // Leave the hub as we found it: the suite shares one hub per run.
-  const tok = link.split("/join/")[1].split("?")[0];
-  await page.request.delete(`/api/orgs/${await defaultOrgId(page)}/invites/${tok}`);
+  const tok = (await shown.textContent())!.split("/join/")[1].split("?")[0];
+  await page.request.delete(`/api/orgs/${orgId}/invites/${tok}`);
+});
+
+test("project settings: cancelling the invite dialog mints nothing", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const orgId = await defaultOrgId(page);
+  await page.goto(`/${pid}/settings`);
+  const before = await inviteCount(page, orgId);
+  await page.click("#ps-invite");
+  await page.click(".modal-actions button:has-text('Cancel')");
+  await expect(page.locator(".modal")).toHaveCount(0);
+  expect(await inviteCount(page, orgId)).toBe(before);
+});
+
+// The clipboard permission the config grants every other spec is withheld
+// here: this is the context Priya's automated browser had, where the old flow
+// dead-ended in a toast pointing at Organization settings — which lists the
+// ORG-scoped link, without the "?p=".
+test.describe("without a clipboard", () => {
+  test.use({ permissions: [] });
+
+  test("project settings: the invite link is still on the page", async ({ page }) => {
+    await login(page);
+    const pid = await wikiId(page);
+    const orgId = await defaultOrgId(page);
+    await page.goto(`/${pid}/settings`);
+    await page.click("#ps-invite");
+    await page.click("#invite-create");
+    const shown = page.locator(".modal-url");
+    await expect(shown).toContainText("/join/");
+    await expect(shown).toContainText(`?p=${pid}`);
+
+    const tok = (await shown.textContent())!.split("/join/")[1].split("?")[0];
+    await page.request.delete(`/api/orgs/${orgId}/invites/${tok}`);
+  });
 });
 
 test("project settings: a non-owner is offered no invite button", async ({ page }) => {
