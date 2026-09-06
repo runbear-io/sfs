@@ -132,6 +132,11 @@ type Result struct {
 	LocalOps  int // local changes committed to the journal
 	PulledOps int // ops received from other devices
 	Conflicts int // conflict copies created
+	// Merged counts concurrent edits this cycle resolved by a three-way merge
+	// instead of forking a conflict copy. Kept apart from Conflicts because
+	// they mean opposite things to the person reading the line: a merge is
+	// work the machine finished, a conflict is work it handed back.
+	Merged int
 	// Adopted counts paths where this folder's own content gave way to the
 	// project's on join (step 1b). Not a conflict and not an error — the
 	// superseded content stays in history — but the user asked for none of it,
@@ -193,7 +198,7 @@ func accessReason(err error) string {
 func (r *Result) Reason() string { return accessReason(r.AccessErr) }
 
 func (r *Result) Activity() bool {
-	return r.LocalOps > 0 || r.PulledOps > 0 || r.Conflicts > 0 || r.Adopted > 0 || r.Pruned > 0 || r.Materialized > 0
+	return r.LocalOps > 0 || r.PulledOps > 0 || r.Conflicts > 0 || r.Merged > 0 || r.Adopted > 0 || r.Pruned > 0 || r.Materialized > 0
 }
 
 // The builtin exclusions (.bdrive — the mount's local identity, syncing it
@@ -442,7 +447,13 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 				return nil, fmt.Errorf("append conflict ops: %w", err)
 			}
 			myOps = append(myOps, conflictOps...)
-			res.Conflicts = len(conflictOps)
+			for _, op := range conflictOps {
+				if op.Note == mergeNote {
+					res.Merged++
+				} else {
+					res.Conflicts++
+				}
+			}
 		}
 	}
 
@@ -1242,6 +1253,27 @@ func (s *Session) conflictCopies(myOps []journal.Op, pushed int64, pulled []jour
 		}
 		if !s.Store.HasBlob(loser.Blob) {
 			continue // content unavailable (partial pull); skip rather than fail
+		}
+		// Two people editing DIFFERENT parts of one text file is the common
+		// case, and forking it into a conflict copy makes both of them do a
+		// merge by hand that the machine could have done. Try the merge; if
+		// the edits overlap, fall through to exactly the behaviour below.
+		//
+		// The merged op is an ordinary put of ordinary content — the same
+		// shape the conflict copy is, at the real path instead of a new one —
+		// so nothing about replay, ordering or the one-writer rule changes.
+		if merged, ok := s.tryMerge(p, mine, theirs, all); ok {
+			st.Lamport = tickLamport(st.Lamport)
+			seqBase++
+			out = append(out, journal.Op{
+				Seq: seqBase, Lamport: st.Lamport, Time: time.Now().UTC(),
+				Device: s.Device.ID, DeviceName: s.Device.Name, Author: s.Device.Author,
+				User: s.Account.Email, UserName: s.Account.Name,
+				Kind: journal.KindPut, Path: p,
+				Blob: merged.blob, Size: merged.size, Mode: mine.Mode,
+				Note: mergeNote,
+			})
+			continue
 		}
 		st.Lamport = tickLamport(st.Lamport)
 		seqBase++

@@ -590,8 +590,8 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 				lastAccess = store.AccessOK
 			}
 			if res.Activity() {
-				log.Printf("local+%d pulled+%d conflicts=%d files~%d pushed=%v",
-					res.LocalOps, res.PulledOps, res.Conflicts, res.Materialized, res.Pushed)
+				log.Printf("local+%d pulled+%d merged=%d conflicts=%d files~%d pushed=%v",
+					res.LocalOps, res.PulledOps, res.Merged, res.Conflicts, res.Materialized, res.Pushed)
 			}
 			if doRemote {
 				lastRemote = time.Now()
