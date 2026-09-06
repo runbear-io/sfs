@@ -31,7 +31,16 @@ classDiagram
         project list, org walls
         admin panels, invites
         remembers last opened project (localStorage)
+        +desktop mode: /setup/* routes, no project id
     }
+    note for HubApp "One codebase serves the hub and the desktop sidecar; `desktop: true` from /api/config is the only switch. In desktop mode HubApp routes the project-less /setup, /setup/connect, /setup/syncing and /setup/done frames the same way it already routes /join/<token>, and Browser gains a Copy-web-link item built from the mount's own hub URL"
+
+    class Setup {
+        onboarding frames
+        inspect folder → connect → syncing → done
+        name from the URL, not the first poll
+    }
+    note for Setup "components/Setup.tsx — desktop-only. Every frame owns a URL, so reload and Back behave; the Syncing frame reads ?name= so its heading is right on the FIRST paint rather than reading 'Syncing your folder' until the 400ms status poll lands. That poll navigates away on a terminal phase, which is what makes the frame order-dependent under test"
     class VolumeApp {
         thin wrapper: one volume
     }
@@ -149,6 +158,9 @@ classDiagram
     hooks --> api
     Browser --> hooks : useTree useHeat useShares, fetchBlobText + fileURLFor (Copy)
     HubApp --> hooks
+    HubApp --> Setup : desktop mode only, /setup/* frames
+    Setup --> api : /api/desktop/init/{start,status}
+    Setup --> nav : each frame owns a URL
     hooks --> analytics : initAnalytics + identify on config
     api --> analytics : track(product event)
     Browser --> analytics : share_created (the one raw fetch)

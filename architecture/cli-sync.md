@@ -225,9 +225,10 @@ classDiagram
         init login logout
         sync stop scope grep stale forget status log
         restore url share export import
-        web daemon hooks read-log
+        web desktop daemon hooks read-log
         resume autostart
     }
+    note for Commands "desktop is hidden and spawned by the BearDrive Desktop app: a loopback-only webapp.Server over this machine's volume stores (Desktop:true ⇒ PermRead for everyone), with sync control, sign-in and onboarding under /api/desktop/*"
     note for Commands "cmd/bdrive — thin cobra layer; init is the front door (one command: login + hooks + sync + link), stop pauses"
     note for Commands "grep searches file CONTENTS in the working folder via syncer.SyncedFiles — LoadProject not ResolveMount (a read must not enroll the device), no session, no flock, and the volume store is opened only if it already exists, so a search creates nothing. Exit 1 on no match is a status, not an error (errNoMatch + SilenceErrors). stale copies that whole posture and swaps the predicate: it extracts path-shaped references from synced markdown, keeps only the ones resolving into the SyncedFiles set, and flags a doc whose reference was written later. It dates a path from the JOURNAL, not os.Stat — materialize stamps a peer's file with this device's mtime, so mtime comparison reports nothing on a freshly cloned machine — folding st.AllOps() to the max syncer.DisplayTime per path, which drops a forged future stamp instead of dating that path to year 1. Unlike grep it exits 0 either way: advisory output, not a gate"
     note for Commands "Every peer-authored string status / log / whoami print goes through safeField first — a teammate's file name is attacker-controlled text landing in your terminal, and an escape sequence there rewrites the line above it. grep runs BOTH the path and the matched line through it — a matched line is a teammate's file content, the widest version of that surface. login now does PKCE on the loopback callback (no compat arm) and both its client and init's refuse to follow a redirect off the hub's origin with the device token attached"
@@ -266,6 +267,19 @@ classDiagram
     }
     note for Project ".bdrive/config.json — travels with the folder (git clone, copy); presence alone is NOT consent to sync"
     note for Project "PostSync is a shell command this device runs after a cycle applies peers' changes. It lives here and ONLY here: .bdrive is in ReservedDirs and never syncs, so no hub and no teammate can put a command on someone else's machine. The daemon re-reads this file every tick, so an edit takes effect without a restart"
+
+    class Workspace {
+        .bdrive/workspace.json
+        +Kind = "workspace"
+        +Projects path + id
+        +HasManifest(dir) stat only
+        +IsWorkspaceRoot(dir) READS
+        +DesignateWorkspace / UndesignateWorkspace
+        +RefreshWorkspace / RefreshWorkspaceOf
+    }
+    note for Workspace "internal/config/workspace.go — a folder that HOLDS projects rather than being one; the desktop app writes it at the folder you connect, the CLI never creates one. An INDEX, never a source of truth: identity stays in each project's own config.json, so a wrong or stale entry costs nothing and every daemon start rewrites the list from what is on disk. Deleting the file un-roots the folder"
+    note for Workspace "The blocking boundary is the whole design. HasManifest is a STAT and can be called anywhere; IsWorkspaceRoot OPENS the file and can block forever on a FIFO, a dead network mount, or a TCC prompt with nobody to answer. So IsWorkspaceRoot has exactly ONE production caller — RefreshWorkspace — whose only caller is the daemon's goroutine, where blocking is affordable. Everything on a hot path (init, share, the agent hook guard) uses HasManifest. The read is bounded to 1 MiB anyway"
+    note for Workspace "The manifest is workspace.json, NOT config.json with a kind field: the agent hook guard walks up looking for .bdrive/config.json to decide 'am I in a project', and a root carrying that name would answer yes for every folder beside it. It lives under .bdrive, which is in ReservedDirs, so it never syncs at any depth. A root is never a mount — LoadProject rejects the workspace kind, and init refuses both a root and a folder containing one"
 
     class MountRegistry {
         mounts.json
@@ -333,4 +347,7 @@ classDiagram
     openSession ..> Project : loads
     openSession ..> Device : identity
     openSession ..> Settings : account and token
+    Commands ..> Workspace : init refuses a root, desktop onboarding designates one
+    daemon ..> Workspace : RefreshWorkspaceOf — the ONLY reader of a manifest
+    Workspace ..> Project : indexes them, never owns their identity
 ```

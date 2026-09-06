@@ -16,6 +16,12 @@ flowchart LR
         eng["internal/syncer Session.Cycle<br/>internal/journal ops + replay"]
         vs["volume store ~/.bdrive/volumes/id<br/>internal/store: blobs, journals,<br/>state, paused marker"]
         cfg["internal/config<br/>device.json, settings.json, mounts.json"]
+        wsr["workspace root (optional)<br/>.bdrive/workspace.json — an INDEX of the<br/>project folders beside it, never identity"]
+    end
+
+    subgraph mac["BearDrive Desktop (macOS, desktop/)"]
+        tauri["Tauri shell — tray, window<br/>spawns and supervises the sidecar"]
+        side["bdrive desktop (hidden command)<br/>loopback webapp.Server on 127.0.0.1:8990<br/>Desktop:true ⇒ PermRead for everyone"]
     end
 
     subgraph agents["Agent platforms (claude / codex / gemini / hermes)"]
@@ -53,6 +59,11 @@ flowchart LR
     fe -->|/api/config, /api/projects, viewer APIs| srv
     cloud -.->|imports OSS packages,<br/>replaces providers| srv
     docs -.->|documents| cli
+    tauri -->|spawns| side
+    side -->|"browse + history from THIS machine's<br/>volume stores, never the network"| vs
+    side -->|"writes it cannot serve locally: shares,<br/>restore, uploads, project create — proxied<br/>with the device token"| srv
+    side -->|serves the same committed SPA| fe
+    side -->|"onboarding writes it; daemon start<br/>rewrites it from what is on disk"| wsr
 ```
 
 Not drawn in any detail diagram (deliberately): `web/docs` (content site, no
