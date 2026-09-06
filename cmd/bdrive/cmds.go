@@ -71,7 +71,7 @@ list in .bdrive/config.json is never pruned against either.`,
 					return err
 				}
 				if !ok {
-					return fmt.Errorf("%s is not a beardrive project (run `bdrive init` there first)", target)
+					return notAProject(target)
 				}
 				switch syncBlocked(proj) {
 				case "init":
@@ -138,7 +138,7 @@ list in .bdrive/config.json is never pruned against either.`,
 				return nil
 			}
 			if len(targets) == 0 {
-				return fmt.Errorf("%s is not a beardrive project (run `bdrive init` there first)", folder)
+				return notAProject(folder)
 			}
 			if prune {
 				for _, target := range targets {

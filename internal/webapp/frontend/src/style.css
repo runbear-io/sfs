@@ -384,6 +384,12 @@ button, input, a.btn { font-family: inherit; }
 }
 .icon-btn { display: none; width: 34px; height: 34px; border: none; background: transparent; color: var(--text-dim); cursor: pointer; border-radius: 7px; align-items: center; justify-content: center; }
 .icon-btn:hover { color: var(--text); background: var(--hover); }
+/* Desktop-app back/forward (Topbar nav slot) — like .icon-btn but always
+   visible: the app window has no browser chrome to fall back on. */
+#nav-btns { display: inline-flex; gap: 2px; flex: none; }
+.nav-btn { display: inline-flex; width: 30px; height: 30px; border: none; background: transparent; color: var(--text-dim); cursor: pointer; border-radius: 7px; align-items: center; justify-content: center; }
+.nav-btn:hover { color: var(--text); background: var(--hover); }
+.nav-btn .ico { width: 17px; height: 17px; }
 #crumb { font-size: 12.5px; color: var(--text); font-weight: 500; letter-spacing: -.01em; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #crumb .crumb-seg { color: var(--text-dim); cursor: pointer; }
 #crumb .crumb-seg:hover { color: var(--accent-bright); }
@@ -1234,3 +1240,70 @@ pre.plain { background: var(--code-bg); border: 1px solid var(--border); border-
 .filecard { margin-top: var(--hero-top); text-align: center; color: var(--text-dim); }
 .filecard .name { font-size: 1.2em; color: var(--text); margin-bottom: .3em; }
 .filecard .btn { margin-top: 14px; }
+
+/* ---- desktop onboarding (components/Setup.tsx, storyboard frames 2, 5-9) --
+   Same vocabulary as .onboard above: one column, hero spacing, house tokens.
+   The tree preview is the screen's argument, so it gets the honey accent. */
+.setup { max-width: 760px; margin: var(--hero-top) auto 0; }
+.setup-welcome { text-align: left; }
+.setup-foot { color: var(--text-ghost); font-size: 12px; margin: 10px 0 0; }
+.setup-connect header h2 { font-size: 20px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 6px;
+  color: #f4f6f9; display: flex; align-items: center; gap: 8px; }
+.setup-badge { background: var(--glow); border: 1px solid rgba(245,166,35,.4); color: var(--accent-bright);
+  font-size: 10px; font-weight: 600; border-radius: 999px; padding: 2px 8px; letter-spacing: .04em; }
+.setup-connect header p { color: var(--text-dim); font-size: 13px; margin: 0 0 18px; }
+.setup-why { color: var(--text-dim); font-size: 12.5px; line-height: 1.6; margin: 0 0 18px; padding-left: 18px; }
+.setup-body { display: flex; gap: 22px; align-items: flex-start; }
+.setup-form { flex: 1; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.setup-field { display: flex; flex-direction: column; gap: 6px; }
+.setup-field > span { color: var(--text-dim); font-size: 12px; }
+.setup-field input, .setup-root input { background: var(--bg); border: 1px solid var(--border-2);
+  border-radius: var(--r-ctl); padding: 9px 12px; color: var(--text); font-size: 13.5px;
+  font-family: var(--mono); width: 100%; box-sizing: border-box; }
+.setup-field input:focus, .setup-root input:focus { outline: none; border-color: var(--accent); }
+.setup-root { display: flex; gap: 8px; }
+.setup-root button { background: var(--surface); border: 1px solid var(--border-2); border-radius: var(--r-ctl);
+  color: var(--text); font-size: 13px; padding: 0 14px; cursor: pointer; white-space: nowrap; }
+.setup-root button:hover { background: var(--hover); }
+.setup-toggle { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 13px; }
+.setup-ok { color: var(--add); font-size: 12.5px; margin: 0; }
+.setup-err { color: var(--del); font-size: 12.5px; margin: 0; }
+.setup-warn { color: var(--accent-bright); font-size: 12.5px; line-height: 1.5;
+  display: flex; flex-direction: column; gap: 6px; }
+.setup-warn p { margin: 0; }
+.setup-helper { color: var(--text-dim); display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.setup-helper code { font-family: var(--mono); font-size: 11.5px; color: var(--text);
+  background: var(--surface); border: 1px solid var(--border); border-radius: 5px; padding: 2px 6px;
+  word-break: break-all; }
+.setup-helper button { font: inherit; font-size: 11.5px; color: var(--accent); background: none;
+  border: 1px solid var(--border-2); border-radius: 5px; padding: 2px 8px; cursor: pointer; }
+.setup-helper button:hover { background: var(--hover); }
+.setup-tree { width: 290px; flex: none; background: var(--bg); border: 1px solid var(--border);
+  border-radius: var(--r-card); padding: 14px 16px; font-family: var(--mono); font-size: 12px; }
+.setup-tree-head { font-family: inherit; color: var(--text-ghost); font-size: 10.5px; letter-spacing: .06em;
+  margin-bottom: 8px; }
+.setup-tree-root { color: var(--text); }
+.setup-dim { color: var(--text-dim); }
+.setup-tree-shared { color: var(--accent-bright); background: var(--glow); border: 1px solid rgba(245,166,35,.4);
+  border-radius: 5px; padding: 2px 6px; margin: 3px 0; display: inline-block; }
+.setup-shared-tag { color: var(--accent); font-size: 10px; }
+.setup-tree-foot { color: var(--text-ghost); font-size: 10.5px; line-height: 1.5; margin: 10px 0 0;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; }
+.setup-syncing h2, .setup-done h2 { font-size: 20px; font-weight: 640; margin: 0 0 10px; color: #f4f6f9; }
+.setup-bar { height: 8px; border-radius: 4px; background: var(--hover); overflow: hidden; margin: 14px 0; }
+.setup-bar > div { height: 100%; background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+  border-radius: 4px; transition: width .3s ease; }
+.setup-log { list-style: none; padding: 0; margin: 0 0 14px; font-family: var(--mono); font-size: 12px;
+  color: var(--text-ghost); display: flex; flex-direction: column; gap: 5px; }
+.setup-log li.ok { color: var(--add); }
+.setup-log li.ok::before { content: "✓ "; }
+.setup-cards { display: flex; gap: 12px; margin-top: 18px; align-items: stretch; }
+.setup-card { flex: 1; background: var(--bg-raise); border: 1px solid var(--border); border-radius: var(--r-card);
+  padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.setup-card-lead { flex: 1.4; border-color: rgba(245,166,35,.4); box-shadow: 0 0 0 3px var(--glow); }
+.setup-card h3 { font-size: 14px; font-weight: 600; margin: 0; color: var(--text); }
+.setup-card p { color: var(--text-dim); font-size: 12px; line-height: 1.5; margin: 0; flex: 1; }
+@media (max-width: 720px) {
+  .setup-body, .setup-cards { flex-direction: column; }
+  .setup-tree { width: 100%; }
+}

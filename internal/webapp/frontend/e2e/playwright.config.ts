@@ -17,16 +17,50 @@ export default defineConfig({
     // copy it yourself" fallback and never the path a user is on.
     permissions: ["clipboard-write"],
   },
-  webServer: {
-    command:
-      "cd ../../../.. && BDRIVE_E2E_SERVE=1 go test -count=1 -timeout 3h -run TestE2EServe ./internal/webapp",
-    url: "http://localhost:8993/",
-    // Never reuse. The hub serves the assets it was BUILT with, so a server
-    // left over from a previous run answers with the previous frontend — every
-    // spec then measures code that is not on disk any more. That cost round 11
-    // hours of false positives and round 12 re-derived the same rule; a 5s
-    // start beats a result nobody can trust.
-    reuseExistingServer: false,
-    timeout: 60_000,
-  },
+  projects: [
+    { name: "hub", testIgnore: "**/desktop*.spec.ts" },
+    // The same SPA served by the desktop sidecar over local state — see
+    // desktop.spec.ts and .claude/desktop-goal.md. desktop-signedout.spec.ts
+    // overrides baseURL to the :8995 virgin-home harness.
+    {
+      name: "desktop",
+      testMatch: "**/desktop*.spec.ts",
+      use: { baseURL: "http://localhost:8994", permissions: ["clipboard-write", "clipboard-read"] },
+    },
+  ],
+  webServer: [
+    {
+      command:
+        "cd ../../../.. && BDRIVE_E2E_SERVE=1 go test -count=1 -timeout 3h -run TestE2EServe ./internal/webapp",
+      url: "http://localhost:8993/",
+      // Never reuse. The hub serves the assets it was BUILT with, so a server
+      // left over from a previous run answers with the previous frontend — every
+      // spec then measures code that is not on disk any more. That cost round 11
+      // hours of false positives and round 12 re-derived the same rule; a 5s
+      // start beats a result nobody can trust.
+      reuseExistingServer: false,
+      timeout: 60_000,
+    },
+    {
+      command:
+        "cd ../../../.. && BDRIVE_E2E_DESKTOP=1 go test -count=1 -timeout 3h -run 'TestE2EDesktop$' ./cmd/bdrive",
+      url: "http://localhost:8994/api/config",
+      reuseExistingServer: false, // same staleness rule as the hub harness
+      timeout: 60_000,
+    },
+    {
+      command:
+        "cd ../../../.. && BDRIVE_E2E_DESKTOP=1 go test -count=1 -timeout 3h -run 'TestE2EDesktopSignedOut$' ./cmd/bdrive",
+      url: "http://localhost:8995/api/config",
+      reuseExistingServer: false,
+      timeout: 60_000,
+    },
+    {
+      command:
+        "cd ../../../.. && BDRIVE_E2E_DESKTOP=1 go test -count=1 -timeout 3h -run 'TestE2EDesktopOnboarding$' ./cmd/bdrive",
+      url: "http://localhost:8996/api/config",
+      reuseExistingServer: false,
+      timeout: 60_000,
+    },
+  ],
 });

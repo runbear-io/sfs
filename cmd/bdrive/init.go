@@ -192,6 +192,31 @@ the folder was renamed or moved.`,
 					".credentials.json and your saved sessions ordinary top-level files that sync "+
 					"to the whole team. Sync %s instead", folder, filepath.Join(folder, "skills"))
 			}
+			// A workspace root holds projects; it is never one itself. Nothing
+			// at a root syncs — that is what lets the user keep folders
+			// BearDrive never touches beside the ones it does — so mounting it
+			// would sync every one of them, and its manifest with them.
+			if config.HasManifest(folder) {
+				return fmt.Errorf("%s is a BearDrive workspace root, not a project\n"+
+					"the root indexes the projects inside it and never syncs itself\n"+
+					"run init in a folder under it instead, e.g. bdrive init %s",
+					folder, filepath.Join(folder, "team"))
+			}
+			// And the other direction, which is the damaging one: mounting a
+			// folder that CONTAINS a root sweeps up everything the root exists
+			// to hold apart. The nested project is excluded (the syncer's
+			// nested-mount handling), but the folders beside it are not — they
+			// would sync to the whole team on the next cycle, silently.
+			//
+			// Found through the registry rather than by walking down: a root's
+			// projects are its immediate children, and this device knows where
+			// its mounts are.
+			if root, found := workspaceRootUnder(folder); found {
+				return fmt.Errorf("%s contains the BearDrive workspace root at %s\n"+
+					"that root holds folders you chose NOT to sync, and syncing this folder "+
+					"would push them to everyone in the project\n"+
+					"sync the project folders under %s instead", folder, root, root)
+			}
 			if projectID != "" && projectName != "" {
 				return fmt.Errorf("--project and --name are mutually exclusive")
 			}

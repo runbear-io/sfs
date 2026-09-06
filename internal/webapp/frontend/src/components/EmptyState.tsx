@@ -11,12 +11,37 @@ import { GuideCode, INSTALL_DOC } from "./ConnectGuide";
 // it. Both cards are entry points: the button creates the project here, the
 // paste-prompt hands the whole job to an agent.
 
-export function EmptyState({ onNew, canCreate }: { onNew: () => void; canCreate: boolean }) {
+export function EmptyState({
+  onNew,
+  canCreate,
+  signIn,
+}: {
+  onNew: () => void;
+  canCreate: boolean;
+  // Desktop, signed out: the truthful lead is "sign in", not "you're signed
+  // in" — and creating a project needs a hub session, so that card yields to
+  // a Sign in button. The agent card stays: an agent runs the login flow
+  // itself.
+  signIn?: () => void;
+}) {
   return (
     <div className="onboard">
       <h1>Welcome to BearDrive</h1>
-      <p>You're signed in, but you're not part of any project yet.</p>
-      {canCreate && (
+      <p>
+        {signIn
+          ? "Sign in to your hub to see your projects here."
+          : "You're signed in, but you're not part of any project yet."}
+      </p>
+      {signIn && (
+        <div className="ob-card ob-start">
+          <h3>Connect to your hub</h3>
+          <p>Sign in from your browser — this device then syncs and shows your projects.</p>
+          <Button variant="primary" id="ob-signin" onClick={signIn}>
+            Sign in…
+          </Button>
+        </div>
+      )}
+      {!signIn && canCreate && (
         <div className="ob-card ob-start">
           <h3>Start a project</h3>
           <p>

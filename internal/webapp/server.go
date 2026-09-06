@@ -116,6 +116,19 @@ type Server struct {
 	// ShareRPM is the per-IP request rate on public share links (/s/*);
 	// 0 means DefaultShareRPM.
 	ShareRPM int
+	// Desktop marks the loopback sidecar posture (`bdrive desktop`): this
+	// server fronts the machine's own local volume stores, not a hub. Every
+	// project resolves to PermRead for every caller — the desktop viewer is
+	// read-only and the existing perm machinery is the one gate — and
+	// /api/config carries desktop:true plus reads.enabled (heat is proxied to
+	// the hub by the desktop command, not served by a local ledger).
+	Desktop bool
+	// DesktopMe, when set alongside Desktop, supplies the signed-in account
+	// for /api/config `me` — the desktop has no Auth provider, its session
+	// is the device's saved sign-in (settings.json), which the tray can
+	// change at runtime, hence a func rather than a field.
+	DesktopMe func() (email, name string)
+
 	// TrustProxy honors X-Forwarded-For from ANY peer. Only needed for a
 	// proxy on a public address: a proxy on loopback or a private network is
 	// already trusted without it (see clientIP). Setting it on a directly-
@@ -1027,11 +1040,19 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			"enabled": s.Upload.Enabled,
 		},
 		"auth":  auth,
-		"reads": map[string]any{"enabled": s.Reads != nil},
+		"reads": map[string]any{"enabled": s.Reads != nil || s.Desktop},
 		// The starting structures the create dialog offers. Served rather
 		// than hardcoded in the frontend so a hub that ships another one
 		// needs no frontend change.
 		"templates": templates.List(),
+	}
+	if s.Desktop {
+		out["desktop"] = true
+		if s.DesktopMe != nil {
+			if email, name := s.DesktopMe(); email != "" {
+				out["me"] = map[string]string{"email": email, "name": name}
+			}
+		}
 	}
 	// Outside a managed deployment this block is absent and the frontend
 	// never loads a tracker. Outside the `me` check on purpose: a hub with

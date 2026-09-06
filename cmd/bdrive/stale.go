@@ -98,7 +98,7 @@ func runStale(cmd *cobra.Command, folderArg []string, filesOnly bool, limit int)
 		return err
 	}
 	if !found {
-		return fmt.Errorf("%s is not a beardrive project (run `bdrive init` there first)", folder)
+		return notAProject(folder)
 	}
 
 	// The accepted rules and the journal both come from the volume store,

@@ -265,6 +265,7 @@ hub's own storage, never something a syncing client points at directly:
 | `bdrive export [folder]` | Export the whole project — every device's journal, all blobs, full history — from its hub to a portable `.tar.gz` (`-o` names the file) |
 | `bdrive import <archive>` | Import an export archive as a new project on the hub you're logged into (always a NEW project; `--name` overrides the archive's); history and authorship carry over. Refuses an archive whose journals reference content it doesn't hold (`--allow-incomplete` overrides). Move projects between hubs — cloud → self-hosted or back — with `export` + `login` + `import` |
 | `bdrive serve [folder \| storage-root-url]` | Web server: viewer (rendered markdown, downloads, history), uploads, multi-project sync hub (`bdrive web` is a deprecated alias) |
+| `bdrive desktop` | (hidden; spawned by the BearDrive Desktop app) Loopback-only server behind the Mac app: browsing and history come from this machine's volume stores, writes (shares, restore, uploads, project create) proxy to the project's hub, and `/api/desktop/*` adds sync control, sign-in/out and the in-app onboarding (inspect a folder, then create-and-connect a shared folder inside it) |
 | `bdrive whoami` | Signed-in account and device identity used in change tracking |
 | `bdrive version` | Print the version (also `bdrive --version`) |
 
@@ -292,6 +293,25 @@ the project:
   "remote": "https://drive.example.com/p/7f3a2c91-4d5e-4b8a-9c17-2ad0f6b3e9c4",
   "post_sync": "qmd update && qmd embed" }
 ```
+
+- **`.bdrive/workspace.json`** — only in a folder that *holds* projects rather
+  than being one (the Mac app writes it at the folder you connect; the CLI
+  never creates one). It lists which immediate children are project folders —
+  including any this device has paused or never connected — and nothing more:
+
+  ```jsonc
+  // <root>/.bdrive/workspace.json
+  { "kind": "workspace",
+    "projects": [ { "path": "team", "id": "m-5a10b713" } ] }
+  ```
+
+  A root is not a project: nothing in it syncs, and `bdrive init` refuses to
+  mount one. The file is an index only — identity stays in each project's own
+  `config.json` — so a wrong or stale *entry* costs nothing: every daemon
+  start rewrites the list from what is actually on disk. Deleting the file (or
+  corrupting it) is how you un-root the folder; nothing recreates it, and
+  `bdrive init` will then mount the folder like any other. Stop syncing first
+  (`bdrive stop`): a re-index already in flight can write the file back once.
 
 ### `post_sync` — run something when teammates' changes land
 
