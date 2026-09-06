@@ -106,6 +106,12 @@ actually read (and which hot ones nobody maintains).
 - **Offline-first** — the working folder is always fully usable with no
   network. Changes are journaled locally and pushed when the remote becomes
   reachable again.
+- **Live** — against a hub, a teammate's change lands in about a second
+  rather than on the next poll, and an open file in the web UI updates in
+  place. The top bar shows who else is in the project, ringed when they are
+  on the same file as you. Both ride one change stream; a hub that cannot
+  serve it (older version, buffering proxy) falls back to polling and nothing
+  else changes.
 - **Conflict-safe** — concurrent edits resolve deterministically
   (last-writer-wins), and the losing version is preserved as a
   `name.bdrive-conflict-<device>-<time>` file. Nothing is silently dropped.

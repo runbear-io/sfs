@@ -70,6 +70,26 @@ It re-reads `.bdrive/config.json` each tick. If that file vanishes because the
 folder was moved, renamed, or deleted, the daemon **exits cleanly without
 propagating deletes**. The next bdrive command at the new location resumes it.
 
+## The change stream
+
+Against a hub, the daemon also holds a long-lived connection open and syncs
+when the hub says a peer pushed, rather than waiting out the remote interval —
+so a teammate's edit lands in about a second instead of ten. The browser
+listens on the same stream: the file tree updates, an open file re-renders in
+place, and the top bar shows who else is in the project.
+
+This is an **accelerator, not a mechanism**. Everything above still runs
+underneath it, so nothing depends on a notification arriving. An older hub, a
+hub that is down, a proxy that buffers the stream, or an object-store remote
+with no hub at all falls back to the intervals and syncs exactly as it always
+did. (Self-hosting behind a proxy? See
+[Run a hub](/self-hosting/run-a-hub/).)
+
+Presence is deliberately thin: a heartbeat every ten seconds naming the file
+you are on, held for fifteen, never written to disk. It carries display names
+and paths — the same pair history already shows every project member — and is
+readable only by members of that project.
+
 ## Safety properties
 
 These hold by design, and the integration tests exist to keep them holding:
