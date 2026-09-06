@@ -95,3 +95,16 @@ test("command palette opens and finds files", async ({ page }) => {
   await input.fill("plan");
   await expect(page.locator("[cmdk-item]", { hasText: "plan.md" }).first()).toBeVisible();
 });
+
+/* A folder the hub restricts has to look restricted HERE too. This is the
+   check that was missing when folder permissions shipped: the sidecar
+   answered /folders from its own registry, which holds an ID and a Name and
+   no rules at all, so the lock never rendered and nothing anywhere failed.
+
+   The tree, not a listing: `notes/` is top level, and the project root
+   renders the connect guide rather than a folder listing — the same reason
+   the hub's own spec asserts this in the tree. */
+test("a folder the hub restricts shows its lock in the app", async ({ page }) => {
+  await page.goto(`/${HUB_ID}`);
+  await expect(page.locator("nav .trestricted, .file-tree .trestricted").first()).toBeVisible();
+});

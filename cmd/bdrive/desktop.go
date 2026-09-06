@@ -112,6 +112,21 @@ func desktopHandler() http.Handler {
 	mux.HandleFunc("PUT /api/p/{project}/permissions", originGuard(proxyProject))
 	mux.HandleFunc("PUT /api/p/{project}/permissions/{email}", originGuard(proxyProject))
 	mux.HandleFunc("DELETE /api/p/{project}/permissions/{email}", originGuard(proxyProject))
+	// Folder rules, for exactly the reason above one level down: a desktop
+	// Project is built from mounts.json with an ID and a Name and nothing
+	// else (desktopProjects.Load), so it carries no rules at all. Answered
+	// locally, /folders reports "nothing is restricted" for a project the hub
+	// really does restrict — the lock never appears in the tree or the
+	// listing — and /scope tells the device it may write everywhere. Both are
+	// plausible, both are wrong, and neither looks like a failure.
+	//
+	// The edits proxy for the same reason the permission edits do: the local
+	// resolver hard-returns PermRead (webapp/perms.go), so handleProjectFolderSet's
+	// admin gate would 403 every rule change made from the app.
+	mux.HandleFunc("GET /api/p/{project}/scope", proxyProject)
+	mux.HandleFunc("GET /api/p/{project}/folders", proxyProject)
+	mux.HandleFunc("PUT /api/p/{project}/folders", originGuard(proxyProject))
+	mux.HandleFunc("DELETE /api/p/{project}/folders", originGuard(proxyProject))
 	// Project metadata edits and deletion are hub writes like everything
 	// else; the hub's admin gate is the gate.
 	mux.HandleFunc("PATCH /api/projects/{project}", originGuard(proxyProject))

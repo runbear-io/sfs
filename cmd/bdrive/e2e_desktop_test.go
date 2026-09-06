@@ -61,6 +61,12 @@ func TestE2EDesktop(t *testing.T) {
 			io.WriteString(w, `{"url":"https://hub.example/s/e2e-share","token":"e2e-share"}`)
 		case r.Method == "POST" && r.URL.Path == p+"/restore":
 			io.WriteString(w, `{"ok":true}`)
+		// Folder rules live on the hub; answered from the local registry they
+		// would come back empty and the lock would silently never render.
+		case r.Method == "GET" && r.URL.Path == p+"/folders":
+			io.WriteString(w, `{"folders":[{"prefix":"notes/","default":"read","grants":[],"me":"admin"}],"scope":"e2e-scope"}`)
+		case r.Method == "GET" && r.URL.Path == p+"/scope":
+			io.WriteString(w, `{"scope":"e2e-scope","readonly":["notes/"],"deny":[]}`)
 		case r.Method == "GET" && r.URL.Path == p+"/permissions":
 			io.WriteString(w, `{"default":"write","me":"admin","creator":"e2e@example.com","grants":[{"email":"reader@example.com","level":"read"}]}`)
 		default:
