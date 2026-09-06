@@ -74,6 +74,40 @@ type ReadEvent struct {
 	Time    time.Time `json:"time,omitzero"`
 }
 
+// Scope is what one account may do inside one project, as the hub sees it.
+// Only ReadOnly is carried: a prefix the caller may not READ at all is
+// deliberately not reported, because naming it would hand every member of a
+// project the name of every hidden folder. See docs/folder-permissions-prd.md.
+type Scope struct {
+	// Tag identifies this account's current visibility. It changes whenever
+	// what this account can see does, and only then.
+	Tag string `json:"scope"`
+	// ReadOnly are slash-terminated prefixes this device may sync down but
+	// must never journal a change to.
+	ReadOnly []string `json:"readonly"`
+	// Deny are slash-terminated prefixes this account may not read at all.
+	// The hub sends no ops for them, so nothing materializes there; this list
+	// exists so the device also never JOURNALS anything a local file at such a
+	// path would otherwise produce — which the hub would refuse, wedging the
+	// device's whole journal. See the note on handleProjectScope for the
+	// disclosure this represents and why there is no alternative.
+	Deny []string `json:"deny"`
+}
+
+// Scoper is the optional "what may I write here?" capability, in the PutSigner
+// mold. A hub knows about folder permissions; a raw object store has no
+// account to answer for, so the object-store backends simply do not implement
+// it and nothing is restricted — which is right, since a device talking
+// straight to a bucket already holds credentials for all of it.
+type Scoper interface {
+	Scope(ctx context.Context) (Scope, error)
+}
+
+// ErrNoScope is Scope's answer from a hub too old to have folder permissions.
+// Distinct from a transport error on purpose: "this hub has no opinion" means
+// sync everything, "the hub is unreachable" means keep the last answer.
+var ErrNoScope = errors.New("this server does not report project scope")
+
 // ReadReporter is the optional read-telemetry capability, in the PutSigner
 // mold: backends that sync through a hub report the device's agent reads so
 // the heat view can split human from agent traffic. Object-store backends

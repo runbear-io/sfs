@@ -95,6 +95,22 @@ export interface ProjectPerms {
   grants: Array<{ email: string; level: PermLevel }>;
 }
 
+// GET /api/p/{id}/folders (handleProjectFolders, folders.go). A rule narrows
+// the project levels above over one subtree. The list is already filtered to
+// what the caller may know about: a rule that hides a folder from you is not
+// in your copy at all, so its existence stays hidden.
+export interface FolderRule {
+  prefix: string; // slash-terminated, e.g. "designs/"
+  default: PermLevel | ""; // "" = inherit the project default
+  grants: Array<{ email: string; level: PermLevel }>;
+  me: PermLevel; // the caller's own effective level on this folder
+}
+
+export interface ProjectFolders {
+  folders: FolderRule[];
+  scope: string;
+}
+
 export interface ProjectList {
   projects: Project[];
 }

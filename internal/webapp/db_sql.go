@@ -260,6 +260,18 @@ func (s *sqlMetaStore) migrate() error {
 		`CREATE TABLE IF NOT EXISTS project_perms (
 			project TEXT NOT NULL, email TEXT NOT NULL, level TEXT NOT NULL,
 			PRIMARY KEY (project, email))`,
+		// Folder rules (folders.go). Their own tables rather than a JSON
+		// column on projects, for the reason rowScopedProjectRepo exists: a
+		// column would be written by PutMeta, so a rename by a second hub
+		// process would resurrect every rule an admin removed — which is the
+		// bug that made per-project grants row-scoped in the first place.
+		`CREATE TABLE IF NOT EXISTS project_folders (
+			project TEXT NOT NULL, prefix TEXT NOT NULL,
+			default_level TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (project, prefix))`,
+		`CREATE TABLE IF NOT EXISTS project_folder_perms (
+			project TEXT NOT NULL, prefix TEXT NOT NULL, email TEXT NOT NULL,
+			level TEXT NOT NULL, PRIMARY KEY (project, prefix, email))`,
 		`CREATE TABLE IF NOT EXISTS schema_meta (
 			key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '')`,
 		// One counter per registry, bumped inside every write transaction, so
@@ -269,16 +281,45 @@ func (s *sqlMetaStore) migrate() error {
 		`CREATE TABLE IF NOT EXISTS meta_version (
 			name TEXT PRIMARY KEY, version BIGINT NOT NULL DEFAULT 0)`,
 	}
+	// schema_meta is created first and the version read BEFORE the rest, so
+	// requireTables below can tell a first migration from a rollback. The
+	// CREATE is repeated in stmts; both are idempotent.
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS schema_meta (
+		key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '')`); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	// The schema version this store last recorded, read before any CREATE or
+	// ALTER: it is what tells a first-ever migration apart from a rollback.
+	// See addColumns and requireTables.
+	var err error
+	if s.ver, err = s.readSchemaVersion(); err != nil {
+		return err
+	}
+	// A GUARDED TABLE is one whose absence is silently permissive. CREATE
+	// TABLE IF NOT EXISTS would hand a rollback (or an older dump) an empty
+	// project_folders, and an empty rule set reads as "no folder is
+	// restricted" — every confidential subtree re-opened to the whole
+	// organization, with no error anywhere. Same failure mode as a missing
+	// guarded COLUMN, one level up, so it fails closed the same way.
+	//
+	// The probe is spelled out here, with the table name as a LITERAL, rather
+	// than built inside the helper: TestSec_DB_QueryRewriteOnlyEverSeesStaticSQL
+	// sweeps this file for SQL text assembled from runtime values, and it is
+	// right to — a table name concatenated into a query is the shape that
+	// desynchronizes q()'s ?→$N rewrite, even in a statement that happens to
+	// carry no placeholders today.
+	folders, err := s.db.Query(`SELECT * FROM project_folders LIMIT 0`)
+	if err == nil {
+		folders.Close()
+	}
+	if err := s.guardedTable(err, "project_folders",
+		"every restricted folder would re-open to the whole organization", 2); err != nil {
+		return err
+	}
 	for _, st := range stmts {
 		if _, err := s.db.Exec(st); err != nil {
 			return fmt.Errorf("migrate: %w", err)
 		}
-	}
-	// The schema version this store last recorded, read before any ALTER: it is
-	// what tells a first-ever migration apart from a rollback. See addColumns.
-	var err error
-	if s.ver, err = s.readSchemaVersion(); err != nil {
-		return err
 	}
 	// Columns added after the tables shipped. CREATE TABLE IF NOT EXISTS does
 	// nothing for an existing table, so these need a real (idempotent) ALTER.
@@ -315,7 +356,7 @@ func (s *sqlMetaStore) migrate() error {
 // schemaVersion is what THIS binary's migration produces. Bump it when adding
 // a column whose DEFAULT cannot be told apart from a real value — see the
 // guarded set in migrate.
-const schemaVersion = 1
+const schemaVersion = 2
 
 // readSchemaVersion reads the version the store last recorded. 0 means a store
 // written before versioning existed, which is the ordinary upgrade path and the
@@ -334,6 +375,25 @@ func (s *sqlMetaStore) readSchemaVersion() (int, error) {
 		return 0, fmt.Errorf("migrate: schema version %q is not a number", v)
 	}
 	return n, nil
+}
+
+// guardedTable turns "this table did not answer a probe" into a refusal, when
+// the store has already recorded the schema version that created it and the
+// table's absence would widen access. introduced is that version: a store
+// older than it has simply never had the table, which is the ordinary upgrade
+// path and the one case where creating it empty is correct.
+//
+// It takes the probe's ERROR rather than running the probe, so the query stays
+// a literal at the call site — see the comment in migrate.
+func (s *sqlMetaStore) guardedTable(probe error, table, why string, introduced int) error {
+	if probe == nil || s.ver < introduced {
+		return nil
+	}
+	return fmt.Errorf("this database records schema version %d but table %s is missing: "+
+		"that is a rollback, an older dump, or a half-applied migration, and recreating it "+
+		"empty would mean %s. Restore a dump taken at schema version %d or later, or "+
+		"recreate the table by hand with the rows it should hold",
+		s.ver, table, why, introduced)
 }
 
 // addColumns adds any of cols that the table doesn't already have. The live
@@ -498,6 +558,15 @@ func (r *sqlAccountRepo) PutPolicy(p authPolicy) error {
 
 // ---- projects ----
 
+// rowScopedProjectRepo is reached by TYPE ASSERTION, so a backend that stops
+// satisfying it does not fail to build — it silently falls back to
+// whole-record writes, which is the exact race the interface exists to
+// remove. These make that a compile error instead.
+var (
+	_ rowScopedProjectRepo = (*sqlProjectRepo)(nil)
+	_ rowScopedProjectRepo = (*fileProjectRepo)(nil)
+)
+
 type sqlProjectRepo struct {
 	s *sqlMetaStore
 	w regWriter
@@ -552,6 +621,65 @@ func (r *sqlProjectRepo) Load() ([]Project, error) {
 		return nil, err
 	}
 
+	// Folder rules, then their grants — same two-query shape as the project's
+	// own grants above. Ordered by prefix so a Load is deterministic and two
+	// backends can be compared row for row (db_conformance_test.go).
+	rows, err = r.s.db.Query(`SELECT project, prefix, default_level FROM project_folders ORDER BY prefix`)
+	if err != nil {
+		return nil, err
+	}
+	at := map[string]map[string]int{} // project → prefix → index in p.Folders
+	for rows.Next() {
+		var project, prefix, level string
+		if err := rows.Scan(&project, &prefix, &level); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		p := byID[project]
+		if p == nil {
+			continue
+		}
+		if at[project] == nil {
+			at[project] = map[string]int{}
+		}
+		at[project][prefix] = len(p.Folders)
+		p.Folders = append(p.Folders, FolderRule{Prefix: prefix, Default: level})
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	rows, err = r.s.db.Query(`SELECT project, prefix, email, level FROM project_folder_perms`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var project, prefix, email, level string
+		if err := rows.Scan(&project, &prefix, &email, &level); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		p, idx := byID[project], -1
+		if i, ok := at[project][prefix]; ok {
+			idx = i
+		}
+		// A grant whose rule row is gone governs nothing: the resolver only
+		// ever reaches Perms through a rule. Dropping it is what keeps a
+		// half-deleted rule from resurrecting as a bare grant.
+		if p == nil || idx < 0 {
+			continue
+		}
+		if p.Folders[idx].Perms == nil {
+			p.Folders[idx].Perms = map[string]string{}
+		}
+		p.Folders[idx].Perms[email] = level
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
 	out := make([]Project, 0, len(order))
 	for _, id := range order {
 		out = append(out, *byID[id])
@@ -584,7 +712,76 @@ func (r *sqlProjectRepo) Put(p Project) error {
 				return err
 			}
 		}
+		if _, err := tx.Exec(r.s.q(`DELETE FROM project_folders WHERE project = ?`), p.ID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(r.s.q(`DELETE FROM project_folder_perms WHERE project = ?`), p.ID); err != nil {
+			return err
+		}
+		for _, f := range p.Folders {
+			if _, err := tx.Exec(r.s.q(
+				`INSERT INTO project_folders (project,prefix,default_level) VALUES (?,?,?)`),
+				p.ID, f.Prefix, f.Default); err != nil {
+				return err
+			}
+			for email, level := range f.Perms {
+				if _, err := tx.Exec(r.s.q(
+					`INSERT INTO project_folder_perms (project,prefix,email,level) VALUES (?,?,?,?)`),
+					p.ID, f.Prefix, email, level); err != nil {
+					return err
+				}
+			}
+		}
 		return nil
+	})
+}
+
+// PutFolder writes one rule and replaces that prefix's grants, in one
+// transaction. It touches no other prefix and no project-level grant — see
+// rowScopedProjectRepo for why a permission write is never part of a metadata
+// write.
+func (r *sqlProjectRepo) PutFolder(project string, rule FolderRule) error {
+	if err := storable(project, rule.Prefix); err != nil {
+		return err
+	}
+	for email, level := range rule.Perms {
+		if err := storable(project, email, level); err != nil {
+			return err
+		}
+	}
+	return r.s.inTx(regProjects, func(tx *sql.Tx) error {
+		if _, err := tx.Exec(r.s.q(`INSERT INTO project_folders (project,prefix,default_level)
+			VALUES (?,?,?) ON CONFLICT(project,prefix) DO UPDATE SET default_level=excluded.default_level`),
+			project, rule.Prefix, rule.Default); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(r.s.q(
+			`DELETE FROM project_folder_perms WHERE project = ? AND prefix = ?`),
+			project, rule.Prefix); err != nil {
+			return err
+		}
+		for email, level := range rule.Perms {
+			if _, err := tx.Exec(r.s.q(
+				`INSERT INTO project_folder_perms (project,prefix,email,level) VALUES (?,?,?,?)`),
+				project, rule.Prefix, email, level); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// DeleteFolder removes one rule and its grants. A prefix with no rule is not
+// an error: the caller's intent already holds.
+func (r *sqlProjectRepo) DeleteFolder(project, prefix string) error {
+	return r.s.inTx(regProjects, func(tx *sql.Tx) error {
+		if _, err := tx.Exec(r.s.q(
+			`DELETE FROM project_folder_perms WHERE project = ? AND prefix = ?`), project, prefix); err != nil {
+			return err
+		}
+		_, err := tx.Exec(r.s.q(`DELETE FROM project_folders WHERE project = ? AND prefix = ?`),
+			project, prefix)
+		return err
 	})
 }
 
@@ -617,6 +814,12 @@ func (r *sqlProjectRepo) PutPerm(project, email, level string) error {
 func (r *sqlProjectRepo) Delete(id string) error {
 	return r.s.inTx(regProjects, func(tx *sql.Tx) error {
 		if _, err := tx.Exec(r.s.q(`DELETE FROM project_perms WHERE project = ?`), id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(r.s.q(`DELETE FROM project_folder_perms WHERE project = ?`), id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(r.s.q(`DELETE FROM project_folders WHERE project = ?`), id); err != nil {
 			return err
 		}
 		_, err := tx.Exec(r.s.q(`DELETE FROM projects WHERE id = ?`), id)

@@ -298,6 +298,7 @@ func TestDesktopServer(t *testing.T) {
 		t.Fatalf("grant proxy = %d (hub saw %q)", code, grantSawAuth)
 	}
 
+
 	// Local writes refuse: the store push (a journal write) never proxies.
 	for _, w := range []struct{ method, path, body string }{
 		{"PUT", "/api/p/" + hubID + "/store/object?key=journal/evil.jsonl", "{}"},
@@ -538,5 +539,92 @@ func TestDesktopLoginBrowserFlow(t *testing.T) {
 	s, err := config.LoadSettings()
 	if err != nil || s.Token != "tok-browser" || s.Email != "new@runbear.io" || s.Server != hub.URL {
 		t.Fatalf("settings after browser login = %+v (%v)", s, err)
+	}
+}
+
+// TestDesktopFolderRulesProxy: the Mac app reads folder permissions from the
+// hub, not from its own registry.
+//
+// Its own fixture rather than a step in TestDesktopServer, for a reason worth
+// keeping: a hub that answers /scope changes what a sync cycle DOES — a moved
+// scope tag makes the syncer drop its peer journals and re-pull — so bolting
+// this onto the fixture that also asserts materialization made the two tests
+// interfere. They are separate concerns and now have separate hubs.
+//
+// What this pins is that answering locally would not be an ERROR, it would be
+// a plausible lie. desktopProjects.Load builds a Project with an ID and a Name
+// and nothing else, so the local handler reports "no rules, nothing denied"
+// for a project the hub genuinely restricts: no lock in the tree, no chip in
+// the listing, and a scope inviting the device to write where it may not.
+func TestDesktopFolderRulesProxy(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	const mountID = "m-9f8e7d6c"
+	const hubID = "7c1a3b5d-9e2f-4a6b-8c0d-1e3f5a7b9c2d"
+
+	var ruleSawAuth string
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/p/"+hubID+"/folders":
+			io.WriteString(w, `{"folders":[{"prefix":"vault/","default":"none","grants":[],"me":"admin"}],"scope":"t1"}`)
+		case r.Method == "GET" && r.URL.Path == "/api/p/"+hubID+"/scope":
+			io.WriteString(w, `{"scope":"t1","readonly":["notes/"],"deny":["vault/"]}`)
+		case r.Method == "PUT" && r.URL.Path == "/api/p/"+hubID+"/folders":
+			ruleSawAuth = r.Header.Get("Authorization")
+			io.WriteString(w, `{"ok":true,"prefix":"vault/"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer hub.Close()
+
+	folder := t.TempDir()
+	if _, err := config.SaveProject(folder, config.Project{ID: mountID, Remote: hub.URL + "/p/" + hubID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveMounts(map[string]config.MountInfo{mountID: {Path: folder, Remote: hub.URL + "/p/" + hubID}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveSettings(config.Settings{Server: hub.URL, Token: "tok123"}); err != nil {
+		t.Fatal(err)
+	}
+
+	ts := httptest.NewServer(desktopHandler())
+	defer ts.Close()
+
+	get := func(path string) (int, string) {
+		t.Helper()
+		resp, err := http.Get(ts.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+
+	// The rule list, which drives the lock in FileTree and the chip in
+	// FolderListing. Locally this is an empty list, and nothing looks wrong.
+	if code, body := get("/api/p/" + hubID + "/folders"); code != 200 || !strings.Contains(body, "vault/") {
+		t.Fatalf("folders proxy: %d %s", code, body)
+	}
+	// The device's own scope. Answered locally it says "write anywhere".
+	code, body := get("/api/p/" + hubID + "/scope")
+	if code != 200 || !strings.Contains(body, "vault/") || !strings.Contains(body, "notes/") {
+		t.Fatalf("scope proxy: %d %s", code, body)
+	}
+
+	// The edit, which locally could never succeed: perms.go hard-returns
+	// PermRead on desktop, against handleProjectFolderSet's admin gate.
+	req, _ := http.NewRequest("PUT", ts.URL+"/api/p/"+hubID+"/folders",
+		strings.NewReader(`{"prefix":"vault","default":"none"}`))
+	req.Header.Set("Origin", ts.URL)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 || ruleSawAuth != "Bearer tok123" {
+		t.Fatalf("folder rule proxy = %d (hub saw %q)", resp.StatusCode, ruleSawAuth)
 	}
 }

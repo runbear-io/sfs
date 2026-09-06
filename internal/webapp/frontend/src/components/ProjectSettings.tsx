@@ -225,6 +225,7 @@ export function ProjectSettings({
 
       <People project={project} org={org} />
 
+
       <Card>
         <CardHeader>
           <CardTitle>About</CardTitle>

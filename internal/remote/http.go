@@ -173,10 +173,18 @@ func refuseOffOriginRedirect(req *http.Request, via []*http.Request) error {
 // compatible. Setting the header here turns that off silently: the hub would
 // still answer `Content-Encoding: gzip`, nothing would inflate it, and every
 // blob would fail its sha check while looking like a corrupt hub.
+// PermsCapability is what a client sends to say it understands a hub that
+// serves per-account filtered journals: it tracks the scope tag from the store
+// listing and re-pulls from zero when it changes. A hub with folder rules
+// refuses a client that does not send it, because such a client resumes from a
+// byte offset into a stream whose shape it cannot know has moved.
+const PermsCapability = "X-Bdrive-Perms"
+
 func (b *httpBackend) do(req *http.Request) (*http.Response, error) {
 	if b.token != "" {
 		req.Header.Set("Authorization", "Bearer "+b.token)
 	}
+	req.Header.Set(PermsCapability, "1")
 	if b.device.ID != "" {
 		// A journal request already named its device (nameJournalDevice); the
 		// name and OS describe this machine either way.
@@ -545,6 +553,34 @@ func (b *httpBackend) ReportReads(ctx context.Context, reads []ReadEvent) error 
 		return httpError(resp)
 	}
 	return nil
+}
+
+// Scope asks the hub what this account may write in this project. A hub that
+// predates folder permissions answers 404, which is reported as ErrNoScope so
+// the caller can tell "this hub has no opinion" from "the hub is unreachable"
+// — the first means sync everything, the second means keep the last answer.
+func (b *httpBackend) Scope(ctx context.Context) (Scope, error) {
+	var sc Scope
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		b.base+"/api/p/"+b.project+"/scope", nil)
+	if err != nil {
+		return sc, err
+	}
+	resp, err := b.do(req)
+	if err != nil {
+		return sc, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return sc, ErrNoScope
+	}
+	if resp.StatusCode != http.StatusOK {
+		return sc, httpError(resp)
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&sc); err != nil {
+		return sc, err
+	}
+	return sc, nil
 }
 
 func (b *httpBackend) Close() error { return nil }

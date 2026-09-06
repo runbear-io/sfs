@@ -352,6 +352,10 @@ type RemoteSource struct {
 	jmu    sync.Mutex               // guards jcache and jbytes
 	jcache map[string]cachedJournal // "journal/<dev>.jsonl" → parsed ops
 	jbytes int64                    // raw journal bytes currently cached
+
+	fmu    sync.Mutex                 // guards fcache and fbytes
+	fcache map[string]filteredJournal // scopeTag+key → journal as one account may read it
+	fbytes int64
 }
 
 // cachedJournal is one journal's parsed ops plus the (size, modified) that
@@ -836,7 +840,10 @@ func (s *Server) Handler() http.Handler {
 			}
 			// Read recording (and anything else downstream) finds the project
 			// id in the context; permission has already passed at this point.
-			h(v, w, withProjectID(r, id))
+			// The resolved Project rides along too, so a handler needing the
+			// FOLDER level for a path it only learns from its own body
+			// (folders.go) does not re-read the registry a third time.
+			h(v, w, withProject(withProjectID(r, id), p))
 		}
 	}
 
@@ -900,6 +907,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/p/{project}/permissions", s.handleProjectPermDefault)
 	mux.HandleFunc("PUT /api/p/{project}/permissions/{email}", s.handleProjectPermSet)
 	mux.HandleFunc("DELETE /api/p/{project}/permissions/{email}", s.handleProjectPermClear)
+
+	// Folder rules (folders.go). Same shape as the permission routes above and
+	// the same self-checked pattern — they resolve the project and the level
+	// themselves because the level they need is not the same for read and
+	// write. Nothing enforces a rule on a content route yet; see
+	// docs/folder-permissions-prd.md.
+	mux.HandleFunc("GET /api/p/{project}/scope", s.handleProjectScope)
+	mux.HandleFunc("GET /api/p/{project}/folders", s.handleProjectFolders)
+	mux.HandleFunc("PUT /api/p/{project}/folders", s.handleProjectFolderSet)
+	mux.HandleFunc("DELETE /api/p/{project}/folders", s.handleProjectFolderClear)
 
 	// The sync (store) API only exists per project: hub mode is what
 	// storage-blind devices sync through. Reading the store is how a
@@ -1128,7 +1145,14 @@ type projectView struct {
 func projectJSON(p Project, perm string) projectView {
 	// The grant list and the default belong to /api/p/{id}/permissions, which
 	// has its own gate; they'd be noise on every row of every project list.
-	p.Perms, p.Default = nil, ""
+	//
+	// Folders is not noise, it is a LEAK: a folder rule can name a subtree the
+	// caller may not know exists, and /api/p/{id}/folders filters its own
+	// output (visibleFolders) for exactly that reason. Embedding Project is
+	// what makes this line necessary and is still the right shape — a
+	// hand-listed struct fails silently in the other direction, by dropping a
+	// field nobody remembered to add.
+	p.Perms, p.Default, p.Folders = nil, "", nil
 	return projectView{p, perm}
 }
 
@@ -1293,7 +1317,24 @@ func (s *Server) handleTree(v *volume, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	writeJSON(w, buildTree(snap.files))
+	writeJSON(w, buildTree(visibleFiles(snap.files, s.visibility(r))))
+}
+
+// visibleFiles drops the entries this account may not read. It returns the
+// original map untouched when the filter hides nothing, which is every project
+// on a hub that has never used a folder rule — so the tree of a project with
+// no rules costs exactly what it did before.
+func visibleFiles(files map[string]FileInfo, f pathFilter) map[string]FileInfo {
+	if !f.hides() {
+		return files
+	}
+	out := make(map[string]FileInfo, len(files))
+	for p, fi := range files {
+		if f.canRead(p) {
+			out[p] = fi
+		}
+	}
+	return out
 }
 
 func buildTree(files map[string]FileInfo) *Node {
@@ -1339,7 +1380,7 @@ func sortTree(n *Node) {
 }
 
 // lookup resolves ?path= against the volume's current snapshot.
-func lookup(v *volume, r *http.Request) (string, FileInfo, int, error) {
+func (s *Server) lookup(v *volume, r *http.Request) (string, FileInfo, int, error) {
 	p := r.URL.Query().Get("path")
 	if p == "" {
 		return "", FileInfo{}, http.StatusBadRequest, fmt.Errorf("missing ?path=")
@@ -1364,11 +1405,18 @@ func lookup(v *volume, r *http.Request) (string, FileInfo, int, error) {
 		// payload names it.
 		p, fi = to, snap.files[to]
 	}
+	// A path inside a folder this account may not read answers exactly as a
+	// path that does not exist — 404, same words. 403 would confirm the file
+	// is there, which is most of what a hidden folder is hiding. Same rule the
+	// project level already applies (perms.go's project()).
+	if !s.visibility(r).canRead(p) {
+		return "", FileInfo{}, http.StatusNotFound, fmt.Errorf("no such file: %s", p)
+	}
 	return p, fi, 0, nil
 }
 
 func (s *Server) serveBlob(v *volume, w http.ResponseWriter, r *http.Request, attach bool) {
-	p, fi, code, err := lookup(v, r)
+	p, fi, code, err := s.lookup(v, r)
 	if err != nil {
 		http.Error(w, err.Error(), code)
 		return
@@ -1436,7 +1484,7 @@ func (s *Server) handleRender(v *volume, w http.ResponseWriter, r *http.Request)
 		s.renderVersion(v, w, r, sha)
 		return
 	}
-	p, fi, code, err := lookup(v, r)
+	p, fi, code, err := s.lookup(v, r)
 	if err != nil {
 		http.Error(w, err.Error(), code)
 		return
@@ -1516,6 +1564,12 @@ func (s *Server) renderVersion(v *volume, w http.ResponseWriter, r *http.Request
 	}
 	rs := storeSource(v, w)
 	if rs == nil {
+		return
+	}
+	// Same gate as /blob: this door serves a past version by content address,
+	// so it must answer the same question about the same bytes.
+	if !s.visibility(r).visibleSHA(r.Context(), rs, sha) {
+		http.Error(w, "no such version", http.StatusNotFound)
 		return
 	}
 	rc, err := rs.OpenBlob(r.Context(), sha)

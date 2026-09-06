@@ -97,7 +97,14 @@ func (s *Server) projectPermOf(r *http.Request, p Project) string {
 	if p.Org == "" {
 		return PermNone
 	}
-	email := normEmail(s.requestUser(r).Email)
+	return s.projectPermFor(p, normEmail(s.requestUser(r).Email))
+}
+
+// projectPermFor is projectPermOf's core, keyed on an account rather than a
+// request. Split out for the one caller that has no request user to speak of:
+// a public share link, which has to ask whether the account that MINTED it can
+// still read what it publishes (shareStillReadable).
+func (s *Server) projectPermFor(p Project, email string) string {
 	role := s.Dir.Role(p.Org, email)
 	if role == RoleOwner {
 		return PermAdmin

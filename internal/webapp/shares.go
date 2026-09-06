@@ -246,11 +246,11 @@ func (db *ShareDB) List(project string) []Share {
 // is a prefix of "notes-archive/x.md", and that mistake turns a genuine
 // "not synced" into a wrong "that's a folder". Smallest, not whatever map
 // iteration hands back, so identical calls suggest the same file.
-func firstFileUnder(files map[string]FileInfo, p string) string {
+func firstFileUnder(files map[string]FileInfo, p string, vis pathFilter) string {
 	prefix := p + "/"
 	best := ""
 	for k := range files {
-		if strings.HasPrefix(k, prefix) && (best == "" || k < best) {
+		if strings.HasPrefix(k, prefix) && (best == "" || k < best) && vis.canRead(k) {
 			best = k
 		}
 	}
@@ -280,6 +280,12 @@ func (s *Server) handleShareCreate(v *volume, w http.ResponseWriter, r *http.Req
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// A share link is a permanent public read of this path. Minting one for a
+	// folder you may not write is how a member with read on a restricted
+	// subtree would publish it to the internet.
+	if !s.writablePath(w, r, p) {
+		return
+	}
 	snap, err := v.snapshot(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -289,7 +295,14 @@ func (s *Server) handleShareCreate(v *volume, w http.ResponseWriter, r *http.Req
 		// snap.files maps FILES, so a fully synced folder misses here just like
 		// a path that does not exist. Tell those apart before answering, or the
 		// user goes off to fix a sync fault that isn't there.
-		if inside := firstFileUnder(snap.files, p); inside != "" {
+		//
+		// The hint NAMES a file, so it is filtered. Two ways it leaked: a
+		// visible folder containing a hidden subfolder, and — the sharper one
+		// — the hidden folder itself, because a rule on "vault/" does not
+		// match the bare path "vault" (correctly: a FILE named "vault" is not
+		// inside it), so writablePath above lets the request through and this
+		// line used to answer "try a file inside it, e.g. vault/secret.md".
+		if inside := firstFileUnder(snap.files, p, s.visibility(r)); inside != "" {
 			http.Error(w, fmt.Sprintf("share links are per-file; %s is a folder - try a file inside it, e.g. %s", p, inside), http.StatusBadRequest)
 			return
 		}
@@ -369,8 +382,15 @@ func (s *Server) handleShareList(v *volume, w http.ResponseWriter, r *http.Reque
 	project := r.PathValue("project")
 	shares := s.Shares.List(project)
 	opens := s.Reads.ShareOpens(project) // once, outside the loop — never per share
+	vis := s.visibility(r)
 	out := make([]map[string]any, 0, len(shares))
 	for _, sh := range shares {
+		// A share row carries the path it publishes, so listing one for a
+		// folder this account cannot read hands over the name and the fact
+		// that it is public.
+		if !vis.canRead(sh.Path) {
+			continue
+		}
 		out = append(out, shareJSON(r, sh, opens))
 	}
 	writeJSON(w, map[string]any{"shares": out})
@@ -500,6 +520,35 @@ func (s *Server) shareCreatorStillBelongs(sh Share) bool {
 	return s.Dir.Role(org, sh.Creator) != ""
 }
 
+// shareStillReadable reports whether the account that minted a link can still
+// read what it publishes. A folder rule added after the fact must take the link
+// with it — otherwise restricting a folder leaves every link ever minted out of
+// it serving the contents to the whole internet, which is the loudest possible
+// version of the leak.
+//
+// The test is READ, not write: a link publishes a read, so it stays alive while
+// its creator can still see the file. Demoting someone from write to read on a
+// folder does not retract what they already published.
+//
+// Checked at serve time rather than by walking the share list when a rule
+// changes: a storage failure mid-admin-action must not leave a link live, and
+// there is no revocation pass to get half-done.
+func (s *Server) shareStillReadable(sh Share) bool {
+	if s.Dir == nil || s.Auth == nil || s.Projects == nil || sh.Creator == "" {
+		return true // no permission model to consult
+	}
+	p, ok := s.Projects.Get(sh.Project)
+	if !ok || len(p.Folders) == 0 {
+		return true
+	}
+	if p.Org == "" {
+		return false // same refusal shareCreatorStillBelongs makes, same reason
+	}
+	creator := normEmail(sh.Creator)
+	base := s.projectPermFor(p, creator)
+	return atLeast(folderLevel(p, creator, sh.Path, base), PermRead)
+}
+
 // handleShared serves a share link: public, sandboxed, always the latest
 // synced content.
 // shareActor identifies one reader of a link well enough to debounce their
@@ -537,6 +586,15 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.shareCreatorStillBelongs(sh) {
+		http.Error(w, "this link does not exist or was revoked", http.StatusNotFound)
+		return
+	}
+	// Deliberately the same 404 and the same words as a bogus token. The PRD
+	// asked for a 410 here; that would tell a stranger holding a dead link
+	// apart from a stranger guessing one, which is a distinction this route
+	// has never made and should not start making for the one case that is
+	// about a folder somebody wanted private.
+	if !s.shareStillReadable(sh) {
 		http.Error(w, "this link does not exist or was revoked", http.StatusNotFound)
 		return
 	}

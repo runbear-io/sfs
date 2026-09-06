@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import type { HeatMap, Node } from "../api/types";
+import type { FolderRule, HeatMap, Node } from "../api/types";
 import { heatFor, heatLevel, heatText, useFolderHistory } from "../hooks/useBrowse";
 import { parseConflict } from "../lib/conflict";
 import { HEAT_DISCLOSURE, staleNote } from "../lib/heat";
@@ -10,13 +10,18 @@ import { HistoryRow } from "./HistoryRow";
 export function FolderListing(props: {
   node: Node;
   heatMap: HeatMap | null;
+  /* Folder rules, so a restricted folder says so where you can see it.
+     Settings no longer lists them, and a rule you cannot find is a rule you
+     will be surprised by. Already fetched once for the project, passed down
+     the same way heatMap is. */
+  folders: FolderRule[];
   hub: boolean; // hub feeds exist; a plain-folder viewer has no journals
   apiBase: string;
   onOpen: (path: string, version?: string) => void;
   onFullHistory: (prefix: string) => void;
   onRendered?: () => void; // scroll restoration: content height just grew
 }) {
-  const { node, heatMap, onOpen } = props;
+  const { node, heatMap, folders, onOpen } = props;
   const kids = (node.children || [])
     .slice()
     .sort((a, b) => Number(b.dir || false) - Number(a.dir || false) || a.name.localeCompare(b.name));
@@ -60,6 +65,10 @@ export function FolderListing(props: {
             const he = heatFor(heatMap, c.path, !!c.dir);
             if (he) meta = heatText(he) + (meta ? " · " + meta : "");
             const conflict = c.dir ? null : parseConflict(c.path);
+            // A folder's OWN rule only — a rule on an ancestor already showed
+            // its badge on the row that carries it, and repeating it on every
+            // descendant would mark most of a restricted project.
+            const rule = c.dir ? folders.find((r) => r.prefix === c.path + "/") : undefined;
             // Files only: a folder's heat is a subtree sum and it has no one
             // mtime to be stale against, which is also why the Dashboard
             // plots files only (BEA-119).
@@ -83,6 +92,26 @@ export function FolderListing(props: {
                   <Icon name={c.dir ? "folder" : "doc"} />
                 </span>
                 <span className="dl-name">{c.name}</span>
+                {rule && (
+                  /* Same rule as the conflict tag and the heat dot: the label
+                     has to travel without a hover, so it is text with a real
+                     aria-label rather than a glyph with a title. */
+                  <span
+                    className="dl-restricted"
+                    aria-label={
+                      rule.default === "none"
+                        ? "Restricted folder: not shared with everyone in this workspace."
+                        : "Restricted folder: everyone in this workspace can " + (rule.default || "read") + " here."
+                    }
+                    title={
+                      rule.default === "none"
+                        ? "Not shared with everyone — only the people on its list."
+                        : "Everyone in this workspace can " + (rule.default || "read") + " here."
+                    }
+                  >
+                    {rule.default === "none" ? "restricted" : rule.default || "shared"}
+                  </span>
+                )}
                 {conflict && (
                   /* The one thing a strangely-named file needs at a glance:
                      that beardrive put it there on purpose. The page itself

@@ -8,7 +8,9 @@
       "Bash(gofmt:*)",
       "Bash(go mod tidy)",
       "Bash(go doc:*)",
-      "Bash(go env:*)"
+      "Bash(go env:*)",
+      "Bash(gcloud sql:*)",
+      "Bash(gcloud secrets:*)"
     ]
   },
   "hooks": {

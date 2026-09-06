@@ -1,6 +1,8 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
-import type { OrgList, PendingList, ProjectList, ProjectPerms, ShareInfo } from "../api/types";
+import type { OrgList, PendingList, ProjectList, ProjectPerms, ShareInfo,
+  ProjectFolders,
+} from "../api/types";
 
 // Hub-wide server state: the project list (polled — new projects appear
 // without a reload, matching the classic app's 30s refresh) and the orgs
@@ -47,6 +49,17 @@ export function usePermissions(projectId: string | undefined) {
   return useQuery({
     queryKey: ["permissions", projectId],
     queryFn: () => getJSON<ProjectPerms>(`/api/p/${projectId}/permissions`),
+    enabled: !!projectId,
+  });
+}
+
+// One project's folder rules. Any member with read may fetch them; the server
+// returns only the rules this account may know about, so there is nothing to
+// filter here.
+export function useFolders(projectId: string | undefined) {
+  return useQuery({
+    queryKey: ["folders", projectId],
+    queryFn: () => getJSON<ProjectFolders>(`/api/p/${projectId}/folders`),
     enabled: !!projectId,
   });
 }

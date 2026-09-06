@@ -656,6 +656,14 @@ a.ai-main:hover { color: var(--accent); }
    an ordinary file with an alarming name, so the row says so before the
    reader has to guess from the suffix. */
 .dl-conflict { flex: none; font-size: 10.5px; line-height: 1; letter-spacing: .02em; text-transform: uppercase; padding: 3px 6px; border-radius: 999px; border: 1px solid var(--accent-dim); background: var(--glow); color: var(--accent-bright); white-space: nowrap; }
+/* Same pill as .dl-conflict, in the muted palette: a restricted folder is a
+   statement of fact, not a warning — the conflict tag earns the accent colour
+   because something needs looking at. */
+/* The tree's version: a glyph, because a 28px row already carries chevron,
+   guides, icon and label. Same fact, a tenth of the width. */
+.trestricted { flex: none; display: inline-flex; align-items: center; margin-left: 5px; color: var(--text-faint); }
+.trestricted svg { width: 11px; height: 11px; }
+.dl-restricted { flex: none; font-size: 10.5px; line-height: 1; letter-spacing: .02em; text-transform: uppercase; padding: 3px 6px; border-radius: 999px; border: 1px solid var(--border-2); background: var(--surface); color: var(--text-dim); white-space: nowrap; }
 .heatdot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
 .heatdot.lvl1 { opacity: .3; }
 .heatdot.lvl2 { opacity: .55; }
@@ -1240,6 +1248,38 @@ pre.plain { background: var(--code-bg); border: 1px solid var(--border); border-
 .filecard { margin-top: var(--hero-top); text-align: center; color: var(--text-dim); }
 .filecard .name { font-size: 1.2em; color: var(--text); margin-bottom: .3em; }
 .filecard .btn { margin-top: 14px; }
+
+/* ---- Share dialog (components/ShareDialog.tsx) ----
+   Wider than the 460px house modal: it carries two sections and a row of
+   email + level + button, which the narrow width wraps into a column. */
+.modal-wide { width: min(600px, calc(100vw - 40px)); }
+.sd-head {
+  font-size: 12.5px; font-weight: 600; color: var(--text-dim);
+  margin: 18px 0 8px; letter-spacing: .01em;
+}
+.sd-head:first-of-type { margin-top: 4px; }
+/* .modal scrolls as a WHOLE (there is no sticky footer), so a folder with a
+   dozen exceptions would push Copy link / Done out of view. Scroll the list
+   instead and the actions stay put. */
+.modal .admin-list { max-height: 220px; overflow-y: auto; }
+.sd-avatar {
+  width: 22px; height: 22px; flex: none; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: #fff; font-size: 10.5px; font-weight: 700;
+}
+.sd-add { gap: 8px; }
+.sd-add-input {
+  flex: 1; min-width: 0; height: 28px; padding: 0 9px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 6px; color: var(--text); font: inherit; font-size: 12.5px;
+}
+.sd-warn { margin: 14px 0 6px; font-size: 13.5px; color: var(--text); }
+.modal .ps-row { margin-bottom: 10px; }
+.modal .ps-note { margin-bottom: 12px; }
+@media (max-width: 640px) {
+  .sd-add { flex-wrap: wrap; }
+  .sd-add-input { flex: 0 0 100%; height: 44px; }
+}
 
 /* ---- desktop onboarding (components/Setup.tsx, storyboard frames 2, 5-9) --
    Same vocabulary as .onboard above: one column, hero spacing, house tokens.

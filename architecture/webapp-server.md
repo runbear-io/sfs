@@ -246,6 +246,7 @@ classDiagram
         +Get +Create +Update +Rename +List
         +SetCreator +SetDefault +SetTemplate
         +SetPerm +ClearPerm
+        +SetFolder +ClearFolder
         -refresh re-reads the store on reads AND mutators
     }
     class Project {
@@ -254,6 +255,13 @@ classDiagram
         +Creator string
         +Template string
         +Default string
+        +Perms map email→level
+        +Folders FolderRule slice
+        +ruleFor(path) longest prefix
+    }
+    class FolderRule {
+        +Prefix slash-terminated
+        +Default level, "" inherits
         +Perms map email→level
     }
     class seedTemplate {
@@ -265,6 +273,7 @@ classDiagram
         CheckWrite / RecordUsage
     }
     note for Project "Default == &quot;&quot; means write — the historical behavior, so an upgraded hub needs no migration. SetPerm/ClearPerm refuse to drop the last explicit admin."
+    note for FolderRule "folders.go — the same four levels one level down, as an exception list rather than an ACL tree: longest matching prefix wins outright and rules never merge. May not carry admin (a project-wide capability). Stored in its own tables so a metadata write never carries it."
 
     class projectPerm {
         <<resolver>>
@@ -273,8 +282,26 @@ classDiagram
         explicit grant → that level
         org member → project Default
         otherwise → none
+        projectPermFor(p, email) for public callers
     }
     note for projectPerm "The Desktop arm is FIRST in both projectPerm and projectPermOf: the desktop viewer is read-only for everyone, and reusing this ladder rather than adding a second gate is what keeps every local write route refused by the machinery that already guards the hub. It cannot widen a hub — Desktop is false there"
+    class folderLevel {
+        <<resolver, one level down>>
+        base none → none, always
+        longest matching rule
+        rule grant → that level
+        rule Default → that level
+        no rule → base
+    }
+    class pathFilter {
+        <<per-request read visibility>>
+        resolved once, not per path
+        +canRead(path)
+        +visibleSHA / visibleSHAs
+        +tag scopeTag for cache keys
+    }
+    note for folderLevel "A rule may narrow OR widen a subtree of a project you can see — a read-only project with one writable drop-box is a real shape — but base none returns none unconditionally, so it can never open a project you cannot see. That arm is unreachable over HTTP today because proj() answers first; it exists because the filtered fold and the blob gate are NOT behind that gate."
+    note for pathFilter "Deliberately not a cached per-reader fold: no cache, no eviction, no memory per scope. Single-path routes pay one comparison; listing routes already iterate. Hidden paths answer 404, never 403 — a 403 confirms the file is there."
     note for projectPerm "perms.go — the single authorization ladder. proj(level, h) in server.go is the one choke point: every per-project route declares its level at registration."
     note for projectPerm "Both escape hatches are closed: a project with no org, or naming an org that no longer exists, resolves to none instead of falling through to a default, and org membership is checked BEFORE an explicit grant — so a grant left behind by a removed member is no longer a way back in"
 
@@ -514,6 +541,10 @@ classDiagram
     seedTemplate ..> ProjectDB : SetTemplate records it once
     Server *-- projectPerm : gates every per-project route
     projectPerm ..> Project : Perms + Default
+    folderLevel ..> FolderRule : longest prefix
+    folderLevel ..> projectPerm : base level
+    pathFilter ..> folderLevel : per path
+    Server *-- pathFilter : filters every read surface
     projectPerm ..> Directory : org role
     ShareDB ..> Share
     ShareDB ..> mermaidTag : markdown shares only
@@ -605,6 +636,8 @@ classDiagram
         <<optional interface>>
         +PutMeta(p)
         +PutPerm(project, email, level)
+        +PutFolder(project, rule)
+        +DeleteFolder(project, prefix)
     }
     class rowScopedOrgRepo {
         <<optional interface>>
@@ -642,7 +675,7 @@ classDiagram
         +addColumns(cols, guarded) ALTER
         +device_rows keyed (user, id)
     }
-    note for sqlMetaStore "ProjectRepo.Put is transactional over projects + project_perms (same shape as orgs + org_members), and is now the FALLBACK path — a single grant goes through PutPerm."
+    note for sqlMetaStore "ProjectRepo.Put is transactional over projects + project_perms + project_folders + project_folder_perms, and is the FALLBACK path — a single grant goes through PutPerm, a single rule through PutFolder. project_folders is a GUARDED TABLE: recreating it empty reads as &quot;nothing is restricted&quot;, so migrate refuses when the recorded schema version says it should exist. Compile-time assertions keep both backends satisfying rowScopedProjectRepo, which is reached by type assertion and would otherwise degrade silently."
     note for sqlMetaStore "addColumns takes a second, GUARDED set. Probing the live columns and re-adding a missing one is how a running hub gains a field on restart, but on a security column (projects.default_level) it is also how a downgrade silently re-creates it EMPTY — every project back to its default visibility. A guarded column missing from a non-empty table past schema version 0 is now a hard startup error. device_rows is the new (account, device) primary key, copied once from the old id-keyed devices table, which is left in place"
 
     MetaStore <|.. fileMetaStore

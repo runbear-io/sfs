@@ -697,6 +697,21 @@ func (s *Server) handleHeat(v *volume, w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		paths := s.Reads.SessionPaths(projectID(r), session, device)
+		// Filtered like every other path list, and this one is not obvious:
+		// history publishes each op's Session, so a run that WROTE a visible
+		// file and READ a hidden one hands its session id to every project
+		// member — and this route would then answer with the hidden path. The
+		// ingest filter cannot prevent it either, since the reading device
+		// legitimately could see the file.
+		if vis := s.visibility(r); vis.hides() {
+			kept := paths[:0]
+			for _, p := range paths {
+				if vis.canRead(p) {
+					kept = append(kept, p)
+				}
+			}
+			paths = kept
+		}
 		if paths == nil {
 			paths = []string{} // an empty list, never a null the client must special-case
 		}
@@ -718,13 +733,26 @@ func (s *Server) handleHeat(v *volume, w http.ResponseWriter, r *http.Request) {
 	switch q.Get("by") {
 	case "":
 	case "device":
-		s.heatByDevice(w, projectID(r), since)
+		s.heatByDevice(w, r, projectID(r), since)
 		return
 	default:
 		http.Error(w, "invalid by (use device)", http.StatusBadRequest)
 		return
 	}
 	entries := s.Reads.Heat(projectID(r), q.Get("prefix"), since)
+	// Heat is per-path, so an unfiltered entry leaks a hidden file's name and
+	// how much attention it is getting. The Dashboard's quadrant is built from
+	// this, so a member simply sees a smaller map — which is the same map they
+	// would have if the folder were not there.
+	if vis := s.visibility(r); vis.hides() {
+		kept := make(map[string]HeatEntry, len(entries))
+		for path, e := range entries {
+			if vis.canRead(path) {
+				kept[path] = e
+			}
+		}
+		entries = kept
+	}
 	out := map[string]any{"entries": entries}
 	if !since.IsZero() {
 		out["since"] = since.Format("2006-01-02")
@@ -741,11 +769,23 @@ type deviceHeat struct {
 	Total   int64            `json:"total"`
 }
 
-func (s *Server) heatByDevice(w http.ResponseWriter, project string, since time.Time) {
+func (s *Server) heatByDevice(w http.ResponseWriter, r *http.Request, project string, since time.Time) {
 	byDevice := s.Reads.AgentHeat(project, since)
 	visible := s.deviceVisibleIn(project)
+	vis := s.visibility(r)
 	devices := make([]deviceHeat, 0, len(byDevice))
 	for id, folders := range byDevice {
+		// The keys are FOLDERS, so an unfiltered row names a hidden folder as
+		// plainly as a file listing would.
+		if vis.hides() {
+			kept := make(map[string]int64, len(folders))
+			for folder, n := range folders {
+				if vis.canRead(strings.TrimSuffix(folder, "/") + "/") {
+					kept[folder] = n
+				}
+			}
+			folders = kept
+		}
 		d := deviceHeat{ID: id, Folders: folders}
 		// Scoped join: a device owned by an account outside this project's org
 		// contributes no name or OS, so heat cannot become a window onto
@@ -828,6 +868,7 @@ func (s *Server) handleReadReport(v *volume, w http.ResponseWriter, r *http.Requ
 		return
 	}
 	project := projectID(r)
+	vis := s.visibility(r)
 	n := 0
 	for _, e := range req.Reads {
 		// A path is a bucket key that reaches the metadata store: a control
@@ -845,6 +886,12 @@ func (s *Server) handleReadReport(v *volume, w http.ResponseWriter, r *http.Requ
 		}
 		if _, real := snap.files[e.Path]; !real {
 			continue // no such file in this project: a read of nothing is not a read
+		}
+		if !vis.canRead(e.Path) {
+			// This account cannot see the file, so its device cannot have read
+			// it. Accepting the row would let a member confirm a hidden path
+			// exists by reporting it and watching the count come back.
+			continue
 		}
 		s.Reads.Record(project, e.Path, ReadKindAgent, device)
 		// The session id is the one field here the hub cannot vouch for: it

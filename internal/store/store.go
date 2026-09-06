@@ -265,6 +265,20 @@ type SyncState struct {
 	// leaves this disk. See syncer.Filter.SkipUp.
 	IgnoreAccepted string `json:"ignore_accepted,omitempty"`
 	IgnorePulled   string `json:"ignore_pulled,omitempty"`
+
+	// ReadOnly are the folder prefixes this account may sync down but must
+	// never journal a change to, as the hub last reported them
+	// (remote.Scoper). Persisted so an offline cycle keeps honouring the last
+	// answer instead of falling back to "everything is writable" and building
+	// up a journal the hub will refuse the moment the network returns.
+	ReadOnly []string `json:"read_only,omitempty"`
+	// Denied are prefixes this account may not read at all. Persisted for the
+	// same reason ReadOnly is: an unreachable hub must not widen what this
+	// device is willing to journal.
+	Denied []string `json:"denied,omitempty"`
+	// ScopeTag identifies the answer ReadOnly came from. It changes only when
+	// what THIS account can see changes.
+	ScopeTag string `json:"scope_tag,omitempty"`
 }
 
 func (s *Store) LoadSync() (SyncState, error) {

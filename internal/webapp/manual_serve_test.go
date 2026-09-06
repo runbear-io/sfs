@@ -84,7 +84,7 @@ func TestManualServe(t *testing.T) {
 	auth.Admins = map[string]bool{"snow@runbear.io": true}
 	srv.Auth = auth
 
-	t.Logf("serving on http://%s (state: %s) — snow@runbear.io / password1", e2eAddr, state)
+	t.Logf("serving on http://%s (state: %s) — snow@runbear.io / password1", hubAddr(), state)
 	serveHub(t, ln, srv.Handler(), 8*time.Hour)
 }
 

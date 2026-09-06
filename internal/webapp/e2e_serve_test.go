@@ -43,14 +43,26 @@ const (
 // listenHub has to run before anything touches it.
 func e2eState() string { return filepath.Join(os.TempDir(), "bdrive-e2e-hub") }
 
+// hubAddr is the address the harnesses bind. BDRIVE_E2E_ADDR overrides it so a
+// second hub can run beside a live e2e one — the Playwright suite owns
+// 8993-8996, and anything else binding in that block silently measures the
+// squatter instead of itself. Pick a port outside it.
+func hubAddr() string {
+	if a := os.Getenv("BDRIVE_E2E_ADDR"); a != "" {
+		return a
+	}
+	return e2eAddr
+}
+
 // listenHub binds the port both harnesses share. Called BEFORE any state is
 // touched: a second run must not wipe a live hub's storage on its way to
 // failing to bind.
 func listenHub(t *testing.T) net.Listener {
 	t.Helper()
-	ln, err := net.Listen("tcp", e2eAddr)
+	addr := hubAddr()
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		t.Fatalf("cannot bind %s (is an e2e or demo hub already running?): %v", e2eAddr, err)
+		t.Fatalf("cannot bind %s (is an e2e or demo hub already running?): %v", addr, err)
 	}
 	t.Cleanup(func() { ln.Close() })
 	return ln

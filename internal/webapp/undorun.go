@@ -230,6 +230,13 @@ func (s *Server) handleUndoRun(v *volume, w http.ResponseWriter, r *http.Request
 		http.Error(w, "no such run", http.StatusNotFound)
 		return
 	}
+	// All or nothing, and before the preview answers: a run that touched a
+	// folder this caller may not write is refused whole. Reverting the rest
+	// would leave them half a run with no way to name what was skipped, and
+	// the preview would list the paths either way.
+	if !s.writablePaths(w, r, planPaths(plan)) {
+		return
+	}
 	if req.Preview {
 		writeJSON(w, undoResponse(plan))
 		return
@@ -293,4 +300,17 @@ func orEmpty(s []string) []string {
 		return []string{}
 	}
 	return s
+}
+
+// planPaths is every path an undo plan would touch, including the ones it
+// could not (Skipped/Refused): the preview names them, so they are part of
+// what the caller learns from the request.
+func planPaths(plan undoPlan) []string {
+	out := make([]string, 0, len(plan.Ops)+len(plan.Skipped)+len(plan.Refused))
+	for _, op := range plan.Ops {
+		out = append(out, op.Path)
+	}
+	out = append(out, plan.Skipped...)
+	out = append(out, plan.Refused...)
+	return out
 }

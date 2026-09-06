@@ -2,6 +2,7 @@ package store
 
 import (
 	"os"
+	"reflect"
 	"testing"
 
 	"github.com/runbear-io/beardrive/internal/journal"
@@ -74,12 +75,16 @@ func TestJournalAndState(t *testing.T) {
 		t.Fatalf("mount caches must be isolated: %v %v", other, err)
 	}
 
-	st := SyncState{Lamport: 7, PushedOps: 3}
+	// ReadOnly is here so the round trip covers the slice field too: a
+	// SyncState holding a slice can no longer be compared with !=, and the
+	// scope a device is holding is exactly the field a silent drop would
+	// widen back to "everything is writable".
+	st := SyncState{Lamport: 7, PushedOps: 3, ReadOnly: []string{"locked/"}, ScopeTag: "t1"}
 	if err := s.SaveSync(st); err != nil {
 		t.Fatal(err)
 	}
 	gotSt, err := s.LoadSync()
-	if err != nil || gotSt != st {
+	if err != nil || !reflect.DeepEqual(gotSt, st) {
 		t.Fatalf("sync state roundtrip: %v %v", gotSt, err)
 	}
 }
