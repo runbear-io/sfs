@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
 import type { FrontmatterPair, HeatMap, Node, RenderDoc } from "../api/types";
@@ -24,6 +24,7 @@ import { CSV_ROWS, parseDelimited, type Csv } from "../lib/csv";
 import { hasMermaid, renderMermaid } from "../lib/mermaid";
 import { secretsBadge, type SecretFinding } from "../lib/secrets";
 import { Icon } from "./shell";
+import { Editor, type SaveState } from "./Editor";
 
 export function FileView(props: {
   apiBase: string;
@@ -37,12 +38,19 @@ export function FileView(props: {
   onOpenFile: (path: string) => void;
   onMeta: (meta: ReactNode) => void;
   onRendered?: () => void;
+  // Editing is a write, so the caller decides whether this reader may: never
+  // on a pinned past version (that would silently fork history at ?v=), and
+  // never below write permission.
+  editing?: boolean;
 }) {
   const { apiBase, path, version, onMeta } = props;
   const fileURL = fileURLFor(apiBase, path, version);
 
   useEffect(() => () => onMeta(""), [path, onMeta]); // leaving a file clears its meta line
 
+  // One editor for every text kind: markdown, csv, code, plain. The rendered
+  // views below are what you get when you are reading rather than writing.
+  if (props.editing) return <EditView {...props} />;
   if (MD_EXT.test(path)) return <MarkdownView {...props} />;
   if (HTML_EXT.test(path)) {
     // Rendered, not shown as source — inside a sandboxed iframe so synced
@@ -63,16 +71,36 @@ export function FileView(props: {
     // held in JS memory. Deliberately NOT sandboxed: the PDF viewer is not
     // this page's JS realm, so it can't reach the hub API or its cookies,
     // and sandbox without allow-same-origin breaks Firefox's pdf.js.
-    return <iframe className="pdfview" src={fileURL} title={path} onLoad={props.onRendered} />;
+    return (
+      <iframe
+        className="pdfview"
+        src={fileURL}
+        title={path}
+        onLoad={props.onRendered}
+      />
+    );
   }
   if (IMG_EXT.test(path)) {
-    return <ImgView src={fileURL} alt={path} version={version} onRendered={props.onRendered} />;
+    return (
+      <ImgView
+        src={fileURL}
+        alt={path}
+        version={version}
+        onRendered={props.onRendered}
+      />
+    );
   }
   // Same component as plain text on purpose: the fallback for a file the
   // parser can't make a table of is then the very JSX it already renders,
   // not a second code path to keep in sync.
   if (CSV_EXT.test(path)) {
-    return <TextView {...props} fileURL={fileURL} delim={/\.tsv$/i.test(path) ? "\t" : ","} />;
+    return (
+      <TextView
+        {...props}
+        fileURL={fileURL}
+        delim={/\.tsv$/i.test(path) ? "\t" : ","}
+      />
+    );
   }
   if (TEXT_EXT.test(path)) return <TextView {...props} fileURL={fileURL} />;
   // No extension we recognize: decide on the bytes instead of giving up.
@@ -82,12 +110,19 @@ export function FileView(props: {
 /* The fallthrough: one fetch, then text / binary / too-large. Only files
    that used to show the dead "No preview" card get here, so nothing that
    already previewed pays for the extra request. */
-function SniffView(props: Parameters<typeof FileView>[0] & { fileURL: string }) {
+function SniffView(
+  props: Parameters<typeof FileView>[0] & { fileURL: string },
+) {
   const { apiBase, path, version, fileURL, onRendered } = props;
   // The ["text", url] family is what a restore invalidates (Browser.tsx);
   // an immutable ["blob", …] key on a live path would go stale after a
   // teammate's edit. A ?v= URL is content-addressed, so it can be pinned.
-  const { data, error } = useTextAt(fileURL, ["text", fileURL], true, !!version);
+  const { data, error } = useTextAt(
+    fileURL,
+    ["text", fileURL],
+    true,
+    !!version,
+  );
   useEffect(() => {
     if (data) onRendered?.();
   }, [data, onRendered]);
@@ -124,7 +159,9 @@ function FileCard(props: {
         className="btn"
         download
         href={
-          version ? fileURL + "&download=1" : apiBase + "download?path=" + encodeURIComponent(path)
+          version
+            ? fileURL + "&download=1"
+            : apiBase + "download?path=" + encodeURIComponent(path)
         }
       >
         Download
@@ -133,14 +170,106 @@ function FileCard(props: {
   );
 }
 
+/* The editing surface. Loads the file's current bytes once and hands them to
+   CodeMirror; from then on the buffer is the truth until a save lands.
+
+   It deliberately does NOT follow the change stream. A teammate's write while
+   you are mid-sentence would otherwise reset your document under your cursor,
+   which is worse than the staleness it fixes — and resolving that properly is
+   what the CRDT layer is for. The banner tells you instead. */
+function EditView(props: Parameters<typeof FileView>[0]) {
+  const { apiBase, path, onMeta } = props;
+  // Live path, never immutable: the buffer is seeded from whatever the file
+  // says right now. Shares the ["text", url] family the rest of the app uses,
+  // so a restore or a peer write invalidates it like any other read.
+  const fileURL = fileURLFor(apiBase, path);
+  const { data, error } = useTextAt(fileURL, ["text", fileURL], true, false);
+  const [state, setState] = useState<SaveState>("clean");
+  // A peer's write that arrived while this buffer was open. Advisory only.
+  const [peerWrote, setPeerWrote] = useState(false);
+  const mine = useRef(false);
+
+  useEffect(() => {
+    const onPeer = (e: Event) => {
+      const p = (e as CustomEvent<string[]>).detail;
+      if (!p?.includes(path)) return;
+      // Our own save comes back through the stream; that is not a peer.
+      if (mine.current) {
+        mine.current = false;
+        return;
+      }
+      setPeerWrote(true);
+    };
+    window.addEventListener("bdrive:changed", onPeer);
+    return () => window.removeEventListener("bdrive:changed", onPeer);
+  }, [path]);
+
+  useEffect(() => {
+    onMeta(
+      <span id="editor-state" data-state={state}>
+        {state === "saving"
+          ? "saving…"
+          : state === "dirty"
+            ? "unsaved"
+            : state === "error"
+              ? "save failed — still trying"
+              : "saved"}
+      </span>,
+    );
+  }, [state, onMeta]);
+
+  if (error)
+    return <div className="empty">Could not open {path} for editing.</div>;
+  if (!data) return <div className="empty">Loading…</div>;
+  if (data.kind !== "text") {
+    return (
+      <div className="empty">
+        This file is not text, so it cannot be edited here.
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {peerWrote && (
+        <div id="peer-wrote" className="banner">
+          Someone else changed this file while you were editing. Your buffer is
+          unchanged — saving keeps your version and theirs stays in history.
+        </div>
+      )}
+      <Editor
+        apiBase={apiBase}
+        path={path}
+        initial={data.text}
+        onSaved={() => {
+          mine.current = true;
+        }}
+        onStateChange={setState}
+      />
+    </>
+  );
+}
+
 function MarkdownView(props: Parameters<typeof FileView>[0]) {
-  const { apiBase, path, version, heatMap, flatFiles, projectId, onOpenFile, onMeta, onRendered } =
-    props;
+  const {
+    apiBase,
+    path,
+    version,
+    heatMap,
+    flatFiles,
+    projectId,
+    onOpenFile,
+    onMeta,
+    onRendered,
+  } = props;
   const { data: doc, error } = useQuery({
     queryKey: ["render", apiBase, path, version || ""],
     queryFn: () =>
       getJSON<RenderDoc>(
-        apiBase + "render?path=" + encodeURIComponent(path) + (version ? "&sha=" + version : ""),
+        apiBase +
+          "render?path=" +
+          encodeURIComponent(path) +
+          (version ? "&sha=" + version : ""),
       ),
     // A blob that isn't there will not appear on a retry, and the retry's
     // delay is a blank pane the reader has no explanation for.
@@ -153,7 +282,8 @@ function MarkdownView(props: Parameters<typeof FileView>[0]) {
   // update, silently discarding post-commit DOM patches. Link navigation
   // is delegated on the container for the same reason.
   const html = useMemo(
-    () => (doc ? transformHTML(doc.html, path, apiBase, flatFiles, projectId) : ""),
+    () =>
+      doc ? transformHTML(doc.html, path, apiBase, flatFiles, projectId) : "",
     [doc, path, apiBase, flatFiles, projectId],
   );
 
@@ -248,7 +378,9 @@ function MarkdownView(props: Parameters<typeof FileView>[0]) {
   return (
     <>
       <SecretBadge findings={doc.findings} />
-      {doc.frontmatter?.length ? <FrontmatterPanel pairs={doc.frontmatter} /> : null}
+      {doc.frontmatter?.length ? (
+        <FrontmatterPanel pairs={doc.frontmatter} />
+      ) : null}
       <div
         dangerouslySetInnerHTML={{ __html: diagrams ?? html }}
         onClick={(e) => handleLinkClick(e, path, onOpenFile)}
@@ -308,7 +440,8 @@ function SecretBadge({ findings }: { findings?: SecretFinding[] }) {
       <div className="sb-text">
         <b>{secretsBadge(findings)}</b>
         <span>
-          Checked when this page loaded. Sharing the file asks you to confirm first.
+          Checked when this page loaded. Sharing the file asks you to confirm
+          first.
         </span>
       </div>
     </div>
@@ -318,13 +451,18 @@ function SecretBadge({ findings }: { findings?: SecretFinding[] }) {
 /* Delegated click handling for rendered-markdown links: wikilinks (already
    carrying a real in-app href, see transformHTML) and relative links route
    in-app on a plain click, everything else keeps its native behavior. */
-function handleLinkClick(e: React.MouseEvent, p: string, openFile: (path: string) => void) {
+function handleLinkClick(
+  e: React.MouseEvent,
+  p: string,
+  openFile: (path: string) => void,
+) {
   const a = (e.target as HTMLElement).closest("a");
   if (!a || !(e.currentTarget as HTMLElement).contains(a)) return;
   // Same rule as nav.ts:linkProps — a modified or non-primary click belongs
   // to the browser (new tab, new window, download), which is the entire
   // point of these anchors carrying real URLs.
-  if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+  if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0)
+    return;
   const href = a.getAttribute("href") || "";
   const dir = p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "";
   // data-wiki, not "any root-absolute href": an author's own [x](/somewhere)
@@ -351,7 +489,8 @@ function transformHTML(
   projectId?: string,
 ): string {
   const dir = p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "";
-  const fileURL = (path: string) => apiBase + "file?path=" + encodeURIComponent(path);
+  const fileURL = (path: string) =>
+    apiBase + "file?path=" + encodeURIComponent(path);
   const parsed = new DOMParser().parseFromString(html, "text/html");
   for (const img of parsed.querySelectorAll("img")) {
     const src = img.getAttribute("src") || "";
@@ -361,7 +500,8 @@ function transformHTML(
     // the server's sandboxInline walls off. Raster data: URLs stay: they are
     // inert and people do paste them into markdown.
     if (/^\s*data:image\/svg/i.test(src)) img.removeAttribute("src");
-    else if (!/^([a-z]+:|\/)/i.test(src)) img.setAttribute("src", fileURL(joinPath(dir, src)));
+    else if (!/^([a-z]+:|\/)/i.test(src))
+      img.setAttribute("src", fileURL(joinPath(dir, src)));
   }
   for (const a of parsed.querySelectorAll("a")) {
     const href = a.getAttribute("href") || "";
@@ -399,11 +539,27 @@ function transformHTML(
   return parsed.body.innerHTML;
 }
 
-function ImgView(props: { src: string; alt: string; version?: string; onRendered?: () => void }) {
+function ImgView(props: {
+  src: string;
+  alt: string;
+  version?: string;
+  onRendered?: () => void;
+}) {
   const [failed, setFailed] = useState(false);
-  if (failed) return <LoadError version={props.version} err={new Error("could not be loaded")} />;
+  if (failed)
+    return (
+      <LoadError
+        version={props.version}
+        err={new Error("could not be loaded")}
+      />
+    );
   return (
-    <img src={props.src} alt={props.alt} onLoad={props.onRendered} onError={() => setFailed(true)} />
+    <img
+      src={props.src}
+      alt={props.alt}
+      onLoad={props.onRendered}
+      onError={() => setFailed(true)}
+    />
   );
 }
 
@@ -413,12 +569,16 @@ function ImgView(props: { src: string; alt: string; version?: string; onRendered
 function LoadError({ version, err }: { version?: string; err: Error }) {
   return (
     <div className="empty">
-      {version ? "That version isn't available." : "Could not load file: " + err.message}
+      {version
+        ? "That version isn't available."
+        : "Could not load file: " + err.message}
     </div>
   );
 }
 
-function TextView(props: Parameters<typeof FileView>[0] & { fileURL: string; delim?: string }) {
+function TextView(
+  props: Parameters<typeof FileView>[0] & { fileURL: string; delim?: string },
+) {
   const { path, version, fileURL, delim, onRendered } = props;
   const { data, error } = useQuery({
     queryKey: ["text", fileURL],
@@ -435,7 +595,8 @@ function TextView(props: Parameters<typeof FileView>[0] & { fileURL: string; del
   // null = not usefully delimited (or no delimiter asked for): fall through
   // to the plain-text view below.
   const csv = useMemo(
-    () => (delim && data != null ? parseDelimited(data, delim, CSV_ROWS) : null),
+    () =>
+      delim && data != null ? parseDelimited(data, delim, CSV_ROWS) : null,
     [data, delim],
   );
   if (error) return <LoadError version={version} err={error as Error} />;
@@ -480,7 +641,8 @@ function CsvTable({ csv }: { csv: Csv }) {
       {csv.truncated > 0 && (
         <p className="csvnote">
           showing {csv.rows.length.toLocaleString()} of{" "}
-          {(csv.rows.length + csv.truncated).toLocaleString()} rows — Download for the rest
+          {(csv.rows.length + csv.truncated).toLocaleString()} rows — Download
+          for the rest
         </p>
       )}
     </>

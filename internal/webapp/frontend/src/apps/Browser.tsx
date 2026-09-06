@@ -23,7 +23,14 @@ import { toast } from "../toast";
 import { modalConfirm } from "../modal";
 import { onSearchRequest } from "../search";
 import { track } from "../analytics";
-import { AppShell, Icon, Page, Topbar, closeSidebarOnMobile, type PageWidth } from "../components/shell";
+import {
+  AppShell,
+  Icon,
+  Page,
+  Topbar,
+  closeSidebarOnMobile,
+  type PageWidth,
+} from "../components/shell";
 import { FileTree, ancestorsOf } from "../components/FileTree";
 import { Breadcrumbs } from "../components/Breadcrumbs";
 import { FolderListing } from "../components/FolderListing";
@@ -63,7 +70,10 @@ export default function Browser(props: {
   const routeKey = useLocationPath(); // scroll memo key, one slot per URL
   const qc = useQueryClient();
 
-  const { tree, flatFiles, dirIndex, loaded } = useTree(apiBase, !hub || !!project);
+  const { tree, flatFiles, dirIndex, loaded } = useTree(
+    apiBase,
+    !hub || !!project,
+  );
   // Live updates on top of the polls above: a teammate's change invalidates
   // what it touched as it happens. Same gate as the tree — in hub mode there
   // is nothing to stream until a project is chosen.
@@ -85,11 +95,16 @@ export default function Browser(props: {
   const version = !route.view ? route.version : undefined;
   // On scoped view routes (/dashboard/<p>, /history/<p>) the subject of the
   // page is the target — the tree highlights it, not a menu item.
-  const treePath = path || (route.view === "dashboard" || route.view === "history" ? route.viewTarget || "" : "");
+  const treePath =
+    path ||
+    (route.view === "dashboard" || route.view === "history"
+      ? route.viewTarget || ""
+      : "");
   const isDir = !!path && dirIndex.has(path);
   // A file only counts as one when the tree actually contains it — a
   // missing path gets the not-found view, not a broken file view.
-  const isFile = !!path && loaded && !isDir && flatFiles.some((f) => f.path === path);
+  const isFile =
+    !!path && loaded && !isDir && flatFiles.some((f) => f.path === path);
   const isMissing = !!path && loaded && !isDir && !isFile;
   const listingShowing = isDir && !route.view;
 
@@ -104,12 +119,17 @@ export default function Browser(props: {
   const { data: moved } = useQuery({
     queryKey: ["resolve", apiBase, path],
     queryFn: () =>
-      getJSON<{ to: string; kind: string }>(apiBase + "resolve?path=" + encodeURIComponent(path)),
+      getJSON<{ to: string; kind: string }>(
+        apiBase + "resolve?path=" + encodeURIComponent(path),
+      ),
     enabled: isMissing,
     retry: false, // a 404 here is the normal answer, not a flake
     staleTime: 60_000,
   });
-  const [movedFrom, setMovedFrom] = useState<{ from: string; to: string } | null>(null);
+  const [movedFrom, setMovedFrom] = useState<{
+    from: string;
+    to: string;
+  } | null>(null);
   useEffect(() => {
     if (!isMissing || !moved?.to) return;
     setMovedFrom({ from: path, to: moved.to });
@@ -125,7 +145,8 @@ export default function Browser(props: {
     if (!tree || !firstLoad.current) return;
     firstLoad.current = false;
     const rootDirs = (tree.children || []).filter((c) => c.dir);
-    if (rootDirs.length === 1) setExpanded((s) => new Set(s).add(rootDirs[0].path));
+    if (rootDirs.length === 1)
+      setExpanded((s) => new Set(s).add(rootDirs[0].path));
   }, [tree]);
   useEffect(() => {
     // Opening any path (tree click, palette, wikilink, deep link — or a
@@ -184,7 +205,12 @@ export default function Browser(props: {
     const c = contentRef.current;
     if (!c) return;
     memo.current.set(routeKey, c.scrollTop);
-    noteScroll(scrollGoal.current, routeKey, c.scrollTop, c.scrollHeight - c.clientHeight);
+    noteScroll(
+      scrollGoal.current,
+      routeKey,
+      c.scrollTop,
+      c.scrollHeight - c.clientHeight,
+    );
   }, [routeKey]);
 
   /* ---- navigation ---- */
@@ -204,7 +230,9 @@ export default function Browser(props: {
 
   /* ---- topbar state + actions ---- */
   const [meta, setMeta] = useState<ReactNode>("");
-  const [share, setShare] = useState<{ url: string; copied: boolean } | null>(null);
+  const [share, setShare] = useState<{ url: string; copied: boolean } | null>(
+    null,
+  );
   const [moreOpen, setMoreOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   useEffect(() => onSearchRequest(() => setPaletteOpen(true)), []);
@@ -215,7 +243,21 @@ export default function Browser(props: {
   // button rather than a button that 403s. On desktop project.perm carries
   // the hub's answer for this account (HubApp resolves it from the proxied
   // /permissions), so this same gate is accurate there too.
-  const canShare = !panel && hub && !!project && isFile && atLeast(project.perm, "write");
+  const canShare =
+    !panel && hub && !!project && isFile && atLeast(project.perm, "write");
+  // Editing needs write, a real file, and the CURRENT version: editing a
+  // pinned ?v= would journal a new put built on an old body, silently
+  // discarding whatever happened since. Read-only members get no button
+  // rather than a button that 403s — the same rule Share follows.
+  const canEdit =
+    !panel &&
+    isFile &&
+    !version &&
+    (!hub || (!!project && atLeast(project.perm, "write")));
+  const [editing, setEditing] = useState(false);
+  // Leaving the file (or pinning a version) leaves edit mode with it, so the
+  // next file never opens straight into an editor the reader did not ask for.
+  useEffect(() => setEditing(false), [path, version]);
   // The project's live public links, filtered to the open file. One query
   // for the whole project (Settings reads the same cache entry), so opening
   // a file costs no extra request.
@@ -224,17 +266,25 @@ export default function Browser(props: {
     () => void qc.invalidateQueries({ queryKey: ["shares", project?.id] }),
     [qc, project?.id],
   );
-  const fileShares = isFile ? (shares || []).filter((s) => s.path === path) : [];
+  const fileShares = isFile
+    ? (shares || []).filter((s) => s.path === path)
+    : [];
   // Desktop only: each mount's hub base URL, for "Copy web link". Hub and
   // desktop use identical route paths (projects are keyed by hub id), so the
   // teammate-shareable URL is just the hub origin + the current pathname.
   const { data: desktopStatus } = useQuery({
     queryKey: ["desktop-status"],
-    queryFn: () => getJSON<{ mounts: { project: string; server: string }[] }>("/api/desktop/status"),
+    queryFn: () =>
+      getJSON<{ mounts: { project: string; server: string }[] }>(
+        "/api/desktop/status",
+      ),
     enabled: !!config.desktop,
     staleTime: 60_000,
   });
-  const webBase = config.desktop && project ? desktopStatus?.mounts.find((m) => m.project === project.id)?.server : undefined;
+  const webBase =
+    config.desktop && project
+      ? desktopStatus?.mounts.find((m) => m.project === project.id)?.server
+      : undefined;
   const copyWebLink = useCallback(async () => {
     if (!webBase) return;
     const url = webBase + window.location.pathname;
@@ -249,13 +299,22 @@ export default function Browser(props: {
   // extension or an unknown one — the sniffed-as-text case the viewer
   // already renders as text — still offers Copy. Images, PDFs and the HTML
   // iframe are the three things a clipboard cannot usefully hold.
-  const canCopy = canDownload && !IMG_EXT.test(path) && !PDF_EXT.test(path) && !HTML_EXT.test(path);
+  const canCopy =
+    canDownload &&
+    !IMG_EXT.test(path) &&
+    !PDF_EXT.test(path) &&
+    !HTML_EXT.test(path);
   const canMore = !panel && (isFile || (hub && !!project && isDir));
   // Downloading while a version is open gives you THAT version — the ⋯ menu
   // offering the current bytes under a page framed as historical was half of
   // what made old versions unreachable.
   const downloadURL = version
-    ? apiBase + "blob?sha=" + version + "&name=" + encodeURIComponent(path) + "&download=1"
+    ? apiBase +
+      "blob?sha=" +
+      version +
+      "&name=" +
+      encodeURIComponent(path) +
+      "&download=1"
     : apiBase + "download?path=" + encodeURIComponent(path);
 
   // Copy is Download's counterpart: the same bytes, to the clipboard instead
@@ -269,14 +328,21 @@ export default function Browser(props: {
       const data = await fetchBlobText(fileURLFor(apiBase, path, version));
       if (data.kind !== "text")
         return toast(
-          data.kind === "too-large" ? "Too large to copy — use Download." : "That file isn't text — use Download.",
+          data.kind === "too-large"
+            ? "Too large to copy — use Download."
+            : "That file isn't text — use Download.",
           true,
         );
       // copyText returns false instead of throwing (util.ts), so branching on
       // it is the whole difference between a failure toast and a success
       // message over an empty clipboard on every http:// self-host.
       const ok = await copyText(data.text);
-      toast(ok ? "Copied " + path : "Copy failed — the clipboard needs a secure (https) origin.", !ok);
+      toast(
+        ok
+          ? "Copied " + path
+          : "Copy failed — the clipboard needs a secure (https) origin.",
+        !ok,
+      );
     } catch (err) {
       toast("Copy failed: " + (err as Error).message, true);
     }
@@ -296,8 +362,17 @@ export default function Browser(props: {
       // Read the structured body — this is a raw fetch, so it never passes
       // through errorFor() in api/http.ts, which would flatten it to a toast.
       if (r.status === 409) {
-        const { findings } = (await r.json()) as { findings?: { rule: string; line: number }[] };
-        if (!(await modalConfirm("This file may contain credentials", secretsMessage(findings), "Share anyway", true)))
+        const { findings } = (await r.json()) as {
+          findings?: { rule: string; line: number }[];
+        };
+        if (
+          !(await modalConfirm(
+            "This file may contain credentials",
+            secretsMessage(findings),
+            "Share anyway",
+            true,
+          ))
+        )
           return; // Cancel mints nothing, and fires no share_created
         r = await post(true);
       }
@@ -348,7 +423,11 @@ export default function Browser(props: {
         qc.invalidateQueries({ queryKey: ["tree", apiBase] });
         qc.invalidateQueries({ queryKey: ["render", apiBase, p] });
         qc.invalidateQueries({ queryKey: ["text"] });
-        toast("Restored " + p + " — it syncs to every device like any other change.");
+        toast(
+          "Restored " +
+            p +
+            " — it syncs to every device like any other change.",
+        );
       } catch (err) {
         toast("Restore failed: " + (err as Error).message, true);
       } finally {
@@ -381,7 +460,9 @@ export default function Browser(props: {
         qc.invalidateQueries({ queryKey: ["tree", apiBase] });
         qc.invalidateQueries({ queryKey: ["render", apiBase, p] });
         qc.invalidateQueries({ queryKey: ["text"] });
-        toast("Removed " + p + " — it syncs to every device like any other change.");
+        toast(
+          "Removed " + p + " — it syncs to every device like any other change.",
+        );
       } catch (err) {
         toast("Remove failed: " + (err as Error).message, true);
       } finally {
@@ -417,10 +498,15 @@ export default function Browser(props: {
         : { note: run.note, device: run.entries[0]?.device?.id };
       setUndoingRun(id);
       try {
-        const plan = await postJSON<UndoPlan>(apiBase + "undo-run", { ...sel, preview: true });
+        const plan = await postJSON<UndoPlan>(apiBase + "undo-run", {
+          ...sel,
+          preview: true,
+        });
         const after = new Set(plan.changed_after);
         if (!plan.undone.length) {
-          toast("Nothing to undo — every file this run touched already holds its pre-run content.");
+          toast(
+            "Nothing to undo — every file this run touched already holds its pre-run content.",
+          );
           return;
         }
         const ok = await modalConfirm(
@@ -434,23 +520,29 @@ export default function Browser(props: {
               {plan.undone.map((a) => (
                 <div className="undo-row" key={a.path}>
                   <span className="undo-path">{a.path}</span>
-                  {after.has(a.path) && <span className="undo-after">changed after this run</span>}
+                  {after.has(a.path) && (
+                    <span className="undo-after">changed after this run</span>
+                  )}
                   <span className="undo-what">
-                    {a.action === "remove" ? "remove (the run created it)" : "restore to pre-run version"}
+                    {a.action === "remove"
+                      ? "remove (the run created it)"
+                      : "restore to pre-run version"}
                   </span>
                 </div>
               ))}
             </div>
             {after.size > 0 && (
               <div className="undo-warn">
-                {after.size} file{after.size === 1 ? " was" : "s were"} changed by someone else after
-                this run. Undoing overwrites {after.size === 1 ? "that change" : "those changes"} too.
+                {after.size} file{after.size === 1 ? " was" : "s were"} changed
+                by someone else after this run. Undoing overwrites{" "}
+                {after.size === 1 ? "that change" : "those changes"} too.
               </div>
             )}
             {plan.skipped.length > 0 && (
               <div>
-                {plan.skipped.length} already hold{plan.skipped.length === 1 ? "s" : ""} its pre-run
-                content and will be left alone.
+                {plan.skipped.length} already hold
+                {plan.skipped.length === 1 ? "s" : ""} its pre-run content and
+                will be left alone.
               </div>
             )}
             {/* Never silently drop a category: a path the hub's own upload
@@ -458,8 +550,9 @@ export default function Browser(props: {
                 listed only what it WILL do would read as "all of it". */}
             {plan.refused.length > 0 && (
               <div>
-                {plan.refused.length} path{plan.refused.length === 1 ? "" : "s"} can't be written by
-                the hub and will be left alone: {plan.refused.join(", ")}.
+                {plan.refused.length} path{plan.refused.length === 1 ? "" : "s"}{" "}
+                can't be written by the hub and will be left alone:{" "}
+                {plan.refused.join(", ")}.
               </div>
             )}
           </>,
@@ -472,8 +565,12 @@ export default function Browser(props: {
         qc.invalidateQueries({ queryKey: ["tree", apiBase] });
         qc.invalidateQueries({ queryKey: ["render", apiBase] });
         qc.invalidateQueries({ queryKey: ["text"] });
-        const skipped = done.skipped.length ? `, skipped ${done.skipped.length} (already current)` : "";
-        toast(`Undid ${done.undone.length} file${done.undone.length === 1 ? "" : "s"}${skipped}.`);
+        const skipped = done.skipped.length
+          ? `, skipped ${done.skipped.length} (already current)`
+          : "";
+        toast(
+          `Undid ${done.undone.length} file${done.undone.length === 1 ? "" : "s"}${skipped}.`,
+        );
       } catch (err) {
         toast("Undo failed: " + (err as Error).message, true);
       } finally {
@@ -530,24 +627,53 @@ export default function Browser(props: {
     if (hub && project && path) {
       if (isFile) add("share", "Share: " + path, "action", shareNow);
       add("hist", "History: " + path, "action", historyNow);
-      if (isFile) add("download", "Download: " + path, "action", () => downloadRef.current?.click());
+      if (isFile)
+        add("download", "Download: " + path, "action", () =>
+          downloadRef.current?.click(),
+        );
       if (canCopy) add("copy", "Copy: " + path, "action", copyNow);
     }
-    if (hub && project) add("hist", "History: whole project", "action", () => openHistory(""));
+    if (hub && project)
+      add("hist", "History: whole project", "action", () => openHistory(""));
     if (hub) {
       for (const p of props.projects || []) {
         if (!project || p.id !== project.id) {
-          add("folder", "Switch to project: " + p.name, "project", () => navigate("/" + p.id));
+          add("folder", "Switch to project: " + p.name, "project", () =>
+            navigate("/" + p.id),
+          );
         }
       }
     }
     if (config.auth?.enabled) {
-      add("power", "Sign out", "action", () => (window.location.href = "/auth/logout"));
+      add(
+        "power",
+        "Sign out",
+        "action",
+        () => (window.location.href = "/auth/logout"),
+      );
     }
-    for (const d of dirIndex.keys()) add("folder", d, "folder", () => openPath(d));
-    for (const f of flatFiles) add("doc", f.path, "file", () => openPath(f.path));
+    for (const d of dirIndex.keys())
+      add("folder", d, "folder", () => openPath(d));
+    for (const f of flatFiles)
+      add("doc", f.path, "file", () => openPath(f.path));
     return items;
-  }, [hub, project, path, isFile, canCopy, config.auth?.enabled, dirIndex, flatFiles, props.projects, props.onClosePanel, shareNow, copyNow, historyNow, openHistory, openPath]);
+  }, [
+    hub,
+    project,
+    path,
+    isFile,
+    canCopy,
+    config.auth?.enabled,
+    dirIndex,
+    flatFiles,
+    props.projects,
+    props.onClosePanel,
+    shareNow,
+    copyNow,
+    historyNow,
+    openHistory,
+    openPath,
+  ]);
 
   /* ---- "⋯ More" menu (secondary actions on narrow screens) ---- */
   useEffect(() => {
@@ -599,7 +725,11 @@ export default function Browser(props: {
         undoRun={canRestore ? { onUndoRun, busy: undoingRun } : undefined}
         filters={route.filters}
         /* push, not replace: a filter is a navigation, and Back undoes it */
-        onFilters={(f) => navigate(urlForView("history", project?.id, route.viewTarget || "", f))}
+        onFilters={(f) =>
+          navigate(
+            urlForView("history", project?.id, route.viewTarget || "", f),
+          )
+        }
       />
     );
   } else if (path) {
@@ -615,30 +745,33 @@ export default function Browser(props: {
             <code>{path}</code> isn't in this project right now.
           </p>
           <p className="nf-sub">
-            If it was just created, it may still be uploading or syncing
-            from a teammate's device — this page checks again automatically
-            every few seconds, so refresh or come back in a moment.
+            If it was just created, it may still be uploading or syncing from a
+            teammate's device — this page checks again automatically every few
+            seconds, so refresh or come back in a moment.
           </p>
           <button
             className="pbtn"
-            onClick={() => qc.invalidateQueries({ queryKey: ["tree", apiBase] })}
+            onClick={() =>
+              qc.invalidateQueries({ queryKey: ["tree", apiBase] })
+            }
           >
             Check again
           </button>
         </div>
       );
     } else if (isDir) {
-      view = ( // structured view — default app column; read is for rendered files only
-        <FolderListing
-          node={dirIndex.get(path)!}
-          heatMap={heatMap}
-          hub={hub && !!project}
-          apiBase={apiBase}
-          onOpen={openPath}
-          onFullHistory={openHistory}
-          onRendered={onRendered}
-        />
-      );
+      view = // structured view — default app column; read is for rendered files only
+        (
+          <FolderListing
+            node={dirIndex.get(path)!}
+            heatMap={heatMap}
+            hub={hub && !!project}
+            apiBase={apiBase}
+            onOpen={openPath}
+            onFullHistory={openHistory}
+            onRendered={onRendered}
+          />
+        );
     } else {
       // A PDF page is unreadable squeezed into the 768px reading column.
       pageWidth = HTML_EXT.test(path) || PDF_EXT.test(path) ? "wide" : "read";
@@ -674,6 +807,7 @@ export default function Browser(props: {
             onOpenFile={openPath}
             onMeta={setMeta}
             onRendered={onRendered}
+            editing={editing && canEdit}
           />
         </>
       );
@@ -683,7 +817,10 @@ export default function Browser(props: {
     // dashboard below it.
     view = (
       <>
-        <ConnectGuide project={project!} existing={route.connect === "existing"} />
+        <ConnectGuide
+          project={project!}
+          existing={route.connect === "existing"}
+        />
         <div className="home-insights">
           {/* No install CTA here: ConnectGuide directly above IS the set-up-a-
               device guide, and a second button six inches under the first
@@ -744,10 +881,20 @@ export default function Browser(props: {
       nav={
         config.desktop ? (
           <span id="nav-btns">
-            <button className="nav-btn" title="Back (⌘[)" aria-label="Back" onClick={() => history.back()}>
+            <button
+              className="nav-btn"
+              title="Back (⌘[)"
+              aria-label="Back"
+              onClick={() => history.back()}
+            >
               <Icon name="chevl" />
             </button>
-            <button className="nav-btn" title="Forward (⌘])" aria-label="Forward" onClick={() => history.forward()}>
+            <button
+              className="nav-btn"
+              title="Forward (⌘])"
+              aria-label="Forward"
+              onClick={() => history.forward()}
+            >
               <Icon name="chev" />
             </button>
           </span>
@@ -758,8 +905,25 @@ export default function Browser(props: {
       actions={
         <>
           <PresenceBar people={people} path={path} />
+          {canEdit && (
+            <Button
+              id="edit-btn"
+              variant="toolbar"
+              title={editing ? "Stop editing" : "Edit this file"}
+              onClick={() => setEditing((e) => !e)}
+            >
+              {editing ? "Done" : "Edit"}
+            </Button>
+          )}
           {canShare && (
-            <Button id="share-btn" variant="toolbar" className="icon-only" title="Share" aria-label="Share" onClick={shareNow}>
+            <Button
+              id="share-btn"
+              variant="toolbar"
+              className="icon-only"
+              title="Share"
+              aria-label="Share"
+              onClick={shareNow}
+            >
               <Icon name="share" />
             </Button>
           )}
@@ -769,7 +933,13 @@ export default function Browser(props: {
             </Button>
           )}
           {canDownload && (
-            <a id="download" hidden download href={downloadURL} ref={downloadRef}>
+            <a
+              id="download"
+              hidden
+              download
+              href={downloadURL}
+              ref={downloadRef}
+            >
               Download
             </a>
           )}
@@ -796,7 +966,10 @@ export default function Browser(props: {
                 </button>
               )}
               {canDownload && (
-                <button className="more-item" onClick={() => downloadRef.current?.click()}>
+                <button
+                  className="more-item"
+                  onClick={() => downloadRef.current?.click()}
+                >
                   Download
                 </button>
               )}
@@ -872,7 +1045,11 @@ export default function Browser(props: {
           }}
         />
       )}
-      <Palette open={paletteOpen} onClose={() => setPaletteOpen(false)} candidates={paletteCandidates} />
+      <Palette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        candidates={paletteCandidates}
+      />
     </>
   );
 }

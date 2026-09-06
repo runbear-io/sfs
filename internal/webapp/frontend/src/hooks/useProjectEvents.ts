@@ -58,6 +58,14 @@ export function useProjectEvents(
         onPresenceRef.current?.(ev.people ?? []);
         return;
       }
+      // An open editor must know a peer wrote its file, but must NOT be
+      // re-seeded from the server: that would reset the buffer under the
+      // typist's cursor. It listens for this and shows a banner instead.
+      // A DOM event rather than a prop chain — the editor is several levels
+      // down and this is the only thing it needs from up here.
+      window.dispatchEvent(
+        new CustomEvent("bdrive:changed", { detail: ev.paths ?? [] }),
+      );
       invalidateProject();
       // "resync" means frames were dropped and what was missed is unknowable,
       // and "more" means the frame was truncated. Either way the only honest

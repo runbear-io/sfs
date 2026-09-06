@@ -41,7 +41,8 @@ function trackWrite(method: string, url: string) {
 function toLogin(): never {
   // Auth required: sign in, then come back to the current route.
   location.href =
-    "/auth/login?next=" + encodeURIComponent(location.pathname + location.search);
+    "/auth/login?next=" +
+    encodeURIComponent(location.pathname + location.search);
   throw new Error("signing in…");
 }
 
@@ -54,13 +55,16 @@ function errorFor(status: number, body: string): string {
   const raw = body.trim();
   switch (status) {
     case 403:
-      if (raw.includes("seat")) return "This plan is out of seats. Upgrade to add more people.";
+      if (raw.includes("seat"))
+        return "This plan is out of seats. Upgrade to add more people.";
       if (raw.includes("owner")) return "Only owners can do that.";
       return "You don't have access to that.";
     case 409:
       // The 409 body carries the URL that owns the thing, which is the whole
       // point of the message — keep it, but capitalize like the rest.
-      return raw ? raw[0].toUpperCase() + raw.slice(1) : "That is managed outside this hub.";
+      return raw
+        ? raw[0].toUpperCase() + raw.slice(1)
+        : "That is managed outside this hub.";
     case 404:
       return "That is gone — it may have been removed already.";
     case 413:
@@ -69,7 +73,9 @@ function errorFor(status: number, body: string): string {
       return "Too many requests. Give it a moment.";
     default:
       if (status >= 500) return "The server had a problem. Try again.";
-      return raw ? raw[0].toUpperCase() + raw.slice(1) : "Something went wrong.";
+      return raw
+        ? raw[0].toUpperCase() + raw.slice(1)
+        : "Something went wrong.";
   }
 }
 
@@ -96,7 +102,11 @@ export async function getResponse(url: string): Promise<Response> {
 }
 
 /* fetch wrapper for methods without a body-returning helper */
-export async function api<T = unknown>(method: string, url: string, body?: unknown): Promise<T> {
+export async function api<T = unknown>(
+  method: string,
+  url: string,
+  body?: unknown,
+): Promise<T> {
   const opt: RequestInit = { method };
   if (body !== undefined) {
     opt.headers = { "Content-Type": "application/json" };
@@ -118,4 +128,20 @@ export async function postJSON<T>(url: string, body?: unknown): Promise<T> {
   if (!r.ok) await fail(r);
   trackWrite("POST", url);
   return r.json();
+}
+
+/* putText writes a file's whole contents. It is the browser editor's save
+   (Editor.tsx), and rides the same upload/content route the CLI and the
+   desktop app already use — which is why the desktop gets editing for free:
+   its sidecar proxies that route to the hub, so the write is journaled by the
+   hub under this account exactly like any other. */
+export async function putText(url: string, text: string): Promise<void> {
+  const r = await fetch(url, {
+    method: "PUT",
+    headers: { "Content-Type": "text/plain; charset=utf-8" },
+    body: text,
+  });
+  if (r.status === 401) toLogin();
+  if (!r.ok) await fail(r);
+  trackWrite("PUT", url);
 }
