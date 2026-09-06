@@ -1,0 +1,35 @@
+# BearDrive hub — TrueNAS Apps metadata (DRAFT, see ../README.md).
+# PR target: truenas/apps (community train). BLOCKED on a published image and a
+# real TrueNAS SCALE install test. The full ix-dev chart scaffold
+# (questions.yaml + templates/) must be generated + validated with TrueNAS
+# tooling on a real SCALE instance; questions.yaml and templates/ here are the
+# core, not the complete lint-passing scaffold.
+name: beardrive
+title: BearDrive
+train: community
+categories:
+  - cloud
+  - productivity
+app_version: "0.1.0"
+version: 0.0.1
+home: https://beardrive.ai
+sources:
+  - https://github.com/runbear-io/beardrive
+  - https://docs.beardrive.ai
+description: >-
+  Self-hosted BearDrive hub — Google Drive for AI agents. Sync any folder
+  across devices, teammates, and AI agents with per-change provenance and read
+  analytics. Local filesystem storage + sqlite; clients connect with
+  `bdrive login`. Open source (AGPL-3.0).
+maintainers:
+  - name: Runbear
+    url: https://beardrive.ai
+    email: hello@runbear.io
+run_as_context:
+  - description: BearDrive runs as the distroless nonroot user.
+    gid: 65532
+    group_name: nonroot
+    uid: 65532
+    user_name: nonroot
+capabilities: []
+host_mounts: []

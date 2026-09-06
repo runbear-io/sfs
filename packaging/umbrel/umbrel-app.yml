@@ -1,0 +1,30 @@
+# BearDrive hub — Umbrel app metadata (DRAFT). Final id/gallery/port assigned
+# at PR time per getumbrel/umbrel-apps conventions.
+manifestVersion: 1
+id: beardrive
+category: files
+name: BearDrive
+version: "0.1.0"
+tagline: Google Drive for AI agents — self-hosted sync hub
+description: >-
+  BearDrive mounts any folder as a synced volume shared across your devices,
+  teammates, and AI agents. Every change is attributed to the human, agent, and
+  device that made it; any synced file can become a public page; and the
+  Dashboard shows what your agents actually read. This app runs your own
+  self-hosted hub (local filesystem storage + sqlite) — clients connect with
+  `bdrive login http://<your-umbrel>:<port>`. Open source (AGPL-3.0).
+developer: Runbear
+website: https://beardrive.ai
+dependencies: []
+repo: https://github.com/runbear-io/beardrive
+support: https://github.com/runbear-io/beardrive/issues
+port: 4173
+gallery:
+  - 1.jpg
+  - 2.jpg
+  - 3.jpg
+path: ""
+defaultUsername: ""
+defaultPassword: ""
+submitter: Runbear
+submission: https://github.com/getumbrel/umbrel-apps/pull/REPLACE_AT_PR_TIME

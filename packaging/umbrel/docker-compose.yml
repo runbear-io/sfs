@@ -1,0 +1,61 @@
+# BearDrive hub — Umbrel App Store manifest (DRAFT, see ../README.md).
+# PR target: getumbrel/umbrel-apps.  BLOCKED on a published multi-arch image
+# and a real Umbrel-instance install test.
+version: "3.7"
+
+services:
+  # Umbrel's reverse proxy that fronts the app's web UI.
+  app_proxy:
+    environment:
+      APP_HOST: beardrive_hub_1
+      APP_PORT: 8080
+
+  # Distroless has no shell, so a tiny init container renders the hub config
+  # (the admin email lives only in the config file — there is no --admins flag)
+  # and fixes ownership for the nonroot (65532) hub user. Runs once, then exits.
+  config-init:
+    image: busybox:1.36
+    restart: on-failure
+    volumes:
+      - ${APP_DATA_DIR}/data:/data
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        mkdir -p /data/storage /data/home
+        if [ ! -f /data/config.json ]; then
+          cat > /data/config.json <<EOF
+        {
+          "auth": { "admins": ["${ADMIN_EMAIL:-admin@example.com}"], "users_db": "/data/auth.json" },
+          "reads": { "enabled": true },
+          "database": { "driver": "sqlite", "dsn": "/data/hub.db" }
+        }
+        EOF
+        fi
+        chown -R 65532:65532 /data
+
+  hub:
+    # PLACEHOLDER — image is not published yet (see ../README.md, blocker 1).
+    image: ghcr.io/runbear-io/beardrive:0.1.0
+    restart: on-failure
+    depends_on:
+      config-init:
+        condition: service_completed_successfully
+    user: "65532:65532"
+    environment:
+      # Persist device identity / projects.json (image default /tmp/bdrive is ephemeral).
+      BDRIVE_HOME: /data/home
+    volumes:
+      - ${APP_DATA_DIR}/data:/data
+    command:
+      - serve
+      - --remote
+      - file:///data/storage
+      - --addr
+      - :8080
+      - --upload
+      - -c
+      - /data/config.json
+    ports:
+      - "8080"

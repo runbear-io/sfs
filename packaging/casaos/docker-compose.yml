@@ -1,0 +1,91 @@
+# BearDrive hub — CasaOS App Store manifest (DRAFT, see ../README.md).
+# PR target: IceWhaleTech/CasaOS-AppStore. Guide requires it be "well tested on
+# your own CasaOS first" — BLOCKED on a published image + a real CasaOS test.
+name: beardrive
+services:
+  config-init:
+    # Distroless has no shell; render config + fix ownership, then exit.
+    image: busybox:1.36
+    restart: on-failure
+    volumes:
+      - type: bind
+        source: /DATA/AppData/beardrive
+        target: /data
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        mkdir -p /data/storage /data/home
+        if [ ! -f /data/config.json ]; then
+          cat > /data/config.json <<EOF
+        {
+          "auth": { "admins": ["${ADMIN_EMAIL:-admin@example.com}"], "users_db": "/data/auth.json" },
+          "reads": { "enabled": true },
+          "database": { "driver": "sqlite", "dsn": "/data/hub.db" }
+        }
+        EOF
+        fi
+        chown -R 65532:65532 /data
+
+  beardrive:
+    # PLACEHOLDER — image not published yet (see ../README.md, blocker 1).
+    image: ghcr.io/runbear-io/beardrive:0.1.0
+    container_name: beardrive
+    restart: unless-stopped
+    user: "65532:65532"
+    depends_on:
+      config-init:
+        condition: service_completed_successfully
+    environment:
+      BDRIVE_HOME: /data/home
+    ports:
+      - "4173:8080"
+    volumes:
+      - type: bind
+        source: /DATA/AppData/beardrive
+        target: /data
+    command:
+      - serve
+      - --remote
+      - file:///data/storage
+      - --addr
+      - :8080
+      - --upload
+      - -c
+      - /data/config.json
+
+    # CasaOS App Store metadata extension.
+    x-casaos:
+      architectures:
+        - amd64
+        - arm64
+      main: beardrive
+      author: Runbear
+      developer: Runbear
+      category: Cloud
+      icon: https://raw.githubusercontent.com/runbear-io/beardrive/main/docs/assets/icon.png
+      title:
+        en_us: BearDrive
+      tagline:
+        en_us: Google Drive for AI agents — self-hosted sync hub
+      description:
+        en_us: >-
+          Self-hosted BearDrive hub: sync any folder across your devices,
+          teammates, and AI agents with per-change provenance and read
+          analytics. Local filesystem storage + sqlite; clients connect with
+          `bdrive login`. Open source (AGPL-3.0).
+      port_map: "4173"
+      scheme: http
+      index: /
+      webui_port: 4173
+      envs:
+        - container: ADMIN_EMAIL
+          description:
+            en_us: >-
+              Email that becomes the hub admin. On a brand-new hub this address
+              can self-sign-up first; the hub is invite-only afterward.
+      volumes:
+        - container: /data
+          description:
+            en_us: BearDrive data — file storage, sqlite metadata, and config.

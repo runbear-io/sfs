@@ -1,0 +1,55 @@
+# BearDrive hub — TrueNAS compose template (DRAFT, see ../../README.md).
+# Shown resolved (concrete values) for readability; in the real ix-dev chart
+# these become {{ .Values... }} template expressions bound to questions.yaml.
+# BLOCKED on a published image + a real TrueNAS SCALE test.
+services:
+  config-init:
+    # Distroless has no shell; render config + fix ownership, then exit.
+    image: busybox:1.36
+    restart: on-failure
+    volumes:
+      - type: bind
+        source: /mnt/.ix-apps/app_mounts/beardrive/data   # ix_volume in the real chart
+        target: /data
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        mkdir -p /data/storage /data/home
+        if [ ! -f /data/config.json ]; then
+          cat > /data/config.json <<EOF
+        {
+          "auth": { "admins": ["admin@example.com"], "users_db": "/data/auth.json" },
+          "reads": { "enabled": true },
+          "database": { "driver": "sqlite", "dsn": "/data/hub.db" }
+        }
+        EOF
+        fi
+        chown -R 65532:65532 /data
+
+  beardrive:
+    # PLACEHOLDER — image not published yet (see ../../README.md, blocker 1).
+    image: ghcr.io/runbear-io/beardrive:0.1.0
+    restart: unless-stopped
+    user: "65532:65532"
+    depends_on:
+      config-init:
+        condition: service_completed_successfully
+    environment:
+      BDRIVE_HOME: /data/home
+    ports:
+      - "4173:8080"
+    volumes:
+      - type: bind
+        source: /mnt/.ix-apps/app_mounts/beardrive/data
+        target: /data
+    command:
+      - serve
+      - --remote
+      - file:///data/storage
+      - --addr
+      - :8080
+      - --upload
+      - -c
+      - /data/config.json
